@@ -1,0 +1,38 @@
+{
+    "name": "mobile-automator-mcp",
+    "version": "0.1.0",
+    "description": "MCP server that orchestrates Maestro UI automation and Proxyman network validation to generate SDUI-aware mobile test scripts.",
+    "type": "module",
+    "main": "dist/index.js",
+    "bin": {
+        "mobile-automator": "./bin/mobile-automator"
+    },
+    "engines": {
+        "node": ">=20"
+    },
+    "scripts": {
+        "build": "tsc",
+        "dev": "tsx watch src/index.ts",
+        "start": "node dist/index.js",
+        "lint": "eslint src --ext .ts",
+        "format": "prettier --write src/**/*.ts",
+        "test": "vitest run",
+        "test:watch": "vitest"
+    },
+    "dependencies": {
+        "@modelcontextprotocol/sdk": "^1.12.0",
+        "sql.js": "^1.12.0",
+        "zod": "^3.22.4"
+    },
+    "devDependencies": {
+        "@types/node": "^20.11.5",
+        "@types/sql.js": "^1.4.9",
+        "@typescript-eslint/eslint-plugin": "^6.19.1",
+        "@typescript-eslint/parser": "^6.19.1",
+        "eslint": "^8.56.0",
+        "prettier": "^3.2.4",
+        "tsx": "^4.7.0",
+        "typescript": "^5.3.3",
+        "vitest": "^1.2.1"
+    }
+}
