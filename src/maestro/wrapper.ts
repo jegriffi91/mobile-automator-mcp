@@ -21,8 +21,45 @@ const execFileAsync = promisify(execFile);
 export class MaestroWrapper {
     private maestroBin: string;
 
-    constructor(maestroBin = 'maestro') {
-        this.maestroBin = maestroBin;
+    constructor(maestroBin?: string) {
+        if (maestroBin) {
+            this.maestroBin = maestroBin;
+        } else {
+            // Resolve maestro from common install locations
+            const home = os.homedir();
+            const candidates = [
+                path.join(home, '.maestro', 'bin', 'maestro'),
+                '/usr/local/bin/maestro',
+                '/opt/homebrew/bin/maestro',
+                'maestro', // fallback to PATH
+            ];
+            this.maestroBin = candidates[candidates.length - 1]; // default fallback
+            for (const candidate of candidates) {
+                try {
+                    require('fs').accessSync(candidate, require('fs').constants.X_OK);
+                    this.maestroBin = candidate;
+                    break;
+                } catch { /* continue */ }
+            }
+        }
+    }
+
+    /**
+     * Build an environment map that ensures Java and Maestro are on the PATH.
+     */
+    private getExecEnv(): Record<string, string> {
+        const home = os.homedir();
+        const extraPaths = [
+            '/opt/homebrew/opt/openjdk/bin',
+            path.join(home, '.maestro', 'bin'),
+            '/opt/homebrew/bin',
+        ];
+        const currentPath = process.env['PATH'] || '/usr/bin:/bin';
+        return {
+            ...process.env as Record<string, string>,
+            PATH: [...extraPaths, currentPath].join(':'),
+            JAVA_HOME: process.env['JAVA_HOME'] || '/opt/homebrew/opt/openjdk',
+        };
     }
 
     /**
@@ -67,7 +104,7 @@ export class MaestroWrapper {
      */
     async dumpHierarchy(): Promise<string> {
         try {
-            const { stdout } = await execFileAsync(this.maestroBin, ['hierarchy']);
+            const { stdout } = await execFileAsync(this.maestroBin, ['hierarchy'], { env: this.getExecEnv() });
             return stdout;
         } catch (error: any) {
             console.error('[MaestroWrapper] dumpHierarchy failed:', error);
@@ -130,7 +167,7 @@ export class MaestroWrapper {
             await fs.writeFile(tmpFile, yamlContent, 'utf-8');
 
             // Execute the temporary script
-            await execFileAsync(this.maestroBin, ['test', tmpFile]);
+            await execFileAsync(this.maestroBin, ['test', tmpFile], { env: this.getExecEnv() });
 
             // Cleanup
             await fs.unlink(tmpFile).catch(() => { });
