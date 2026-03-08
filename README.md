@@ -1,23 +1,46 @@
-# AI Mobile Test Automation MCP Server
+# Mobile Automator MCP Server
 
-An MCP (Model Context Protocol) server that empowers LLMs to dynamically generate stateful, SDUI-aware mobile test scripts. It orchestrates [Maestro](https://maestro.mobile.dev/) for UI automation and [Proxyman](https://proxyman.io/) for network validation.
+An [MCP](https://modelcontextprotocol.io/) server that gives AI agents the power to **record**, **replay**, and **mock** mobile app interactions — combining [Maestro](https://maestro.mobile.dev/) UI automation with [Proxyman](https://proxyman.io/) network capture to generate complete, self-contained test scripts.
 
-## Features
+## Architecture
 
-- **UI Orchestration via Maestro**: Navigate mobile apps dynamically (iOS focus, Android supported). The server dumps the UI hierarchy, translates an LLM's intended action into a single-step Maestro YAML, and executes it.
-- **Network Interception via Proxyman**: Captures live HTTP/HTTPS traffic during the session (using `proxyman-cli` HAR export). Filtering ensures only relevant API calls are tracked.
-- **SDUI Validation**: Validates dynamic Server-Driven UI network payloads against expected shapes, with deep-compare reporting for arrays, nested objects, and missing keys.
-- **Synthesis & YAML Generation**: Correlates recorded UI interactions with subsequent network events using a sliding time window. It synthesizes a complete, declarative Maestro YAML test script complete with `evalScript` network assertions for execution in CI.
+![Recording synthesis flow](docs/Screenshot%202026-03-08%20at%2010.27.35.png)
 
-## Prerequisites
+The system orchestrates two async data streams — **UI interactions** (via Maestro) and **HTTP traffic** (via Proxyman) — then correlates them by timestamp to produce Maestro YAML + WireMock stubs for full experience replay.
 
-1. **Node.js** v20+
-2. **Maestro CLI**: `curl -Ls "https://get.maestro.mobile.dev" | bash`
-3. **Proxyman CLI**: `proxyman-cli` (requires Proxyman macOS 5.20+)
-4. **Target Device**: A booted iOS Simulator (or Android Emulator).
+## Capabilities
+
+| Capability | Description |
+|---|---|
+| **UI Recording** | Dispatch taps, types, scrolls, swipes on iOS/Android simulators via Maestro |
+| **Network Capture** | Intercept HTTP/HTTPS traffic through Proxyman with scoped, session-aware exports |
+| **Correlation** | Automatically match UI actions to the network requests they trigger (sliding time window) |
+| **YAML Synthesis** | Generate Maestro test scripts with inline network context comments |
+| **WireMock Stubs** | Produce WireMock-compatible `mappings/` + `__files/` for network replay |
+| **Selective Mocking** | Mock all, some, or all-except-some APIs — unmocked routes proxy to the real server |
+| **SDUI Validation** | Deep-compare server-driven UI payloads against expected JSON shapes |
+
+## Tools
+
+| Tool | Purpose |
+|---|---|
+| `start_recording_session` | Begin recording — snapshots Proxyman baseline, initializes session state |
+| `execute_ui_action` | Dispatch a UI action and log it to the session |
+| `get_ui_hierarchy` | Capture the current accessibility tree from the simulator |
+| `get_network_logs` | Fetch intercepted HTTP traffic (with domain/path filtering) |
+| `verify_sdui_payload` | Validate a network response against expected fields |
+| `stop_and_compile_test` | Finalize session → export scoped HAR → correlate → generate YAML + WireMock stubs |
 
 ## Quick Start
-### 1. Repository Setup
+
+### Prerequisites
+
+- **Node.js** v20+
+- **Maestro CLI** — `curl -Ls "https://get.maestro.mobile.dev" | bash`
+- **Proxyman** macOS 5.20+ with CLI — see [Proxyman Setup](docs/proxyman-setup.md)
+- A booted **iOS Simulator** or **Android Emulator**
+
+### Install
 
 ```bash
 git clone <repository>
@@ -26,49 +49,81 @@ npm install
 npm run build
 ```
 
-### 2. Registering with an MCP Client (e.g. Claude Desktop)
+### Register with an MCP Client
 
-Add the following to your MCP client config (e.g. `~/Library/Application Support/Claude/claude_desktop_config.json`):
+Add to your MCP client config (e.g., Claude Desktop, Gemini Code Assist):
 
 ```json
 {
   "mcpServers": {
     "mobile-automator": {
       "command": "node",
-      "args": [
-        "/absolute/path/to/mobile-automator-mcp/dist/index.js"
-      ]
+      "args": ["/absolute/path/to/mobile-automator-mcp/dist/index.js"]
     }
   }
 }
 ```
 
-Restart your MCP Client.
+## Selective Mocking
 
-## Tools Provided
+The `stop_and_compile_test` tool accepts a `mockingConfig` to control which APIs are mocked vs. proxied to a real backend:
 
-This server provides the following tools to the LLM:
+```
+full      → Mock all captured APIs (default, no real server needed)
+include   → Mock only listed routes, proxy everything else
+exclude   → Mock everything EXCEPT listed routes
+```
 
-1. `start_recording_session`: Initializes a tracking session for a specific app (e.g., `com.example.app`).
-2. `get_ui_hierarchy`: Dumps the current, pruned semantic UI tree from the active emulator.
-3. `execute_ui_action`: Dispatches a UI action (tap, type, scroll) to a specific element and logs it.
-4. `get_network_logs`: Fetches recent network traffic for the session (with optional domain filtering).
-5. `verify_sdui_payload`: Deep-compares a specific network response against expected JSON shapes.
-6. `stop_and_compile_test`: Finalizes the session, correlating UI taps with network calls, and outputs a complete Maestro YAML test file.
+**Example** — mock only login, proxy everything else:
+```json
+{
+  "mockingConfig": {
+    "mode": "include",
+    "routes": ["/api/login"],
+    "proxyBaseUrl": "http://localhost:3030"
+  }
+}
+```
+
+## Output Structure
+
+```
+session-<id>/
+├── wiremock/
+│   ├── mappings/           ← WireMock stub JSON files
+│   │   ├── post_api_login.json
+│   │   ├── get_api_lore_doom.json
+│   │   └── _proxy_fallback.json   ← (include/exclude modes only)
+│   └── __files/            ← Response body fixtures
+│       ├── post_api_login_response.json
+│       └── get_api_lore_doom_response.json
+└── manifest.json           ← Session metadata + route manifest
+```
+
+## Project Structure
+
+```
+src/
+├── index.ts              ← MCP server entry point
+├── handlers.ts           ← Tool handler implementations
+├── schemas.ts            ← Zod schemas (single source of truth for I/O)
+├── types.ts              ← Domain models
+├── session/              ← Session lifecycle + SQLite persistence
+├── maestro/              ← Maestro CLI wrapper + hierarchy parser
+├── proxyman/             ← Proxyman CLI wrapper + payload validator
+└── synthesis/            ← Correlator + YAML generator + WireMock stub writer
+```
 
 ## Development
 
 ```bash
-# Run tests
-npm test
-
-# Run tests in watch mode
-npm run test:watch
-
-# Lint
-npm run lint
-
-# Build and start the server (stdio)
-npm run build
-npm start
+npm test            # Run tests
+npm run test:watch  # Watch mode
+npm run build       # Compile TypeScript
+npm start           # Start server (stdio)
+npm run lint        # ESLint
 ```
+
+## License
+
+MIT
