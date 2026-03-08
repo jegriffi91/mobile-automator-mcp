@@ -77,6 +77,59 @@ export class ProxymanWrapper {
     }
 
     /**
+     * Snapshot the current Proxyman traffic count.
+     * Called at recording start so we can scope the HAR export later.
+     */
+    async snapshotBaseline(): Promise<number> {
+        const tmpFile = path.join(os.tmpdir(), `proxyman-baseline-${randomUUID()}.har`);
+        try {
+            await this.exportHar(tmpFile);
+            const raw = await fs.readFile(tmpFile, 'utf-8');
+            const har: HarLog = JSON.parse(raw);
+            const count = har.log.entries.length;
+            console.error(`[ProxymanWrapper] snapshotBaseline: ${count} entries at baseline`);
+            return count;
+        } catch {
+            // Proxyman may not be running or session is empty — baseline is 0
+            console.error('[ProxymanWrapper] snapshotBaseline: no existing traffic, baseline = 0');
+            return 0;
+        } finally {
+            await fs.unlink(tmpFile).catch(() => { });
+        }
+    }
+
+    /**
+     * Export Proxyman traffic scoped to entries captured AFTER the baseline.
+     * Slices the HAR to only include entries beyond the baseline count.
+     */
+    async exportHarScoped(
+        outputPath: string,
+        baselineCount: number,
+        domains?: string[]
+    ): Promise<string> {
+        const tmpFile = path.join(os.tmpdir(), `proxyman-scoped-${randomUUID()}.har`);
+        try {
+            await this.exportHar(tmpFile, domains);
+            const raw = await fs.readFile(tmpFile, 'utf-8');
+            const har: HarLog = JSON.parse(raw);
+
+            // Slice entries to only those after the baseline
+            har.log.entries = har.log.entries.slice(baselineCount);
+
+            await fs.writeFile(outputPath, JSON.stringify(har, null, 2), 'utf-8');
+            console.error(
+                `[ProxymanWrapper] exportHarScoped: ${har.log.entries.length} new entries (baseline was ${baselineCount})`
+            );
+            return outputPath;
+        } catch (error: any) {
+            console.error('[ProxymanWrapper] exportHarScoped failed:', error);
+            throw new Error(`Failed to export scoped HAR: ${error.message || String(error)}`);
+        } finally {
+            await fs.unlink(tmpFile).catch(() => { });
+        }
+    }
+
+    /**
      * Retrieve recent HTTP transactions from Proxyman, mapped to NetworkEvent[].
      *
      * @param sessionId - The session ID to tag events with

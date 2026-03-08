@@ -8,10 +8,13 @@
 
 import { randomUUID } from 'crypto';
 import * as fs from 'fs/promises';
+import * as path from 'path';
+import * as os from 'os';
 import { sessionManager } from './session/index.js';
 import { maestroWrapper, HierarchyParser } from './maestro/index.js';
 import { proxymanWrapper, PayloadValidator } from './proxyman/index.js';
-import { Correlator, YamlGenerator } from './synthesis/index.js';
+import { Correlator, YamlGenerator, StubWriter } from './synthesis/index.js';
+import type { MockingConfig } from './synthesis/index.js';
 import type { NetworkEvent } from './types.js';
 import type {
     StartRecordingInput,
@@ -44,6 +47,15 @@ export async function handleStartRecording(
 
     await sessionManager.create(sessionId, input.appBundleId, input.platform);
 
+    // Snapshot Proxyman baseline so we can scope the HAR export later
+    try {
+        const baseline = await proxymanWrapper.snapshotBaseline();
+        await sessionManager.updateBaseline(sessionId, baseline);
+    } catch (error) {
+        console.error('[MCP] start_recording_session: Proxyman baseline snapshot failed (Proxyman may not be running)', error);
+        // Non-fatal: we'll still capture all traffic at compile time
+    }
+
     sessionManager.startPolling(sessionId, input.platform, input.appBundleId);
 
     return {
@@ -67,25 +79,88 @@ export async function handleStopAndCompile(
         throw new Error(`Session not found: ${input.sessionId}`);
     }
 
-    // Fetch all recorded data
+    // ── Step 1: Export scoped Proxyman HAR ──
+    const scopedHarPath = path.join(os.tmpdir(), `proxyman-scoped-${input.sessionId}.har`);
+    let proxymanEvents: NetworkEvent[] = [];
+    try {
+        const baseline = session.proxymanBaseline ?? 0;
+        await proxymanWrapper.exportHarScoped(scopedHarPath, baseline);
+        const raw = await fs.readFile(scopedHarPath, 'utf-8');
+        const har = JSON.parse(raw);
+        proxymanEvents = (har.log?.entries || []).map((entry: any) => ({
+            sessionId: input.sessionId,
+            timestamp: entry.startedDateTime,
+            method: entry.request.method,
+            url: entry.request.url,
+            statusCode: entry.response.status,
+            requestBody: entry.request.postData?.text,
+            responseBody: entry.response.content?.text,
+            durationMs: entry.time ? Math.round(entry.time) : undefined,
+        }));
+        console.error(`[MCP] stop_and_compile_test: ${proxymanEvents.length} scoped network events from Proxyman`);
+    } catch (error) {
+        console.error('[MCP] stop_and_compile_test: Proxyman scoped export failed, using session DB events only', error);
+    } finally {
+        await fs.unlink(scopedHarPath).catch(() => { });
+    }
+
+    // ── Step 2: Fetch UI interactions from session DB ──
     const interactions = await sessionManager.getInteractions(input.sessionId);
-    const networkEvents = await sessionManager.getNetworkEvents(input.sessionId);
+
+    // Merge Proxyman events with any already-logged session DB events
+    const dbEvents = await sessionManager.getNetworkEvents(input.sessionId);
+    const seen = new Set<string>();
+    const allNetworkEvents: NetworkEvent[] = [];
+    for (const event of [...dbEvents, ...proxymanEvents]) {
+        const key = `${event.url}|${event.timestamp}`;
+        if (!seen.has(key)) {
+            seen.add(key);
+            allNetworkEvents.push(event);
+        }
+    }
 
     console.error(
-        `[MCP] stop_and_compile_test: correlating ${interactions.length} interactions with ${networkEvents.length} network events`
+        `[MCP] stop_and_compile_test: correlating ${interactions.length} interactions with ${allNetworkEvents.length} network events`
     );
 
-    // Correlate UI actions with network events
+    // ── Step 3: Correlate UI actions with network events ──
     const correlator = new Correlator();
-    const steps = correlator.correlate(interactions, networkEvents);
+    const steps = correlator.correlate(interactions, allNetworkEvents);
 
-    // Generate Maestro YAML
+    // ── Step 4: Generate YAML ──
     const generator = new YamlGenerator(session.appBundleId);
     const yaml = generator.toYaml(steps, input.conditions);
 
-    // Write to disk
-    const outputPath = input.outputPath ?? `/tmp/maestro-test-${input.sessionId}.yaml`;
+    // Write YAML
+    const outputPath = input.outputPath ?? path.join(os.tmpdir(), `maestro-test-${input.sessionId}.yaml`);
     await fs.writeFile(outputPath, yaml, 'utf-8');
+
+    // ── Step 5: Generate WireMock stubs (if network events exist) ──
+    let fixturesDir: string | undefined;
+    let stubsDir: string | undefined;
+    let manifestPath: string | undefined;
+
+    if (allNetworkEvents.length > 0) {
+        const outputDir = path.dirname(outputPath);
+        const sessionDir = path.join(outputDir, `session-${input.sessionId}`);
+
+        const mockingConfig: MockingConfig = input.mockingConfig ?? { mode: 'full' };
+        const stubWriter = new StubWriter();
+        const manifest = await stubWriter.writeStubs(
+            input.sessionId,
+            steps,
+            sessionDir,
+            mockingConfig
+        );
+
+        fixturesDir = path.join(sessionDir, 'wiremock', '__files');
+        stubsDir = path.join(sessionDir, 'wiremock', 'mappings');
+        manifestPath = path.join(sessionDir, 'manifest.json');
+
+        console.error(
+            `[MCP] stop_and_compile_test: wrote ${manifest.routes.length} WireMock stubs to ${stubsDir}`
+        );
+    }
 
     console.error(`[MCP] stop_and_compile_test: wrote ${steps.length} steps to ${outputPath}`);
 
@@ -97,6 +172,9 @@ export async function handleStopAndCompile(
         sessionId: input.sessionId,
         yaml,
         yamlPath: outputPath,
+        fixturesDir,
+        stubsDir,
+        manifestPath,
     };
 }
 

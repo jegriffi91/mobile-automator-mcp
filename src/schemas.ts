@@ -84,6 +84,22 @@ export const StopAndCompileInputSchema = z.object({
         .describe(
             'Optional natural-language assertions to include, e.g. "verify analytics event: page_view"'
         ),
+    mockingConfig: z
+        .object({
+            mode: z.enum(['full', 'include', 'exclude']).describe(
+                'full = mock all captured APIs; include = mock only listed routes; exclude = mock all except listed'
+            ),
+            routes: z
+                .array(z.string())
+                .optional()
+                .describe('Route path patterns to include or exclude (e.g., ["/api/login"])'),
+            proxyBaseUrl: z
+                .string()
+                .optional()
+                .describe('Real server URL for proxy passthrough on non-mocked routes'),
+        })
+        .optional()
+        .describe('Network mocking configuration for WireMock stub generation'),
 });
 
 export const GetUIHierarchyInputSchema = z.object({
@@ -149,6 +165,9 @@ export const StopAndCompileOutputSchema = z.object({
     sessionId: z.string().describe('The session that was compiled'),
     yaml: z.string().describe('The generated Maestro YAML test script content'),
     yamlPath: z.string().describe('File path where the YAML was written'),
+    fixturesDir: z.string().optional().describe('Directory containing WireMock response fixtures'),
+    stubsDir: z.string().optional().describe('Directory containing WireMock mapping stubs'),
+    manifestPath: z.string().optional().describe('Path to the session manifest JSON'),
 });
 
 export const GetUIHierarchyOutputSchema = z.object({

@@ -4,11 +4,11 @@
  * Generates valid Maestro YAML with:
  *   - appId header + launchApp
  *   - Per-step UI commands (tapOn, inputText, scroll, swipe, back, assertVisible)
- *   - evalScript + assertTrue blocks for correlated network events
+ *   - Inline comments documenting correlated network calls and fixture references
  */
 
 import type { CorrelatedStep } from './correlator.js';
-import type { UIElement, NetworkEvent } from '../types.js';
+import type { UIElement } from '../types.js';
 
 export class YamlGenerator {
     private appBundleId: string;
@@ -28,8 +28,17 @@ export class YamlGenerator {
         ];
 
         for (const step of steps) {
-            const { interaction, networkEvents } = step;
+            const { interaction, networkCaptures } = step;
             const selector = YamlGenerator.buildSelector(interaction.element);
+
+            // Emit network context comment before the UI action
+            if (networkCaptures.length > 0) {
+                const summary = networkCaptures
+                    .map((c) => `${c.event.method} ${c.requestPattern.pathPattern} → ${c.event.statusCode}`)
+                    .join(', ');
+                lines.push('');
+                lines.push(`# ── ${this.describeAction(interaction.actionType, interaction.element)} (${summary}) ──`);
+            }
 
             switch (interaction.actionType) {
                 case 'tap':
@@ -61,12 +70,6 @@ export class YamlGenerator {
                 default:
                     lines.push(`# Unknown action: ${interaction.actionType}`);
             }
-
-            // Emit network assertions for correlated events
-            if (networkEvents.length > 0) {
-                const assertion = YamlGenerator.buildNetworkAssertion(networkEvents);
-                lines.push(assertion);
-            }
         }
 
         // Append user-supplied conditions as comments
@@ -94,37 +97,19 @@ export class YamlGenerator {
     }
 
     /**
-     * Build an evalScript assertion block from correlated network events.
-     * Uses inline JS constants with captured response data — no external dependencies.
+     * Generate a human-readable description of a UI action.
      */
-    static buildNetworkAssertion(events: NetworkEvent[]): string {
-        const jsLines: string[] = [];
-
-        for (const event of events) {
-            const varName = `res_${event.method.toLowerCase()}_${event.statusCode}`;
-            jsLines.push(`  // ${event.method} ${event.url}`);
-            jsLines.push(`  const ${varName}_status = ${event.statusCode};`);
-            jsLines.push(`  assertTrue(${varName}_status >= 200 && ${varName}_status < 400);`);
-
-            // If we have a response body, add a basic non-empty assertion
-            if (event.responseBody) {
-                try {
-                    const parsed = JSON.parse(event.responseBody);
-                    const keys = Object.keys(parsed);
-                    if (keys.length > 0) {
-                        jsLines.push(`  const ${varName}_body = JSON.parse('${YamlGenerator.escapeJs(event.responseBody)}');`);
-                        jsLines.push(`  assertTrue(${varName}_body !== null);`);
-                        // Assert first key exists as a sanity check
-                        jsLines.push(`  assertTrue(${varName}_body.hasOwnProperty('${keys[0]}'));`);
-                    }
-                } catch {
-                    // Non-JSON body, skip detailed assertions
-                    jsLines.push(`  // Response body is not JSON, skipping field assertions`);
-                }
-            }
+    private describeAction(action: string, element: UIElement): string {
+        const target = element.id || element.accessibilityLabel || element.text || 'element';
+        switch (action) {
+            case 'tap': return `Tap ${target}`;
+            case 'type': return `Type into ${target}`;
+            case 'scroll': return 'Scroll';
+            case 'swipe': return 'Swipe';
+            case 'back': return 'Back';
+            case 'assertVisible': return `Assert ${target} visible`;
+            default: return action;
         }
-
-        return `- evalScript: |\n${jsLines.join('\n')}`;
     }
 
     /**
@@ -132,16 +117,5 @@ export class YamlGenerator {
      */
     private static escapeYaml(str: string): string {
         return str.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-    }
-
-    /**
-     * Escape a string for embedding inside a JS single-quoted string.
-     */
-    private static escapeJs(str: string): string {
-        return str
-            .replace(/\\/g, '\\\\')
-            .replace(/'/g, "\\'")
-            .replace(/\n/g, '\\n')
-            .replace(/\r/g, '\\r');
     }
 }

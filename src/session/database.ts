@@ -25,7 +25,8 @@ export class SessionDatabase {
                 platform TEXT NOT NULL,
                 status TEXT NOT NULL,
                 startedAt TEXT NOT NULL,
-                stoppedAt TEXT
+                stoppedAt TEXT,
+                proxymanBaseline INTEGER
             );
 
             CREATE TABLE IF NOT EXISTS ui_interactions (
@@ -71,8 +72,8 @@ export class SessionDatabase {
      */
     insertSession(session: Session): void {
         const db = this.getDb();
-        const stmt = db.prepare(`INSERT INTO sessions (id, appBundleId, platform, status, startedAt, stoppedAt) VALUES (?, ?, ?, ?, ?, ?)`);
-        stmt.run([session.id, session.appBundleId, session.platform, session.status, session.startedAt, session.stoppedAt || null]);
+        const stmt = db.prepare(`INSERT INTO sessions (id, appBundleId, platform, status, startedAt, stoppedAt, proxymanBaseline) VALUES (?, ?, ?, ?, ?, ?, ?)`);
+        stmt.run([session.id, session.appBundleId, session.platform, session.status, session.startedAt, session.stoppedAt || null, session.proxymanBaseline ?? null]);
         stmt.free();
     }
 
@@ -97,6 +98,16 @@ export class SessionDatabase {
     }
 
     /**
+     * Store the Proxyman baseline count for a session.
+     */
+    updateSessionBaseline(sessionId: string, baseline: number): void {
+        const db = this.getDb();
+        const stmt = db.prepare(`UPDATE sessions SET proxymanBaseline = ? WHERE id = ?`);
+        stmt.run([baseline, sessionId]);
+        stmt.free();
+    }
+
+    /**
      * Retrieve session details.
      */
     getSession(sessionId: string): Session | null {
@@ -113,6 +124,7 @@ export class SessionDatabase {
                 status: row.status as SessionStatus,
                 startedAt: row.startedAt as string,
                 stoppedAt: (row.stoppedAt as string) || undefined,
+                proxymanBaseline: row.proxymanBaseline != null ? (row.proxymanBaseline as number) : undefined,
             };
         }
         stmt.free();

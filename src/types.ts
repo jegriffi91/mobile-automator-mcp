@@ -18,6 +18,8 @@ export interface Session {
     status: SessionStatus;
     startedAt: string;
     stoppedAt?: string;
+    /** Proxyman entry count at recording start — used to scope HAR export */
+    proxymanBaseline?: number;
 }
 
 // ----- UI Types -----

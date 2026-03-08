@@ -119,6 +119,14 @@ export class SessionManager {
         return this.db.getNetworkEvents(sessionId);
     }
 
+    /**
+     * Store the Proxyman baseline entry count for a session.
+     */
+    async updateBaseline(sessionId: string, baseline: number): Promise<void> {
+        this.db.updateSessionBaseline(sessionId, baseline);
+        console.error(`[SessionManager] updateBaseline: session ${sessionId} baseline = ${baseline}`);
+    }
+
     private activePollers: Map<string, any> = new Map();
 
     /**

@@ -7,6 +7,15 @@
 
 import type { UIInteraction, NetworkEvent } from '../types.js';
 
+export interface CorrelatedNetworkCapture {
+    /** Original network event with full response body */
+    event: NetworkEvent;
+    /** Request pattern for WireMock matching */
+    requestPattern: { method: string; pathPattern: string };
+    /** Generated fixture ID, e.g., "get_api_lore_doom" */
+    fixtureId: string;
+}
+
 export interface CorrelatedStep {
     /** Chronological index in the test flow */
     index: number;
@@ -14,6 +23,8 @@ export interface CorrelatedStep {
     interaction: UIInteraction;
     /** Network event(s) that occurred within a time window of this interaction */
     networkEvents: NetworkEvent[];
+    /** Enhanced network captures with request patterns and fixture IDs */
+    networkCaptures: CorrelatedNetworkCapture[];
 }
 
 export class Correlator {
@@ -68,13 +79,46 @@ export class Correlator {
                 if (delta > this.windowMs && !claimed.has(j)) break;
             }
 
+            // Build enhanced network captures with fixture metadata
+            const captures: CorrelatedNetworkCapture[] = matched.map((event) => {
+                let pathname: string;
+                try {
+                    pathname = new URL(event.url).pathname;
+                } catch {
+                    // Relative URL (e.g., "/api/login") — use as-is
+                    pathname = event.url.split('?')[0];
+                }
+                return {
+                    event,
+                    requestPattern: {
+                        method: event.method,
+                        pathPattern: pathname,
+                    },
+                    fixtureId: Correlator.toFixtureId(event.method, pathname),
+                };
+            });
+
             steps.push({
                 index: i,
                 interaction,
                 networkEvents: matched,
+                networkCaptures: captures,
             });
         }
 
         return steps;
+    }
+
+    /**
+     * Generate a filesystem-safe fixture ID from HTTP method + URL path.
+     * e.g., "GET", "/api/lore/doom" → "get_api_lore_doom"
+     */
+    static toFixtureId(method: string, urlPath: string): string {
+        const sanitized = urlPath
+            .replace(/^\//, '')        // strip leading slash
+            .replace(/[^a-zA-Z0-9]/g, '_')  // replace non-alphanumeric with _
+            .replace(/_+/g, '_')       // collapse multiple underscores
+            .replace(/_$/, '');        // strip trailing underscore
+        return `${method.toLowerCase()}_${sanitized}`;
     }
 }

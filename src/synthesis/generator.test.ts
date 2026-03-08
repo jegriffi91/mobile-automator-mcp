@@ -1,11 +1,12 @@
 import { describe, it, expect } from 'vitest';
 import { YamlGenerator } from './generator.js';
-import type { CorrelatedStep } from './correlator.js';
+import type { CorrelatedStep, CorrelatedNetworkCapture } from './correlator.js';
 import type { UIInteraction, NetworkEvent } from '../types.js';
 
 function makeStep(overrides: {
     interaction?: Partial<UIInteraction>;
     networkEvents?: Partial<NetworkEvent>[];
+    networkCaptures?: CorrelatedNetworkCapture[];
     index?: number;
 } = {}): CorrelatedStep {
     return {
@@ -25,6 +26,7 @@ function makeStep(overrides: {
             statusCode: 200,
             ...e,
         })),
+        networkCaptures: overrides.networkCaptures ?? [],
     };
 }
 
@@ -105,15 +107,26 @@ describe('YamlGenerator', () => {
         expect(yaml).toContain('id: "header"');
     });
 
-    it('should emit evalScript for correlated network events', () => {
+    it('should emit network context comments for correlated captures', () => {
         const yaml = gen.toYaml([
             makeStep({
-                networkEvents: [{ statusCode: 200, method: 'POST', url: '/api/login' }],
+                networkCaptures: [
+                    {
+                        event: {
+                            sessionId: 'test-session',
+                            timestamp: '2024-01-01T00:00:01.000Z',
+                            method: 'POST',
+                            url: 'http://localhost:3030/api/login',
+                            statusCode: 200,
+                        },
+                        requestPattern: { method: 'POST', pathPattern: '/api/login' },
+                        fixtureId: 'post_api_login',
+                    },
+                ],
             }),
         ]);
-        expect(yaml).toContain('- evalScript: |');
-        expect(yaml).toContain('assertTrue');
-        expect(yaml).toContain('POST /api/login');
+        expect(yaml).toContain('POST /api/login → 200');
+        expect(yaml).not.toContain('evalScript');
     });
 
     it('should append user conditions as YAML comments', () => {
