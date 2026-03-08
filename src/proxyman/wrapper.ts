@@ -80,14 +80,14 @@ export class ProxymanWrapper {
      * Snapshot the current Proxyman traffic count.
      * Called at recording start so we can scope the HAR export later.
      */
-    async snapshotBaseline(): Promise<number> {
+    async snapshotBaseline(domains?: string[]): Promise<number> {
         const tmpFile = path.join(os.tmpdir(), `proxyman-baseline-${randomUUID()}.har`);
         try {
-            await this.exportHar(tmpFile);
+            await this.exportHar(tmpFile, domains);
             const raw = await fs.readFile(tmpFile, 'utf-8');
             const har: HarLog = JSON.parse(raw);
             const count = har.log.entries.length;
-            console.error(`[ProxymanWrapper] snapshotBaseline: ${count} entries at baseline`);
+            console.error(`[ProxymanWrapper] snapshotBaseline: ${count} entries at baseline (domains: ${domains?.join(', ') ?? 'all'})`);
             return count;
         } catch {
             // Proxyman may not be running or session is empty — baseline is 0

@@ -20,6 +20,8 @@ export interface Session {
     stoppedAt?: string;
     /** Proxyman entry count at recording start — used to scope HAR export */
     proxymanBaseline?: number;
+    /** Domain filter for Proxyman traffic isolation (e.g., ["localhost.proxyman.io:3031"]) */
+    filterDomains?: string[];
 }
 
 // ----- UI Types -----

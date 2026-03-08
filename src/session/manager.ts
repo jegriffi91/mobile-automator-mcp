@@ -37,13 +37,14 @@ export class SessionManager {
     /**
      * Create a new recording session.
      */
-    async create(sessionId: string, appBundleId: string, platform: MobilePlatform): Promise<Session> {
+    async create(sessionId: string, appBundleId: string, platform: MobilePlatform, filterDomains?: string[]): Promise<Session> {
         const session: Session = {
             id: sessionId,
             appBundleId,
             platform,
             status: 'recording',
             startedAt: new Date().toISOString(),
+            filterDomains,
         };
         this.db.insertSession(session);
         console.error(`[SessionManager] create: ${sessionId} started processing.`);

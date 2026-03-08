@@ -45,11 +45,11 @@ export async function handleStartRecording(
         throw new Error(`No booted ${input.platform} simulator found. Please boot a device first.`);
     }
 
-    await sessionManager.create(sessionId, input.appBundleId, input.platform);
+    await sessionManager.create(sessionId, input.appBundleId, input.platform, input.filterDomains);
 
     // Snapshot Proxyman baseline so we can scope the HAR export later
     try {
-        const baseline = await proxymanWrapper.snapshotBaseline();
+        const baseline = await proxymanWrapper.snapshotBaseline(input.filterDomains);
         await sessionManager.updateBaseline(sessionId, baseline);
     } catch (error) {
         console.error('[MCP] start_recording_session: Proxyman baseline snapshot failed (Proxyman may not be running)', error);
@@ -84,7 +84,7 @@ export async function handleStopAndCompile(
     let proxymanEvents: NetworkEvent[] = [];
     try {
         const baseline = session.proxymanBaseline ?? 0;
-        await proxymanWrapper.exportHarScoped(scopedHarPath, baseline);
+        await proxymanWrapper.exportHarScoped(scopedHarPath, baseline, session.filterDomains);
         const raw = await fs.readFile(scopedHarPath, 'utf-8');
         const har = JSON.parse(raw);
         proxymanEvents = (har.log?.entries || []).map((entry: any) => ({
@@ -227,11 +227,14 @@ export async function handleGetNetworkLogs(
     console.error(`[MCP] get_network_logs: fetching logs for session ${input.sessionId}`);
 
     // Fetch from Proxyman (live traffic) with domain pre-filtering
+    // Fall back to session-level filterDomains if not provided in the request
+    const session = await sessionManager.getSession(input.sessionId);
+    const domains = input.filterDomains ?? session?.filterDomains;
     const proxymanEvents = await proxymanWrapper.getTransactions(
         input.sessionId,
         input.filterPath,
         input.limit ?? 50,
-        input.filterDomains
+        domains
     );
 
     // Also get any events already logged in the session DB
@@ -279,7 +282,10 @@ export async function handleVerifySDUIPayload(
         `[MCP] verify_sdui_payload: verifying ${input.url} for session ${input.sessionId}`
     );
 
-    const actual = await proxymanWrapper.getPayload(input.url, input.filterDomains);
+    // Fall back to session-level filterDomains if not provided in the request
+    const session = await sessionManager.getSession(input.sessionId);
+    const domains = input.filterDomains ?? session?.filterDomains;
+    const actual = await proxymanWrapper.getPayload(input.url, domains);
 
     if (!actual) {
         return {

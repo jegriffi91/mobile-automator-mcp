@@ -26,7 +26,8 @@ export class SessionDatabase {
                 status TEXT NOT NULL,
                 startedAt TEXT NOT NULL,
                 stoppedAt TEXT,
-                proxymanBaseline INTEGER
+                proxymanBaseline INTEGER,
+                filterDomains TEXT
             );
 
             CREATE TABLE IF NOT EXISTS ui_interactions (
@@ -72,8 +73,8 @@ export class SessionDatabase {
      */
     insertSession(session: Session): void {
         const db = this.getDb();
-        const stmt = db.prepare(`INSERT INTO sessions (id, appBundleId, platform, status, startedAt, stoppedAt, proxymanBaseline) VALUES (?, ?, ?, ?, ?, ?, ?)`);
-        stmt.run([session.id, session.appBundleId, session.platform, session.status, session.startedAt, session.stoppedAt || null, session.proxymanBaseline ?? null]);
+        const stmt = db.prepare(`INSERT INTO sessions (id, appBundleId, platform, status, startedAt, stoppedAt, proxymanBaseline, filterDomains) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`);
+        stmt.run([session.id, session.appBundleId, session.platform, session.status, session.startedAt, session.stoppedAt || null, session.proxymanBaseline ?? null, session.filterDomains ? JSON.stringify(session.filterDomains) : null]);
         stmt.free();
     }
 
@@ -125,6 +126,7 @@ export class SessionDatabase {
                 startedAt: row.startedAt as string,
                 stoppedAt: (row.stoppedAt as string) || undefined,
                 proxymanBaseline: row.proxymanBaseline != null ? (row.proxymanBaseline as number) : undefined,
+                filterDomains: row.filterDomains ? JSON.parse(row.filterDomains as string) : undefined,
             };
         }
         stmt.free();

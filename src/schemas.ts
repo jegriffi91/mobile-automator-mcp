@@ -70,6 +70,12 @@ export const StartRecordingInputSchema = z.object({
         .enum(['ios', 'android'])
         .describe('The target mobile platform'),
     sessionName: z.string().optional().describe('Optional human-readable name for this session'),
+    filterDomains: z
+        .array(z.string())
+        .optional()
+        .describe(
+            'Optional domain list for Proxyman traffic isolation (e.g., ["localhost.proxyman.io:3031"]). Enables concurrent sessions on different ports.'
+        ),
 });
 
 export const StopAndCompileInputSchema = z.object({
