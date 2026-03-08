@@ -1,6 +1,5 @@
 /**
- * Stub implementations for all 6 MCP tool handlers.
- * Each handler will be replaced with real logic in subsequent phases.
+ * MCP tool handlers for all 8 tools.
  *
  * Input/output types are derived from Zod schemas (schemas.ts) —
  * the single source of truth for tool I/O shapes.
@@ -14,6 +13,8 @@ import { sessionManager } from './session/index.js';
 import { maestroWrapper, HierarchyParser } from './maestro/index.js';
 import { proxymanWrapper, PayloadValidator } from './proxyman/index.js';
 import { Correlator, YamlGenerator, StubWriter } from './synthesis/index.js';
+import { SegmentFingerprint, SegmentRegistry } from './segments/index.js';
+import { StubServer } from './wiremock/index.js';
 import type { MockingConfig } from './synthesis/index.js';
 import type { NetworkEvent } from './types.js';
 import type {
@@ -29,6 +30,10 @@ import type {
     GetNetworkLogsOutput,
     VerifySDUIPayloadInput,
     VerifySDUIPayloadOutput,
+    RegisterSegmentInput,
+    RegisterSegmentOutput,
+    RunTestInput,
+    RunTestOutput,
 } from './schemas.js';
 
 // ---- start_recording_session ----
@@ -162,6 +167,34 @@ export async function handleStopAndCompile(
         );
     }
 
+    // ── Step 6: Compute segment fingerprint and check registry ──
+    let segmentFingerprint: string | undefined;
+    let matchedSegments: Array<{ name: string; fingerprint: string; similarity: number; yamlPath: string }> | undefined;
+
+    if (steps.length > 0) {
+        segmentFingerprint = SegmentFingerprint.compute(steps);
+        console.error(`[MCP] stop_and_compile_test: fingerprint = ${segmentFingerprint}`);
+
+        try {
+            const registryPath = path.join(process.cwd(), 'segments', 'registry.json');
+            const entries = await SegmentRegistry.load(registryPath);
+            const matches = SegmentRegistry.findMatches(entries, segmentFingerprint);
+            if (matches.length > 0) {
+                matchedSegments = matches.map((m) => ({
+                    name: m.entry.name,
+                    fingerprint: m.entry.fingerprint,
+                    similarity: m.similarity,
+                    yamlPath: m.entry.yamlPath,
+                }));
+                console.error(
+                    `[MCP] stop_and_compile_test: matched ${matches.length} existing segment(s): ${matches.map((m) => m.entry.name).join(', ')}`
+                );
+            }
+        } catch {
+            // Registry not found or invalid — not an error
+        }
+    }
+
     console.error(`[MCP] stop_and_compile_test: wrote ${steps.length} steps to ${outputPath}`);
 
     // Finalize session
@@ -175,6 +208,8 @@ export async function handleStopAndCompile(
         fixturesDir,
         stubsDir,
         manifestPath,
+        segmentFingerprint,
+        matchedSegments,
     };
 }
 
@@ -315,3 +350,86 @@ export async function handleVerifySDUIPayload(
     };
 }
 
+// ---- register_segment ----
+export async function handleRegisterSegment(
+    input: RegisterSegmentInput
+): Promise<RegisterSegmentOutput> {
+    console.error(`[MCP] register_segment: registering segment "${input.name}" from session ${input.sessionId}`);
+
+    // Get session data
+    const session = await sessionManager.getSession(input.sessionId);
+    if (!session) {
+        throw new Error(`Session not found: ${input.sessionId}`);
+    }
+
+    // Fetch interactions and network events to compute fingerprint
+    const interactions = await sessionManager.getInteractions(input.sessionId);
+    const networkEvents = await sessionManager.getNetworkEvents(input.sessionId);
+
+    const correlator = new Correlator();
+    const steps = correlator.correlate(interactions, networkEvents);
+
+    if (steps.length === 0) {
+        throw new Error(`Session ${input.sessionId} has no correlated steps to register as a segment.`);
+    }
+
+    const fingerprint = SegmentFingerprint.compute(steps);
+    const registryPath = input.registryPath ?? path.join(process.cwd(), 'segments', 'registry.json');
+
+    // Load, add, and save
+    let entries = await SegmentRegistry.load(registryPath);
+    entries = SegmentRegistry.addEntry(entries, {
+        name: input.name,
+        fingerprint,
+        yamlPath: `segments/${input.name}.segment.yaml`,
+        createdAt: new Date().toISOString(),
+        createdBy: input.sessionId,
+        sequencePreview: SegmentFingerprint.sequenceString(steps),
+    });
+    await SegmentRegistry.save(registryPath, entries);
+
+    console.error(`[MCP] register_segment: registered "${input.name}" with fingerprint ${fingerprint}`);
+
+    return {
+        name: input.name,
+        fingerprint,
+        registryPath,
+        message: `Segment "${input.name}" registered with fingerprint ${fingerprint}. ${entries.length} segment(s) in registry.`,
+    };
+}
+
+// ---- run_test ----
+export async function handleRunTest(
+    input: RunTestInput
+): Promise<RunTestOutput> {
+    console.error(`[MCP] run_test: running ${input.yamlPath}`);
+
+    let stubServer: StubServer | undefined;
+    let stubServerPort: number | undefined;
+
+    try {
+        // Step 1: Start stub server if stubs are provided
+        if (input.stubsDir) {
+            stubServer = new StubServer();
+            await stubServer.loadStubs(input.stubsDir);
+            stubServerPort = await stubServer.start(input.stubServerPort ?? 0);
+            console.error(`[MCP] run_test: stub server started on port ${stubServerPort}`);
+        }
+
+        // Step 2: Run Maestro test
+        const result = await maestroWrapper.runTest(input.yamlPath);
+
+        return {
+            passed: result.passed,
+            output: result.output,
+            stubServerPort,
+            durationMs: result.durationMs,
+        };
+    } finally {
+        // Step 3: Tear down stub server
+        if (stubServer) {
+            await stubServer.stop();
+            console.error('[MCP] run_test: stub server stopped');
+        }
+    }
+}

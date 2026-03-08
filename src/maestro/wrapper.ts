@@ -178,4 +178,35 @@ export class MaestroWrapper {
             return { success: false, error: error.message || String(error) };
         }
     }
+
+    /**
+     * Run a Maestro test YAML file and capture results.
+     *
+     * @param yamlPath - Path to the Maestro YAML test file
+     * @returns Test result with pass/fail, output, and duration
+     */
+    async runTest(yamlPath: string): Promise<{ passed: boolean; output: string; durationMs: number }> {
+        const start = Date.now();
+        try {
+            const { stdout, stderr } = await execFileAsync(
+                this.maestroBin,
+                ['test', yamlPath],
+                {
+                    env: this.getExecEnv(),
+                    maxBuffer: 10 * 1024 * 1024, // 10MB buffer for verbose output
+                }
+            );
+            const durationMs = Date.now() - start;
+            const output = [stdout, stderr].filter(Boolean).join('\n');
+            console.error(`[MaestroWrapper] runTest: PASSED in ${durationMs}ms — ${yamlPath}`);
+            return { passed: true, output, durationMs };
+        } catch (error: any) {
+            const durationMs = Date.now() - start;
+            const output = [error.stdout, error.stderr, error.message]
+                .filter(Boolean)
+                .join('\n');
+            console.error(`[MaestroWrapper] runTest: FAILED in ${durationMs}ms — ${yamlPath}`);
+            return { passed: false, output, durationMs };
+        }
+    }
 }

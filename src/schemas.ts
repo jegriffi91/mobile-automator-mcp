@@ -158,6 +158,31 @@ export const VerifySDUIPayloadInputSchema = z.object({
         .describe('Key-value pairs that must be present in the response payload'),
 });
 
+export const RegisterSegmentInputSchema = z.object({
+    name: z.string().describe('Human-readable segment name (e.g., "login", "navigate-to-settings")'),
+    sessionId: z.string().describe('Session ID whose correlated steps define this segment'),
+    registryPath: z
+        .string()
+        .optional()
+        .describe('Path to registry.json (defaults to ./segments/registry.json)'),
+});
+
+export const RunTestInputSchema = z.object({
+    yamlPath: z.string().describe('Path to the Maestro YAML test file'),
+    stubsDir: z
+        .string()
+        .optional()
+        .describe('Path to WireMock stubs directory (session-xxx/wiremock/). If provided, a stub server is started automatically.'),
+    platform: z
+        .enum(['ios', 'android'])
+        .optional()
+        .describe('Target platform (default: ios)'),
+    stubServerPort: z
+        .number()
+        .optional()
+        .describe('Port for the stub server (default: auto-select available port)'),
+});
+
 // ──────────────────────────────────────────────
 // Tool Output Schemas
 // ──────────────────────────────────────────────
@@ -174,6 +199,35 @@ export const StopAndCompileOutputSchema = z.object({
     fixturesDir: z.string().optional().describe('Directory containing WireMock response fixtures'),
     stubsDir: z.string().optional().describe('Directory containing WireMock mapping stubs'),
     manifestPath: z.string().optional().describe('Path to the session manifest JSON'),
+    segmentFingerprint: z
+        .string()
+        .optional()
+        .describe('SHA-256 fingerprint of the action+endpoint sequence for deduplication'),
+    matchedSegments: z
+        .array(
+            z.object({
+                name: z.string(),
+                fingerprint: z.string(),
+                similarity: z.number(),
+                yamlPath: z.string(),
+            })
+        )
+        .optional()
+        .describe('Existing registered segments that match this recording'),
+});
+
+export const RegisterSegmentOutputSchema = z.object({
+    name: z.string().describe('Registered segment name'),
+    fingerprint: z.string().describe('Segment fingerprint'),
+    registryPath: z.string().describe('Path to the registry file'),
+    message: z.string().describe('Human-readable confirmation message'),
+});
+
+export const RunTestOutputSchema = z.object({
+    passed: z.boolean().describe('Whether the Maestro test passed'),
+    output: z.string().describe('Maestro CLI stdout/stderr output'),
+    stubServerPort: z.number().optional().describe('Port the stub server ran on (if stubs were used)'),
+    durationMs: z.number().describe('Total test execution time in milliseconds'),
 });
 
 export const GetUIHierarchyOutputSchema = z.object({
@@ -222,6 +276,12 @@ export type GetNetworkLogsOutput = z.infer<typeof GetNetworkLogsOutputSchema>;
 export type VerifySDUIPayloadInput = z.infer<typeof VerifySDUIPayloadInputSchema>;
 export type VerifySDUIPayloadOutput = z.infer<typeof VerifySDUIPayloadOutputSchema>;
 
+export type RegisterSegmentInput = z.infer<typeof RegisterSegmentInputSchema>;
+export type RegisterSegmentOutput = z.infer<typeof RegisterSegmentOutputSchema>;
+
+export type RunTestInput = z.infer<typeof RunTestInputSchema>;
+export type RunTestOutput = z.infer<typeof RunTestOutputSchema>;
+
 // ──────────────────────────────────────────────
 // Tool name constants
 // ──────────────────────────────────────────────
@@ -233,4 +293,6 @@ export const TOOL_NAMES = {
     EXECUTE_UI_ACTION: 'execute_ui_action',
     GET_NETWORK_LOGS: 'get_network_logs',
     VERIFY_SDUI_PAYLOAD: 'verify_sdui_payload',
+    REGISTER_SEGMENT: 'register_segment',
+    RUN_TEST: 'run_test',
 } as const;

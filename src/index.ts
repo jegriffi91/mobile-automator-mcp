@@ -24,6 +24,10 @@ import {
     GetNetworkLogsOutputSchema,
     VerifySDUIPayloadInputSchema,
     VerifySDUIPayloadOutputSchema,
+    RegisterSegmentInputSchema,
+    RegisterSegmentOutputSchema,
+    RunTestInputSchema,
+    RunTestOutputSchema,
     TOOL_NAMES,
 } from './schemas.js';
 
@@ -34,6 +38,8 @@ import {
     handleExecuteUIAction,
     handleGetNetworkLogs,
     handleVerifySDUIPayload,
+    handleRegisterSegment,
+    handleRunTest,
 } from './handlers.js';
 
 import { sessionManager } from './session/index.js';
@@ -196,6 +202,58 @@ server.registerTool(
     },
     async (args) => {
         const result = await handleVerifySDUIPayload(args);
+        return {
+            content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
+            structuredContent: result,
+        };
+    }
+);
+
+// ── 7. register_segment ──
+server.registerTool(
+    TOOL_NAMES.REGISTER_SEGMENT,
+    {
+        title: 'Register Segment',
+        description:
+            'Register a recorded session as a named, reusable flow segment. Computes a fingerprint from the correlated steps and saves it to the segment registry for future deduplication.',
+        inputSchema: RegisterSegmentInputSchema,
+        outputSchema: RegisterSegmentOutputSchema,
+        annotations: {
+            title: 'Register Segment',
+            readOnlyHint: false,
+            destructiveHint: false,
+            idempotentHint: true,
+            openWorldHint: false,
+        },
+    },
+    async (args) => {
+        const result = await handleRegisterSegment(args);
+        return {
+            content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
+            structuredContent: result,
+        };
+    }
+);
+
+// ── 8. run_test ──
+server.registerTool(
+    TOOL_NAMES.RUN_TEST,
+    {
+        title: 'Run Test',
+        description:
+            'Run a Maestro YAML test file with optional WireMock stub replay. Automatically starts an in-process stub server, runs the test, and tears down. Returns pass/fail status, output, and duration.',
+        inputSchema: RunTestInputSchema,
+        outputSchema: RunTestOutputSchema,
+        annotations: {
+            title: 'Run Test',
+            readOnlyHint: false,
+            destructiveHint: false,
+            idempotentHint: true,
+            openWorldHint: true,
+        },
+    },
+    async (args) => {
+        const result = await handleRunTest(args);
         return {
             content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
             structuredContent: result,
