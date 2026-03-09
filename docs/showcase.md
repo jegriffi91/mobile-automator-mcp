@@ -13,7 +13,7 @@ Mobile test automation today is **manual, brittle, and disconnected from the net
 
 **Mobile Automator MCP** is an AI-native test automation server that sits between an AI coding agent and mobile simulators. It **records** what a user does (taps, types, scrolls), **captures** every API call the app makes, **correlates** the two by timestamp, and **synthesizes** complete, self-contained test scripts — all in a single recording session.
 
-![Architecture — Recording to synthesis flow](architecture_diagram.png)
+![Architecture — Recording to synthesis flow](images/end-to-end-userflow.png)
 
 ---
 
@@ -122,17 +122,7 @@ session-abc-123/
 
 The `run_test` tool handles the full lifecycle — spin up a stub server, run Maestro, report results:
 
-```mermaid
-graph LR
-    A[run_test] --> B[Load WireMock stubs]
-    B --> C[Start in-process<br/>stub server]
-    C --> D[Execute Maestro<br/>YAML test]
-    D --> E{Pass?}
-    E -->|Yes| F[Return ✅ + output]
-    E -->|No| G[Return ❌ + logs]
-    F --> H[Stop stub server]
-    G --> H
-```
+![Phase 3: Execution and Orchestration](images/phase-3-execution-and-orchestration.png)
 
 > **Zero-dependency stub server** — No Java, no WireMock JAR. The test runner includes a lightweight Node.js HTTP server that loads WireMock-format mappings natively.
 

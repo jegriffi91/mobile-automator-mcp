@@ -4,7 +4,7 @@ An [MCP](https://modelcontextprotocol.io/) server that gives AI agents the power
 
 ## Architecture
 
-![Recording synthesis flow](docs/Screenshot%202026-03-08%20at%2010.27.35.png)
+![Recording synthesis flow](docs/images/detailed-user-flow.png)
 
 The system orchestrates two async data streams — **UI interactions** (via Maestro) and **HTTP traffic** (via Proxyman) — then correlates them by timestamp to produce Maestro YAML + WireMock stubs for full experience replay.
 
