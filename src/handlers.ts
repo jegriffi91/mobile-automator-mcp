@@ -292,11 +292,12 @@ export async function handleGetNetworkLogs(
     }
 
     // Also persist Proxyman events to the session DB for future correlation
-    for (const event of proxymanEvents) {
+    if (proxymanEvents.length > 0) {
         try {
-            await sessionManager.logNetworkEvent(event);
+            await sessionManager.logNetworkEvents(input.sessionId, proxymanEvents);
         } catch {
-            // Ignore duplicates or session-not-found for non-active sessions
+            // Ignore session-not-found for non-active sessions.
+            // Duplicates are handled gracefully by the database via INSERT OR IGNORE.
         }
     }
 

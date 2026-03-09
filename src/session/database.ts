@@ -58,6 +58,9 @@ export class SessionDatabase {
 
             CREATE INDEX IF NOT EXISTS idx_network_events_sessionId
                 ON network_events(sessionId);
+
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_network_events_unique
+                ON network_events(sessionId, timestamp, url);
         `);
     }
 
@@ -177,7 +180,7 @@ export class SessionDatabase {
      */
     insertNetworkEvent(event: NetworkEvent): void {
         const db = this.getDb();
-        const stmt = db.prepare(`INSERT INTO network_events (sessionId, timestamp, method, url, statusCode, requestBody, responseBody, durationMs) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`);
+        const stmt = db.prepare(`INSERT OR IGNORE INTO network_events (sessionId, timestamp, method, url, statusCode, requestBody, responseBody, durationMs) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`);
         stmt.run([
             event.sessionId,
             event.timestamp,
@@ -189,6 +192,36 @@ export class SessionDatabase {
             event.durationMs || null,
         ]);
         stmt.free();
+    }
+
+    /**
+     * Bulk insert multiple network events.
+     */
+    insertNetworkEvents(events: NetworkEvent[]): void {
+        if (events.length === 0) return;
+
+        const db = this.getDb();
+        db.run('BEGIN TRANSACTION;');
+        try {
+            const stmt = db.prepare(`INSERT OR IGNORE INTO network_events (sessionId, timestamp, method, url, statusCode, requestBody, responseBody, durationMs) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`);
+            for (const event of events) {
+                stmt.run([
+                    event.sessionId,
+                    event.timestamp,
+                    event.method,
+                    event.url,
+                    event.statusCode,
+                    event.requestBody || null,
+                    event.responseBody || null,
+                    event.durationMs || null,
+                ]);
+            }
+            stmt.free();
+            db.run('COMMIT;');
+        } catch (error) {
+            db.run('ROLLBACK;');
+            throw error;
+        }
     }
 
     /**
