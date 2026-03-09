@@ -19,6 +19,7 @@
 - Use domain model interfaces from `src/types.ts` for internal business logic only.
 - Co-locate test files as `*.test.ts` next to the module they test.
 - Follow the existing Prettier config (`.prettierrc`): single quotes, 2-space tabs, trailing commas, 100 char print width.
+- Use explicit top-level ES imports rather than inline `require` calls or wildcard imports where possible.
 
 🚫 **Never do:**
 - Modify `.github/workflows/` or CI configuration.
