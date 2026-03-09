@@ -107,6 +107,21 @@ export class SessionManager {
     }
 
     /**
+     * Log multiple network events to the session in bulk.
+     * Throws if the session does not exist.
+     */
+    async logNetworkEvents(sessionId: string, events: NetworkEvent[]): Promise<void> {
+        if (events.length === 0) return;
+
+        const session = this.db.getSession(sessionId);
+        if (!session) {
+            throw new Error(`Session not found: ${sessionId}`);
+        }
+        this.db.insertNetworkEvents(events);
+        console.error(`[SessionManager] logNetworkEvents: ${events.length} events logged for session ${sessionId}`);
+    }
+
+    /**
      * Retrieve all interactions for a session, ordered chronologically.
      */
     async getInteractions(sessionId: string): Promise<UIInteraction[]> {
@@ -133,7 +148,7 @@ export class SessionManager {
     /**
      * Start background log polling to capture manual UI touches.
      */
-    startPolling(sessionId: string, platform: MobilePlatform, appBundleId: string) {
+    startPolling(sessionId: string, platform: MobilePlatform, _appBundleId: string) {
         if (this.activePollers.has(sessionId)) return;
 
         console.error(`[SessionManager] startPolling: tracking manual interactions for ${sessionId} on ${platform}`);

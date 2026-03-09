@@ -36,6 +36,7 @@ export class MaestroWrapper {
             this.maestroBin = candidates[candidates.length - 1]; // default fallback
             for (const candidate of candidates) {
                 try {
+                    // eslint-disable-next-line @typescript-eslint/no-var-requires
                     require('fs').accessSync(candidate, require('fs').constants.X_OK);
                     this.maestroBin = candidate;
                     break;

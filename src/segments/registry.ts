@@ -8,7 +8,6 @@
 
 import * as fs from 'fs/promises';
 import * as path from 'path';
-import { SegmentFingerprint } from './fingerprint.js';
 import type { CorrelatedStep } from '../synthesis/correlator.js';
 
 // ── Types ──
