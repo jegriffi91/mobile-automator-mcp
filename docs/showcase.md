@@ -38,30 +38,7 @@ Mobile test automation today is **manual, brittle, and disconnected from the net
 
 The AI agent drives the simulator through a user flow while the MCP server records every action and API call:
 
-```mermaid
-sequenceDiagram
-    participant Agent as AI Agent
-    participant MCP as Mobile Automator
-    participant Sim as Simulator
-    participant Proxy as Proxyman
-
-    Agent->>MCP: start_recording_session
-    MCP->>Proxy: Snapshot baseline traffic count
-    MCP-->>Agent: sessionId: "abc-123"
-    
-    Agent->>MCP: execute_ui_action(tap "Login")
-    MCP->>Sim: Maestro tap command
-    Sim->>Proxy: POST /api/login
-    
-    Agent->>MCP: execute_ui_action(tap "Dashboard")
-    MCP->>Sim: Maestro tap command
-    Sim->>Proxy: GET /api/lore/doom
-    
-    Agent->>MCP: stop_and_compile_test
-    MCP->>Proxy: Export session-scoped HAR
-    MCP->>MCP: Correlate UI ↔ Network
-    MCP-->>Agent: YAML + WireMock stubs
-```
+![Phase 1: Recording a User Flow](images/phase-1-sequence.png)
 
 ### Phase 2: Synthesize Artifacts
 
