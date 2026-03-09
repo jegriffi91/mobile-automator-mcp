@@ -11,6 +11,7 @@
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import * as fs from 'fs/promises';
+import { accessSync, constants } from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import { randomUUID } from 'crypto';
@@ -25,23 +26,30 @@ export class MaestroWrapper {
         if (maestroBin) {
             this.maestroBin = maestroBin;
         } else {
-            // Resolve maestro from common install locations
-            const home = os.homedir();
-            const candidates = [
-                path.join(home, '.maestro', 'bin', 'maestro'),
-                '/usr/local/bin/maestro',
-                '/opt/homebrew/bin/maestro',
-                'maestro', // fallback to PATH
-            ];
-            this.maestroBin = candidates[candidates.length - 1]; // default fallback
-            for (const candidate of candidates) {
-                try {
-                    require('fs').accessSync(candidate, require('fs').constants.X_OK);
-                    this.maestroBin = candidate;
-                    break;
-                } catch { /* continue */ }
-            }
+            this.maestroBin = this.findMaestroExecutable();
         }
+    }
+
+    /**
+     * Resolve maestro from common install locations
+     */
+    private findMaestroExecutable(): string {
+        const home = os.homedir();
+        const candidates = [
+            path.join(home, '.maestro', 'bin', 'maestro'),
+            '/usr/local/bin/maestro',
+            '/opt/homebrew/bin/maestro',
+            'maestro', // fallback to PATH
+        ];
+
+        for (const candidate of candidates) {
+            try {
+                accessSync(candidate, constants.X_OK);
+                return candidate;
+            } catch { /* continue */ }
+        }
+
+        return candidates[candidates.length - 1]; // default fallback
     }
 
     /**
