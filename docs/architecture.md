@@ -13,22 +13,23 @@ Reference document for AI agents and human contributors. Follow the link from th
              │  stdio (JSON-RPC)                    │
 ┌────────────▼──────────────────────────────────────▼─────────────────┐
 │  index.ts — MCP Server Bootstrap                                    │
-│  Registers 6 tools via McpServer.registerTool()                     │
+│  Registers 8 tools via McpServer.registerTool()                     │
 └────────────┬────────────────────────────────────────────────────────┘
              │
 ┌────────────▼────────────────────────────────────────────────────────┐
 │  handlers.ts — Tool Handler Implementations                         │
 │  Orchestrates submodules; each handler maps 1:1 to an MCP tool      │
-└──┬─────────────┬───────────────┬────────────────┬───────────────────┘
-   │             │               │                │
-   ▼             ▼               ▼                ▼
-┌────────┐ ┌──────────┐ ┌────────────┐ ┌──────────────────┐
-│session/│ │ maestro/ │ │ proxyman/  │ │   synthesis/     │
-│        │ │          │ │            │ │                  │
-│database│ │ wrapper  │ │ wrapper    │ │ correlator       │
-│manager │ │ hierarchy│ │ validator  │ │ generator        │
-│        │ │          │ │            │ │ stub-writer      │
-└────────┘ └──────────┘ └────────────┘ └──────────────────┘
+└──┬──────────┬──────────────┬───────────────┬──────────┬─────────────┘
+   │          │              │               │          │
+   ▼          ▼              ▼               ▼          ▼
+┌─────────┐ ┌────────────┐ ┌────────────┐ ┌──────────┐ ┌────────────┐
+│session/ │ │ maestro/   │ │ proxyman/  │ │synthesis/│ │segments/   │
+│         │ │            │ │            │ │          │ │wiremock/   │
+│database │ │ wrapper    │ │ wrapper    │ │correlator│ │            │
+│manager  │ │ daemon     │ │ validator  │ │generator │ │fingerprint │
+│touch-   │ │ hierarchy  │ │            │ │stub-     │ │registry    │
+│inferrer │ │ hier-differ│ │            │ │writer    │ │stub-server │
+└─────────┘ └────────────┘ └────────────┘ └──────────┘ └────────────┘
 ```
 
 ---
@@ -64,18 +65,20 @@ Each exported handler function accepts a typed input (from Zod) and returns a ty
 
 ### `src/index.ts` — Server Wiring
 
-Registers all 6 tools with the MCP SDK. Should only change when adding/removing tools or modifying tool metadata.
+Registers all 8 tools with the MCP SDK. Should only change when adding/removing tools or modifying tool metadata.
 
 ---
 
 ## Cross-Module Dependency Rules
 
 ```
-handlers.ts ──imports──▶ session/, maestro/, proxyman/, synthesis/
+handlers.ts ──imports──▶ session/, maestro/, proxyman/, synthesis/, segments/, wiremock/
 synthesis/  ──imports──▶ types.ts (for UIInteraction, NetworkEvent)
 session/    ──imports──▶ types.ts (for Session, UIInteraction, NetworkEvent)
 maestro/    ──imports──▶ types.ts (for UIHierarchyNode, UIElement)
 proxyman/   ──imports──▶ types.ts (for NetworkEvent)
+segments/   ──imports──▶ types.ts (for CorrelatedStep)
+wiremock/   ──imports──▶ (standalone — no cross-module deps)
 ```
 
 **Prohibited imports:**

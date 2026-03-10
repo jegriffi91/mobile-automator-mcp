@@ -16,7 +16,12 @@ UI automation via the Maestro CLI. Wraps the `maestro` binary to dispatch UI act
 |---|---|
 | `index.ts` | Barrel exports + global `maestroWrapper` singleton |
 | `wrapper.ts` | Maestro CLI wrapper — `execFile` calls for `maestro hierarchy`, tap, type, scroll, swipe, back |
-| `hierarchy.ts` | XML → `UIHierarchyNode[]` parser — normalizes the raw Maestro hierarchy dump into the domain model |
+| `hierarchy.ts` | JSON → `UIHierarchyNode[]` parser — normalizes the raw Maestro hierarchy dump into the domain model |
+| `env.ts` | Shared environment utilities — `resolveMaestroBin()` and `getExecEnv()` for JAVA_HOME/PATH resolution |
+| `daemon.ts` | `MaestroDaemon` — persistent `maestro mcp` child process for sub-second hierarchy polling via JSON-RPC |
+| `csv-hierarchy-parser.ts` | CSV → `UIHierarchyNode` parser for `inspect_view_hierarchy` output from Maestro MCP |
+| `hierarchy-differ.ts` | Diffs two `UIHierarchyNode[]` trees — computes `StateChange` with added/removed elements |
+| `hierarchy-differ.test.ts` | Unit tests for hierarchy diffing logic |
 
 ## Coding Standards
 

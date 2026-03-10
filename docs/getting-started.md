@@ -107,3 +107,66 @@ Add the following configuration to your MCP client's settings:
 
 - Check out the [Architecture](./architecture.md) document to understand how Maestro and Proxyman are orchestrated.
 - Read through the [Showcase](./showcase.md) to see examples of the AI-driven test creation workflow.
+
+---
+
+## Troubleshooting
+
+### Java / JAVA_HOME Not Found
+
+**Symptom:** `Java not found. Maestro requires a JDK.` or `JAVA_HOME = (not set)`.
+
+**Fix:**
+```bash
+# Install Java via Homebrew
+brew install openjdk@17
+
+# Add to your shell profile (~/.zshrc)
+export JAVA_HOME=$(/usr/libexec/java_home -v 17)
+export PATH="$JAVA_HOME/bin:$PATH"
+```
+
+Restart your terminal and verify with `java -version`.
+
+### Maestro Targets Wrong Device
+
+**Symptom:** Maestro runs on an Android emulator when you want iOS (or vice versa), or picks the wrong simulator when multiple are booted.
+
+**Fix:** The MCP server automatically passes `--udid` to Maestro after calling `validateSimulator()`. If you're running Maestro manually, specify the device:
+
+```bash
+# Find your device UDID
+xcrun simctl list devices booted   # iOS
+adb devices                        # Android
+
+# Pass it to Maestro
+maestro --udid <DEVICE_UDID> test my_flow.yaml
+```
+
+### Stale XCTest Driver
+
+**Symptom:** Maestro commands hang or time out with `Failed to reach out XCTest runner`. The XCTest driver can become stale after Xcode updates, simulator resets, or Maestro upgrades.
+
+**Fix:**
+```bash
+# Uninstall the stale driver (Maestro reinstalls automatically on next run)
+xcrun simctl uninstall booted dev.mobile.maestro-driver-iosUITests.xctrunner
+```
+
+The MCP server does this automatically at the start of each recording session and test run via `uninstallDriver()`.
+
+### gRPC UNAVAILABLE Errors
+
+**Symptom:** `UNAVAILABLE: io exception` or `StatusRuntimeException: UNAVAILABLE` from the Maestro daemon.
+
+**Possible causes:**
+1. **Port conflict** — another process is using the Maestro daemon port. Check with `lsof -i :7001`.
+2. **Stale daemon process** — kill orphaned Maestro processes:
+   ```bash
+   pkill -f 'maestro.cli'
+   ```
+3. **XCTest driver crash** — uninstall and let Maestro reinstall (see above).
+4. **Simulator not responsive** — restart the simulator from Xcode or via:
+   ```bash
+   xcrun simctl shutdown booted && xcrun simctl boot <DEVICE_UDID>
+   ```

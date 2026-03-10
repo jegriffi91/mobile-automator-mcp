@@ -30,7 +30,7 @@ export class HierarchyParser {
         const id = attrs['resource-id'] || node.id || node.resourceId;
         const testId = attrs.testID || node.testId;
         const text = attrs.text || node.text;
-        const accessibilityLabel = attrs.accessibilityLabel || attrs['content-desc'] || attrs['accessibility-id'] || node.accessibilityText || node.contentDesc;
+        const accessibilityLabel = attrs.accessibilityLabel || attrs.accessibilityText || attrs['content-desc'] || attrs['accessibility-id'] || node.accessibilityText || node.contentDesc;
         const role = attrs.class || attrs.type || node.class || node.role || 'Element';
 
         const children = Array.isArray(node.children)

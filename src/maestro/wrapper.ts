@@ -10,40 +10,33 @@
 
 import { execFile } from 'child_process';
 import { promisify } from 'util';
-import * as fsSync from 'fs';
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import * as os from 'os';
 import { randomUUID } from 'crypto';
 import type { UIActionType, UIElement, MobilePlatform } from '../types.js';
+import { resolveMaestroBin, getExecEnv } from './env.js';
 
 const execFileAsync = promisify(execFile);
 
 export class MaestroWrapper {
+    /**
+     * Strip the "None: \n" prefix that Maestro CLI prepends to hierarchy JSON output.
+     * Without this, JSON.parse() fails downstream in HierarchyParser and HierarchyDiffer.
+     */
+    private static stripHierarchyPrefix(raw: string): string {
+        // Maestro outputs "None: \n{...}" — strip everything before the first '{'
+        const idx = raw.indexOf('{');
+        if (idx > 0) {
+            return raw.slice(idx);
+        }
+        return raw;
+    }
     private maestroBin: string;
     private activeDeviceId?: string;
 
     constructor(maestroBin?: string) {
-        if (maestroBin) {
-            this.maestroBin = maestroBin;
-        } else {
-            // Resolve maestro from common install locations
-            const home = os.homedir();
-            const candidates = [
-                path.join(home, '.maestro', 'bin', 'maestro'),
-                '/usr/local/bin/maestro',
-                '/opt/homebrew/bin/maestro',
-                'maestro', // fallback to PATH
-            ];
-            this.maestroBin = candidates[candidates.length - 1]; // default fallback
-            for (const candidate of candidates) {
-                try {
-                    fsSync.accessSync(candidate, fsSync.constants.X_OK);
-                    this.maestroBin = candidate;
-                    break;
-                } catch { /* continue */ }
-            }
-        }
+        this.maestroBin = resolveMaestroBin(maestroBin);
     }
 
     /**
@@ -62,7 +55,7 @@ export class MaestroWrapper {
      * Call once at session start — throws immediately if the toolchain is broken.
      */
     async validateSetup(): Promise<void> {
-        const env = this.getExecEnv();
+        const env = getExecEnv();
 
         // 1. Check Java is reachable
         try {
@@ -94,41 +87,7 @@ export class MaestroWrapper {
         console.error(`[MaestroWrapper] validateSetup: Java + Maestro OK (bin: ${this.maestroBin})`);
     }
 
-    /**
-     * Build an environment map that ensures Java and Maestro are on the PATH.
-     */
-    private getExecEnv(): Record<string, string> {
-        const home = os.homedir();
-        const extraPaths = [
-            '/opt/homebrew/opt/openjdk@17/bin',
-            '/opt/homebrew/opt/openjdk/bin',
-            path.join(home, '.maestro', 'bin'),
-            '/opt/homebrew/bin',
-        ];
-        const currentPath = process.env['PATH'] || '/usr/bin:/bin';
-
-        // Resolve JAVA_HOME: prefer env var, then probe for installed openjdk versions
-        let javaHome = process.env['JAVA_HOME'] || '';
-        if (!javaHome) {
-            const candidates = [
-                '/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home',
-                '/opt/homebrew/opt/openjdk/libexec/openjdk.jdk/Contents/Home',
-            ];
-            for (const c of candidates) {
-                try {
-                    fsSync.accessSync(c);
-                    javaHome = c;
-                    break;
-                } catch { /* continue */ }
-            }
-        }
-
-        return {
-            ...process.env as Record<string, string>,
-            PATH: [...extraPaths, currentPath].join(':'),
-            JAVA_HOME: javaHome,
-        };
-    }
+    // getExecEnv() and resolveMaestroBin() moved to env.ts as shared utilities
 
     /**
      * Validate that a booted iOS/Android simulator is available.
@@ -169,6 +128,36 @@ export class MaestroWrapper {
     }
 
     /**
+     * Uninstall the Maestro UI driver from the target device.
+     * On iOS: removes the XCTest runner app. On Android: removes the Maestro server APKs.
+     * The next `maestro test` invocation will reinstall a fresh copy automatically.
+     */
+    async uninstallDriver(platform: MobilePlatform, deviceId?: string): Promise<void> {
+        const udid = deviceId || this.activeDeviceId;
+        if (!udid) {
+            console.error('[MaestroWrapper] uninstallDriver: no device ID — skipping');
+            return;
+        }
+
+        try {
+            if (platform === 'ios') {
+                const bundleId = 'dev.mobile.maestro-driver-iosUITests.xctrunner';
+                await execFileAsync('xcrun', ['simctl', 'uninstall', udid, bundleId], { timeout: 10_000 });
+                console.error(`[MaestroWrapper] uninstallDriver: removed iOS driver (${bundleId}) from ${udid}`);
+            } else if (platform === 'android') {
+                const adbPath = `${process.env.HOME}/Library/Android/sdk/platform-tools/adb`;
+                for (const pkg of ['dev.mobile.maestro.test', 'dev.mobile.maestro']) {
+                    await execFileAsync(adbPath, ['-s', udid, 'uninstall', pkg], { timeout: 10_000 }).catch(() => {});
+                }
+                console.error(`[MaestroWrapper] uninstallDriver: removed Android driver from ${udid}`);
+            }
+        } catch (error: unknown) {
+            // Non-fatal — driver may not be installed yet
+            console.error('[MaestroWrapper] uninstallDriver: failed (driver may not be installed):', error);
+        }
+    }
+
+    /**
      * Kill any orphaned `maestro hierarchy` Java processes from previous timed-out calls.
      */
     private async killStaleMaestroProcesses(): Promise<void> {
@@ -193,19 +182,46 @@ export class MaestroWrapper {
         try {
             const args = this.buildArgs(['hierarchy']);
             const { stdout } = await execFileAsync(this.maestroBin, args, {
-                env: this.getExecEnv(),
-                timeout: 30_000, // 30s — prevent indefinite hang
+                env: getExecEnv(),
+                timeout: 15_000, // 15s — fail fast if XCTest driver is dead
             });
-            return stdout;
+            return MaestroWrapper.stripHierarchyPrefix(stdout);
         } catch (error: any) {
             console.error('[MaestroWrapper] dumpHierarchy failed:', error);
             // Clean up the process we just spawned (timeout only kills the parent)
             await this.killStaleMaestroProcesses();
 
             if (error.killed || error.signal === 'SIGTERM') {
-                throw new Error('Hierarchy dump timed out after 30s. Is the simulator responsive?');
+                throw new Error('Hierarchy dump timed out after 15s. Is the simulator responsive?');
             }
             throw new Error(`Failed to dump hierarchy: ${error.message || String(error)}`);
+        }
+    }
+
+    /**
+     * Lightweight hierarchy dump for high-frequency polling.
+     *
+     * Unlike dumpHierarchy(), this skips the killStaleMaestroProcesses() call
+     * which adds 500ms+ of overhead per invocation. This is critical for the
+     * TouchInferrer which polls every 500ms — the kill step would prevent it
+     * from ever completing a full cycle.
+     *
+     * Uses a shorter timeout (10s) since polls happen frequently and shouldn't
+     * block for extended periods.
+     */
+    async dumpHierarchyLite(): Promise<string> {
+        try {
+            const args = this.buildArgs(['hierarchy']);
+            const { stdout } = await execFileAsync(this.maestroBin, args, {
+                env: getExecEnv(),
+                timeout: 10_000, // 10s — shorter timeout for frequent polling
+            });
+            return MaestroWrapper.stripHierarchyPrefix(stdout);
+        } catch (error: any) {
+            if (error.killed || error.signal === 'SIGTERM') {
+                throw new Error('Hierarchy dump (lite) timed out after 10s.');
+            }
+            throw new Error(`Failed to dump hierarchy (lite): ${error.message || String(error)}`);
         }
     }
 
@@ -299,7 +315,7 @@ export class MaestroWrapper {
             await fs.writeFile(tmpFile, yamlContent, 'utf-8');
 
             // Execute the temporary script
-            await execFileAsync(this.maestroBin, this.buildArgs(['test', tmpFile]), { env: this.getExecEnv(), timeout: 30_000 });
+            await execFileAsync(this.maestroBin, this.buildArgs(['test', tmpFile]), { env: getExecEnv(), timeout: 15_000 });
 
             // Cleanup
             await fs.unlink(tmpFile).catch(() => { });
@@ -324,8 +340,9 @@ export class MaestroWrapper {
                 this.maestroBin,
                 this.buildArgs(['test', yamlPath]),
                 {
-                    env: this.getExecEnv(),
+                    env: getExecEnv(),
                     maxBuffer: 10 * 1024 * 1024, // 10MB buffer for verbose output
+                    timeout: 120_000, // 120s — full test flows need more time than single actions
                 }
             );
             const durationMs = Date.now() - start;

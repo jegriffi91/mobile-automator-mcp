@@ -43,6 +43,8 @@ Depending on your assigned task, refer to the **nearest** `AGENTS.md` for module
 | UI automation, hierarchy | [`src/maestro/AGENTS.md`](./src/maestro/AGENTS.md) | Maestro CLI wrapper, XML hierarchy parser |
 | Network capture, validation | [`src/proxyman/AGENTS.md`](./src/proxyman/AGENTS.md) | Proxyman CLI wrapper, SDUI payload validator |
 | Test synthesis, correlation | [`src/synthesis/AGENTS.md`](./src/synthesis/AGENTS.md) | Correlator, YAML generator, WireMock stub writer |
+| Segment registry, dedup | [`src/segments/AGENTS.md`](./src/segments/AGENTS.md) | Fingerprinting, registry CRUD, segment matching |
+| Test orchestration, stubs | [`src/wiremock/AGENTS.md`](./src/wiremock/AGENTS.md) | In-process WireMock stub server, run-test flow |
 | Top-level server wiring | This file + `src/index.ts`, `src/handlers.ts`, `src/schemas.ts` | |
 
 For deep-dive context, follow these links:

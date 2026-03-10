@@ -11,6 +11,7 @@ import * as path from 'path';
 import * as os from 'os';
 import { sessionManager } from './session/index.js';
 import { maestroWrapper, HierarchyParser } from './maestro/index.js';
+import { MaestroDaemon } from './maestro/daemon.js';
 import { proxymanWrapper, PayloadValidator } from './proxyman/index.js';
 import { Correlator, YamlGenerator, StubWriter } from './synthesis/index.js';
 import { SegmentFingerprint, SegmentRegistry } from './segments/index.js';
@@ -53,6 +54,9 @@ export async function handleStartRecording(
     // Fast-fail if Java or Maestro isn't available
     await maestroWrapper.validateSetup();
 
+    // Uninstall stale Maestro driver — next `maestro` command will reinstall a fresh copy
+    await maestroWrapper.uninstallDriver(input.platform, validation.deviceId);
+
     await sessionManager.create(
         sessionId,
         input.appBundleId,
@@ -72,7 +76,9 @@ export async function handleStartRecording(
         // Non-fatal: we'll still capture all traffic at compile time
     }
 
-    sessionManager.startPolling(sessionId, input.platform, input.appBundleId);
+    // Start polling — prefer daemon (sub-second) with CLI fallback
+    const daemon = new MaestroDaemon();
+    await sessionManager.startPolling(sessionId, input.platform, input.appBundleId, maestroWrapper, daemon);
 
     return {
         sessionId,
@@ -210,7 +216,10 @@ export async function handleStopAndCompile(
 
     // Finalize session
     await sessionManager.transition(input.sessionId, 'done');
-    sessionManager.stopPolling(input.sessionId);
+    await sessionManager.stopPolling(input.sessionId);
+
+    // Clean up Maestro driver so it doesn't go stale between sessions
+    await maestroWrapper.uninstallDriver(session.platform, undefined);
 
     // Purge hierarchy snapshots to free memory
     await sessionManager.purgeSnapshots(input.sessionId);
@@ -470,6 +479,14 @@ export async function handleRunTest(
     input: RunTestInput
 ): Promise<RunTestOutput> {
     console.error(`[MCP] run_test: running ${input.yamlPath}`);
+
+    // Validate simulator + clean stale driver (same as handleStartRecording)
+    const platform = input.platform ?? 'ios';
+    const validation = await maestroWrapper.validateSimulator(platform);
+    if (!validation.booted) {
+        throw new Error(`No booted ${platform} simulator found. Please boot a device first.`);
+    }
+    await maestroWrapper.uninstallDriver(platform, validation.deviceId);
 
     let stubServer: StubServer | undefined;
     let stubServerPort: number | undefined;

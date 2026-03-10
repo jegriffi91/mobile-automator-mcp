@@ -25,6 +25,7 @@ describe('HierarchyDiffer', () => {
             const result = HierarchyDiffer.diff(tree, tree);
             expect(result.elementsAdded).toHaveLength(0);
             expect(result.elementsRemoved).toHaveLength(0);
+            expect(result.elementsChanged).toHaveLength(0);
         });
 
         it('should detect added elements', () => {
@@ -130,6 +131,34 @@ describe('HierarchyDiffer', () => {
             const result = HierarchyDiffer.diff(tree, tree, 42, 1500);
             expect(result.actionId).toBe(42);
             expect(result.settleDurationMs).toBe(1500);
+        });
+
+        it('should detect text value changes as elementsChanged (not add/remove)', () => {
+            const before: UIHierarchyNode = makeNode({
+                role: 'Application',
+                children: [
+                    makeNode({ role: 'TextField', id: 'username_field' }),
+                    makeNode({ role: 'Button', id: 'login_button', text: 'Login' }),
+                ],
+            });
+
+            const after: UIHierarchyNode = makeNode({
+                role: 'Application',
+                children: [
+                    makeNode({ role: 'TextField', id: 'username_field', text: 'admin' }),
+                    makeNode({ role: 'Button', id: 'login_button', text: 'Login' }),
+                ],
+            });
+
+            const result = HierarchyDiffer.diff(before, after);
+            // The text field changed, but it's not a true add/remove — it's a value change
+            expect(result.elementsAdded).toHaveLength(0);
+            expect(result.elementsRemoved).toHaveLength(0);
+            expect(result.elementsChanged).toHaveLength(1);
+            expect(result.elementsChanged[0].identityKey).toBe('id:username_field');
+            expect(result.elementsChanged[0].changedAttribute).toBe('text');
+            expect(result.elementsChanged[0].before.text).toBeUndefined();
+            expect(result.elementsChanged[0].after.text).toBe('admin');
         });
     });
 

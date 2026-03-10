@@ -51,6 +51,8 @@ export interface UIInteraction {
     actionType: UIActionType;
     element: UIElement;
     textInput?: string;
+    /** How this interaction was captured: 'dispatched' (via execute_ui_action) or 'inferred' (passive touch capture) */
+    source?: 'dispatched' | 'inferred';
 }
 
 export interface UIHierarchyNode {
@@ -76,6 +78,18 @@ export interface HierarchySnapshot {
     hierarchyJson: string;
 }
 
+/** Tracks an attribute change on a persistent element (same id, different text/value) */
+export interface ElementChange {
+    /** The element's stable identity key (id or accessibilityLabel) */
+    identityKey: string;
+    /** The element before the change */
+    before: UIElement;
+    /** The element after the change */
+    after: UIElement;
+    /** Which attribute changed */
+    changedAttribute: 'text' | 'accessibilityLabel' | 'role';
+}
+
 export interface StateChange {
     timestamp: string;
     /** Links to the interaction that caused this change */
@@ -84,6 +98,8 @@ export interface StateChange {
     elementsAdded: UIElement[];
     /** Elements that disappeared between pre-action and post-settle snapshots */
     elementsRemoved: UIElement[];
+    /** Elements whose attributes changed (e.g., text field value updated) */
+    elementsChanged: ElementChange[];
     /** How long the UI took to stabilize (ms) */
     settleDurationMs: number;
 }

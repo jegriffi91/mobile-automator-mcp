@@ -2,10 +2,11 @@
  * HierarchyDiffer — Diffs two parsed hierarchy trees to detect state changes.
  *
  * Compares UIHierarchyNode trees by identity (id, accessibilityLabel, text)
- * and produces a StateChange showing which elements appeared or disappeared.
+ * and produces a StateChange showing which elements appeared, disappeared,
+ * or changed attributes.
  */
 
-import type { UIHierarchyNode, UIElement, StateChange } from '../types.js';
+import type { UIHierarchyNode, UIElement, StateChange, ElementChange } from '../types.js';
 
 /**
  * Flatten a hierarchy tree into a list of leaf-level elements for comparison.
@@ -38,6 +39,18 @@ function elementKey(el: UIElement): string {
     return `${el.id || ''}|${el.accessibilityLabel || ''}|${el.text || ''}|${el.role || ''}`;
 }
 
+/**
+ * Compute a stable identity key that ignores mutable attributes (text).
+ * Two elements with the same identityKey are the "same" element — we can then
+ * detect their attribute changes.
+ */
+function identityKey(el: UIElement): string {
+    // Prefer id, then accessibilityLabel. Text is mutable so it's not a stable identity.
+    if (el.id) return `id:${el.id}`;
+    if (el.accessibilityLabel) return `label:${el.accessibilityLabel}`;
+    return '';
+}
+
 export class HierarchyDiffer {
     /**
      * Diff two hierarchy trees and return the state change.
@@ -59,14 +72,53 @@ export class HierarchyDiffer {
         const beforeKeys = new Set(beforeElements.map(elementKey));
         const afterKeys = new Set(afterElements.map(elementKey));
 
-        const elementsAdded: UIElement[] = afterElements.filter((el) => !beforeKeys.has(elementKey(el)));
-        const elementsRemoved: UIElement[] = beforeElements.filter((el) => !afterKeys.has(elementKey(el)));
+        // Raw adds/removes based on full element key (including text)
+        const rawAdded = afterElements.filter((el) => !beforeKeys.has(elementKey(el)));
+        const rawRemoved = beforeElements.filter((el) => !afterKeys.has(elementKey(el)));
+
+        // Detect attribute changes: elements with the same identity but different full key
+        const elementsChanged: ElementChange[] = [];
+        const matchedAddedIndices = new Set<number>();
+        const matchedRemovedIndices = new Set<number>();
+
+        for (let ri = 0; ri < rawRemoved.length; ri++) {
+            const removed = rawRemoved[ri];
+            const removedId = identityKey(removed);
+            if (!removedId) continue; // can't track elements without stable identity
+
+            for (let ai = 0; ai < rawAdded.length; ai++) {
+                if (matchedAddedIndices.has(ai)) continue;
+                const added = rawAdded[ai];
+                if (identityKey(added) === removedId) {
+                    // Same element, different attributes — this is a change, not add/remove
+                    const changedAttr = removed.text !== added.text ? 'text' as const
+                        : removed.accessibilityLabel !== added.accessibilityLabel ? 'accessibilityLabel' as const
+                        : 'role' as const;
+
+                    elementsChanged.push({
+                        identityKey: removedId,
+                        before: removed,
+                        after: added,
+                        changedAttribute: changedAttr,
+                    });
+
+                    matchedRemovedIndices.add(ri);
+                    matchedAddedIndices.add(ai);
+                    break;
+                }
+            }
+        }
+
+        // Filter out matched pairs from added/removed
+        const elementsAdded = rawAdded.filter((_, i) => !matchedAddedIndices.has(i));
+        const elementsRemoved = rawRemoved.filter((_, i) => !matchedRemovedIndices.has(i));
 
         return {
             timestamp: new Date().toISOString(),
             actionId,
             elementsAdded,
             elementsRemoved,
+            elementsChanged,
             settleDurationMs,
         };
     }
@@ -95,3 +147,4 @@ export class HierarchyDiffer {
         }
     }
 }
+

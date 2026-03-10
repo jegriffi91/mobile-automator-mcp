@@ -17,6 +17,8 @@ Session lifecycle management and SQLite persistence. Owns the recording session 
 | `index.ts` | Barrel exports + global `sessionManager` singleton |
 | `database.ts` | sql.js wrapper — schema creation, raw SQL queries for sessions, interactions, and network events |
 | `manager.ts` | High-level session API — create, start, stop, log interaction, log network event, query |
+| `touch-inferrer.ts` | Passive touch capture — diffs consecutive hierarchy snapshots to infer `UIInteraction` records |
+| `touch-inferrer.test.ts` | Unit tests for touch inference logic |
 
 ## Coding Standards
 

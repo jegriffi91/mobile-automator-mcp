@@ -1,0 +1,10 @@
+appId: io.appcision.projectdoombot
+---
+- launchApp
+- tapOn:
+    text: "ENTER USERNAME"
+- tapOn:
+    text: "ENTER USERNAME"
+- inputText: "admin"
+- tapOn:
+    text: "ENTER THE LAIR"
