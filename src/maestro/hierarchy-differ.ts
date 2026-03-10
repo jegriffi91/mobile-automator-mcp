@@ -12,7 +12,7 @@ import type { UIHierarchyNode, UIElement, StateChange, ElementChange } from '../
  * Flatten a hierarchy tree into a list of leaf-level elements for comparison.
  * Skips container nodes (no identifier) and focuses on identifiable elements.
  */
-function flattenToElements(node: UIHierarchyNode): UIElement[] {
+export function flattenToElements(node: UIHierarchyNode): UIElement[] {
     const elements: UIElement[] = [];
 
     const hasIdentity = node.id || node.accessibilityLabel || node.text;

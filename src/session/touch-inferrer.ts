@@ -12,7 +12,7 @@
  */
 
 import type { UIInteraction, UIElement, UIActionType, StateChange, UIHierarchyNode } from '../types.js';
-import { HierarchyDiffer } from '../maestro/hierarchy-differ.js';
+import { HierarchyDiffer, flattenToElements } from '../maestro/hierarchy-differ.js';
 
 /** Health status returned by TouchInferrer.getStatus() */
 export interface PollingStatus {
@@ -29,6 +29,15 @@ export interface PollingStatus {
   actualPollingRateMs?: number;
   /** Configured polling interval (ms) */
   configuredPollingRateMs?: number;
+  // ── Diagnostic counters ──
+  /** Number of polls where the hierarchy tree was identical to the previous (no diff needed) */
+  equalTreeCount?: number;
+  /** Number of diffs that exceeded maxChangesThreshold (discarded as full-screen transitions) */
+  thresholdExceededCount?: number;
+  /** Number of diffs where changes existed but inferInteraction returned null (no identifiable elements) */
+  diffButNullInferenceCount?: number;
+  /** Number of identifiable elements in the baseline hierarchy snapshot */
+  baselineElementCount?: number;
 }
 
 /** Callback to send real-time polling log messages to the MCP client */
@@ -203,6 +212,12 @@ export class TouchInferrer {
   private lastError?: string;
   private startedAt?: number;
 
+  // ── Diagnostic counters ──
+  private equalTreeCount = 0;
+  private thresholdExceededCount = 0;
+  private diffButNullInferenceCount = 0;
+  private baselineElementCount = 0;
+
   constructor(
     logger: InteractionLogger,
     hierarchyReader: HierarchyReader,
@@ -281,6 +296,10 @@ export class TouchInferrer {
       inferredCount: this.inferredCount,
       lastError: this.lastError,
       configuredPollingRateMs: this.config.pollingIntervalMs,
+      equalTreeCount: this.equalTreeCount,
+      thresholdExceededCount: this.thresholdExceededCount,
+      diffButNullInferenceCount: this.diffButNullInferenceCount,
+      baselineElementCount: this.baselineElementCount,
     };
     if (this.startedAt && this.pollCount > 0) {
       const elapsed = Date.now() - this.startedAt;
@@ -316,13 +335,15 @@ export class TouchInferrer {
       if (!this.previousHierarchy) {
         // First snapshot — no diff possible yet
         this.previousHierarchy = currentHierarchy;
-        console.error('[TouchInferrer] pollOnce: captured initial baseline snapshot');
-        this.notify('info', { event: 'baseline_captured', pollCount: this.pollCount });
+        this.baselineElementCount = flattenToElements(currentHierarchy).length;
+        console.error(`[TouchInferrer] pollOnce: captured initial baseline snapshot (${this.baselineElementCount} identifiable elements)`);
+        this.notify('info', { event: 'baseline_captured', pollCount: this.pollCount, identifiableElements: this.baselineElementCount });
         return null;
       }
 
       // Quick equality check using tree comparison
       if (HierarchyDiffer.areEqualTrees(this.previousHierarchy, currentHierarchy)) {
+        this.equalTreeCount++;
         return null;
       }
 
@@ -345,6 +366,23 @@ export class TouchInferrer {
         return null;
       }
 
+      // Log diff summary for diagnostics
+      const totalChanges = stateChange.elementsAdded.length + stateChange.elementsRemoved.length + (stateChange.elementsChanged?.length ?? 0);
+      console.error(
+        `[TouchInferrer] pollOnce: diff detected — +${stateChange.elementsAdded.length} / -${stateChange.elementsRemoved.length} / ~${stateChange.elementsChanged?.length ?? 0} (total: ${totalChanges}, threshold: ${this.config.maxChangesThreshold})`,
+      );
+
+      // Check if threshold was exceeded (inferInteraction will return null)
+      if (totalChanges > this.config.maxChangesThreshold) {
+        this.thresholdExceededCount++;
+        console.error(`[TouchInferrer] pollOnce: threshold exceeded (${totalChanges} > ${this.config.maxChangesThreshold}), skipping`);
+        this.notify('debug', {
+          event: 'threshold_exceeded',
+          totalChanges,
+          threshold: this.config.maxChangesThreshold,
+        });
+      }
+
       // Infer interaction from the diff
       const interaction = inferInteraction(sessionId, stateChange, this.config);
       if (interaction) {
@@ -362,6 +400,19 @@ export class TouchInferrer {
           actionType: interaction.actionType,
           target,
           inferredCount: this.inferredCount,
+        });
+      } else if (totalChanges > 0 && totalChanges <= this.config.maxChangesThreshold) {
+        // Diff had changes within threshold, but inferInteraction returned null
+        // (no identifiable elements in the changed set)
+        this.diffButNullInferenceCount++;
+        console.error(
+          `[TouchInferrer] pollOnce: diff had ${totalChanges} changes but no identifiable elements — inference returned null`,
+        );
+        this.notify('debug', {
+          event: 'diff_no_identity',
+          totalChanges,
+          addedSample: stateChange.elementsAdded.slice(0, 3).map((el) => el.role || 'unknown'),
+          removedSample: stateChange.elementsRemoved.slice(0, 3).map((el) => el.role || 'unknown'),
         });
       }
 

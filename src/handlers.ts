@@ -258,6 +258,26 @@ export async function handleStopAndCompile(
             );
         } else if (pollingDiagnostics.pollCount === 0) {
             console.error('[MCP] ⚠️  No interactions captured. Poller never ran — daemon may have failed to start.');
+        } else {
+            // Detailed breakdown of why no interactions were inferred
+            const diag = [
+                `polls: ${pollingDiagnostics.pollCount}`,
+                `equalTrees: ${pollingDiagnostics.equalTreeCount ?? 0}`,
+                `thresholdExceeded: ${pollingDiagnostics.thresholdExceededCount ?? 0}`,
+                `diffButNull: ${pollingDiagnostics.diffButNullInferenceCount ?? 0}`,
+                `baselineElements: ${pollingDiagnostics.baselineElementCount ?? 0}`,
+            ].join(', ');
+            console.error(`[MCP] ⚠️  No interactions captured. Diagnostic breakdown: ${diag}`);
+
+            if ((pollingDiagnostics.equalTreeCount ?? 0) > pollingDiagnostics.pollCount * 0.9) {
+                console.error('[MCP] 💡 Hint: >90% of polls returned identical trees. The daemon may be returning stale/cached hierarchy data.');
+            }
+            if ((pollingDiagnostics.thresholdExceededCount ?? 0) > 0) {
+                console.error(`[MCP] 💡 Hint: ${pollingDiagnostics.thresholdExceededCount} diff(s) exceeded the maxChangesThreshold. Consider raising the threshold for apps with many UI elements.`);
+            }
+            if ((pollingDiagnostics.diffButNullInferenceCount ?? 0) > 0) {
+                console.error(`[MCP] 💡 Hint: ${pollingDiagnostics.diffButNullInferenceCount} diff(s) had changes but no identifiable elements. The app may lack accessibility IDs.`);
+            }
         }
     }
 
