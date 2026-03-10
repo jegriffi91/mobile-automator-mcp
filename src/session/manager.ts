@@ -13,6 +13,8 @@
 import type { Session, SessionStatus, UIInteraction, NetworkEvent, MobilePlatform, HierarchySnapshot, CaptureMode } from '../types.js';
 import { SessionDatabase } from './database.js';
 import { TouchInferrer } from './touch-inferrer.js';
+import type { PollingStatus, PollingNotifier } from './touch-inferrer.js';
+import { HierarchyParser } from '../maestro/hierarchy.js';
 import type { MaestroWrapper } from '../maestro/wrapper.js';
 import type { MaestroDaemon } from '../maestro/daemon.js';
 
@@ -183,6 +185,7 @@ export class SessionManager {
         appBundleId: string,
         maestro?: MaestroWrapper,
         daemon?: MaestroDaemon,
+        notifier?: PollingNotifier,
     ): Promise<void> {
         if (this.activePollers.has(sessionId)) return;
 
@@ -199,8 +202,8 @@ export class SessionManager {
 
                 console.error(`[SessionManager] startPolling: using MaestroDaemon for ${sessionId} (interval: ${pollingIntervalMs}ms)`);
 
-                const hierarchyReader = daemon.createHierarchyReader();
-                const inferrer = new TouchInferrer(logger, hierarchyReader, { pollingIntervalMs });
+                const hierarchyReader = daemon.createTreeReader();
+                const inferrer = new TouchInferrer(logger, hierarchyReader, { pollingIntervalMs }, notifier);
                 inferrer.start(sessionId);
                 this.activePollers.set(sessionId, inferrer);
                 return;
@@ -218,10 +221,33 @@ export class SessionManager {
 
         console.error(`[SessionManager] startPolling: using CLI wrapper for ${sessionId} on ${platform} (interval: ${pollingIntervalMs}ms)`);
 
-        const hierarchyReader = () => maestro.dumpHierarchyLite();
-        const inferrer = new TouchInferrer(logger, hierarchyReader, { pollingIntervalMs });
+        const hierarchyReader = async () => {
+            const raw = await maestro.dumpHierarchyLite();
+            return HierarchyParser.parse(raw);
+        };
+        const inferrer = new TouchInferrer(logger, hierarchyReader, { pollingIntervalMs }, notifier);
         inferrer.start(sessionId);
         this.activePollers.set(sessionId, inferrer);
+    }
+
+    /**
+     * Get polling health status for a session.
+     * Returns null if no active poller exists.
+     */
+    getPollingStatus(sessionId: string): PollingStatus | null {
+        const inferrer = this.activePollers.get(sessionId);
+        return inferrer ? inferrer.getStatus() : null;
+    }
+
+    /**
+     * Suppress the next inferred interaction for a session.
+     * Used by execute_ui_action to prevent double-logging.
+     */
+    suppressNextInference(sessionId: string): void {
+        const inferrer = this.activePollers.get(sessionId);
+        if (inferrer) {
+            inferrer.suppress();
+        }
     }
 
     /**

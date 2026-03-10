@@ -135,16 +135,24 @@ export class HierarchyDiffer {
         try {
             const treeA: UIHierarchyNode = JSON.parse(jsonA);
             const treeB: UIHierarchyNode = JSON.parse(jsonB);
-            const keysA = new Set(flattenToElements(treeA).map(elementKey));
-            const keysB = new Set(flattenToElements(treeB).map(elementKey));
-            if (keysA.size !== keysB.size) return false;
-            for (const k of keysA) {
-                if (!keysB.has(k)) return false;
-            }
-            return true;
+            return HierarchyDiffer.areEqualTrees(treeA, treeB);
         } catch {
             return false;
         }
+    }
+
+    /**
+     * Compare two parsed UIHierarchyNode trees for equality.
+     * Used by TouchInferrer for fast tree comparison without JSON serialization.
+     */
+    static areEqualTrees(treeA: UIHierarchyNode, treeB: UIHierarchyNode): boolean {
+        const keysA = new Set(flattenToElements(treeA).map(elementKey));
+        const keysB = new Set(flattenToElements(treeB).map(elementKey));
+        if (keysA.size !== keysB.size) return false;
+        for (const k of keysA) {
+            if (!keysB.has(k)) return false;
+        }
+        return true;
     }
 }
 

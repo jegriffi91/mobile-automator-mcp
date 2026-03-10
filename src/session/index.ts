@@ -10,6 +10,7 @@
 export { SessionDatabase } from './database.js';
 export { SessionManager } from './manager.js';
 export { TouchInferrer, inferInteraction } from './touch-inferrer.js';
+export type { PollingStatus } from './touch-inferrer.js';
 
 import { SessionManager } from './manager.js';
 

@@ -13,8 +13,8 @@ import { resolveMaestroBin, getExecEnv } from './env.js';
 import { parseCsvHierarchy } from './csv-hierarchy-parser.js';
 import type { UIHierarchyNode } from '../types.js';
 
-/** Matches `HierarchyParser.parse()` return format for interchangeability */
-export type HierarchyReader = () => Promise<string>;
+/** Returns a parsed UIHierarchyNode tree for the TouchInferrer */
+export type TreeHierarchyReader = () => Promise<UIHierarchyNode>;
 
 export class MaestroDaemon {
   private process: ChildProcess | null = null;
@@ -130,11 +130,14 @@ export class MaestroDaemon {
   }
 
   /**
-   * Create a hierarchy reader function compatible with TouchInferrer.
-   * Returns a function that calls getHierarchyRaw() on the warm daemon.
+   * Create a tree reader function compatible with TouchInferrer.
+   * Returns parsed UIHierarchyNode trees from the warm daemon's CSV output.
    */
-  createHierarchyReader(): HierarchyReader {
-    return () => this.getHierarchyRaw();
+  createTreeReader(): TreeHierarchyReader {
+    return async () => {
+      const csv = await this.getHierarchyRaw();
+      return parseCsvHierarchy(csv);
+    };
   }
 
   /**

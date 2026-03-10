@@ -1,0 +1,5 @@
+appId: com.doombot.ios
+---
+- launchApp
+- tapOn:
+    id: "login_submit_button"

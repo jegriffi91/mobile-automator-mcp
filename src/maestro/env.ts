@@ -73,9 +73,16 @@ export function getExecEnv(): Record<string, string> {
     }
   }
 
+  // Resolve ANDROID_HOME for adb access
+  const androidHome = process.env['ANDROID_HOME'] ||
+    `${os.homedir()}/Library/Android/sdk`;
+
   return {
     ...(process.env as Record<string, string>),
-    PATH: [...extraPaths, currentPath].join(':'),
+    PATH: [...extraPaths, `${androidHome}/platform-tools`, currentPath].join(':'),
     JAVA_HOME: javaHome,
+    ANDROID_HOME: androidHome,
+    // Give the XCTest / Android driver enough time to install after uninstallDriver()
+    MAESTRO_DRIVER_STARTUP_TIMEOUT: process.env['MAESTRO_DRIVER_STARTUP_TIMEOUT'] || '120000',
   };
 }

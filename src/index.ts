@@ -40,6 +40,7 @@ import {
     handleVerifySDUIPayload,
     handleRegisterSegment,
     handleRunTest,
+    setMcpServer,
 } from './handlers.js';
 
 import { sessionManager } from './session/index.js';
@@ -52,6 +53,9 @@ const server = new McpServer({
     name: 'mobile-automator-mcp',
     version: '0.1.0',
 });
+
+// Wire the server into handlers for real-time polling notifications
+setMcpServer(server);
 
 // ── 1. start_recording_session ──
 server.registerTool(

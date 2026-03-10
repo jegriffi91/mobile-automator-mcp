@@ -18,6 +18,8 @@ import { SegmentFingerprint, SegmentRegistry } from './segments/index.js';
 import { StubServer } from './wiremock/index.js';
 import type { MockingConfig } from './synthesis/index.js';
 import type { NetworkEvent, StateChange } from './types.js';
+import type { PollingNotifier } from './session/touch-inferrer.js';
+import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type {
     StartRecordingInput,
     StartRecordingOutput,
@@ -36,6 +38,29 @@ import type {
     RunTestInput,
     RunTestOutput,
 } from './schemas.js';
+
+// ── MCP Server reference for sending logging notifications ──
+let mcpServer: McpServer | undefined;
+
+/** Set the MCP server instance for real-time polling notifications */
+export function setMcpServer(server: McpServer): void {
+    mcpServer = server;
+}
+
+/** Create a PollingNotifier that sends messages via MCP logging API */
+function createPollingNotifier(): PollingNotifier | undefined {
+    if (!mcpServer) return undefined;
+    const server = mcpServer;
+    return (level: string, data: Record<string, unknown>) => {
+        server.sendLoggingMessage({
+            level: level as 'info' | 'debug' | 'warning' | 'error',
+            logger: 'TouchInferrer',
+            data,
+        }).catch(() => {
+            // Best-effort — don't crash on notification failure
+        });
+    };
+}
 
 // ---- start_recording_session ----
 export async function handleStartRecording(
@@ -78,7 +103,8 @@ export async function handleStartRecording(
 
     // Start polling — prefer daemon (sub-second) with CLI fallback
     const daemon = new MaestroDaemon();
-    await sessionManager.startPolling(sessionId, input.platform, input.appBundleId, maestroWrapper, daemon);
+    const notifier = createPollingNotifier();
+    await sessionManager.startPolling(sessionId, input.platform, input.appBundleId, maestroWrapper, daemon, notifier);
 
     return {
         sessionId,
@@ -214,6 +240,27 @@ export async function handleStopAndCompile(
 
     console.error(`[MCP] stop_and_compile_test: wrote ${steps.length} steps to ${outputPath}`);
 
+    // ── Step 7: Capture polling diagnostics BEFORE stopping the poller ──
+    const pollingStatus = sessionManager.getPollingStatus(input.sessionId);
+    const pollingDiagnostics = pollingStatus ?? undefined;
+
+    if (pollingDiagnostics) {
+        console.error(
+            `[MCP] stop_and_compile_test: polling diagnostics — polls: ${pollingDiagnostics.pollCount}, success: ${pollingDiagnostics.successCount}, errors: ${pollingDiagnostics.errorCount}, inferred: ${pollingDiagnostics.inferredCount}` +
+            (pollingDiagnostics.lastError ? `, lastError: ${pollingDiagnostics.lastError}` : '')
+        );
+    }
+
+    if (interactions.length === 0 && pollingDiagnostics) {
+        if (pollingDiagnostics.errorCount > 0) {
+            console.error(
+                `[MCP] ⚠️  No interactions captured. Polling had ${pollingDiagnostics.errorCount} error(s). Last error: ${pollingDiagnostics.lastError}`
+            );
+        } else if (pollingDiagnostics.pollCount === 0) {
+            console.error('[MCP] ⚠️  No interactions captured. Poller never ran — daemon may have failed to start.');
+        }
+    }
+
     // Finalize session
     await sessionManager.transition(input.sessionId, 'done');
     await sessionManager.stopPolling(input.sessionId);
@@ -233,6 +280,7 @@ export async function handleStopAndCompile(
         manifestPath,
         segmentFingerprint,
         matchedSegments,
+        pollingDiagnostics,
     };
 }
 
@@ -281,6 +329,9 @@ export async function handleExecuteUIAction(
     }
 
     // ── Execute the action ──
+    // Suppress the poller to prevent double-logging
+    sessionManager.suppressNextInference(input.sessionId);
+
     const result = await maestroWrapper.executeAction(input.action, input.element, input.textInput);
     if (!result.success) {
         throw new Error(`Failed to execute action: ${result.error}`);
@@ -291,7 +342,8 @@ export async function handleExecuteUIAction(
         timestamp: new Date().toISOString(),
         actionType: input.action,
         element: input.element,
-        textInput: input.textInput
+        textInput: input.textInput,
+        source: 'dispatched',
     });
 
     // ── Post-settle snapshot + diff (event-triggered mode) ──

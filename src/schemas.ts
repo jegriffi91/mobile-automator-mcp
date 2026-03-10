@@ -232,6 +232,20 @@ export const StopAndCompileOutputSchema = z.object({
         )
         .optional()
         .describe('Existing registered segments that match this recording'),
+    pollingDiagnostics: z
+        .object({
+            pollCount: z.number().describe('Total number of polling attempts'),
+            successCount: z.number().describe('Number of successful hierarchy reads'),
+            errorCount: z.number().describe('Number of failed hierarchy reads'),
+            inferredCount: z.number().describe('Number of interactions inferred from diffs'),
+            lastError: z.string().optional().describe('Most recent polling error message'),
+            elapsedMs: z.number().optional().describe('Milliseconds since polling started'),
+            expectedPolls: z.number().optional().describe('Expected poll count based on elapsed time'),
+            actualPollingRateMs: z.number().optional().describe('Average actual polling interval (ms)'),
+            configuredPollingRateMs: z.number().optional().describe('Configured polling interval (ms)'),
+        })
+        .optional()
+        .describe('Health diagnostics from the passive capture polling loop'),
 });
 
 export const RegisterSegmentOutputSchema = z.object({

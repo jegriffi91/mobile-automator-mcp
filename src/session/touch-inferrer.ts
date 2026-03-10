@@ -11,15 +11,34 @@
  * interactions through SessionManager.
  */
 
-import type { UIInteraction, UIElement, UIActionType, StateChange } from '../types.js';
-import { HierarchyParser } from '../maestro/hierarchy.js';
+import type { UIInteraction, UIElement, UIActionType, StateChange, UIHierarchyNode } from '../types.js';
 import { HierarchyDiffer } from '../maestro/hierarchy-differ.js';
+
+/** Health status returned by TouchInferrer.getStatus() */
+export interface PollingStatus {
+  pollCount: number;
+  successCount: number;
+  errorCount: number;
+  inferredCount: number;
+  lastError?: string;
+  /** ms since polling started */
+  elapsedMs?: number;
+  /** Expected poll count based on elapsed time and configured interval */
+  expectedPolls?: number;
+  /** Average actual interval between polls (ms) */
+  actualPollingRateMs?: number;
+  /** Configured polling interval (ms) */
+  configuredPollingRateMs?: number;
+}
+
+/** Callback to send real-time polling log messages to the MCP client */
+export type PollingNotifier = (level: string, data: Record<string, unknown>) => void;
 
 /** Callback to persist an inferred interaction */
 export type InteractionLogger = (interaction: UIInteraction) => Promise<void>;
 
 /** Callback to read the current UI hierarchy (returns raw string for diffing) */
-export type HierarchyReader = () => Promise<string>;
+export type HierarchyReader = () => Promise<UIHierarchyNode>;
 
 /** Configuration for the touch inferrer */
 export interface TouchInferrerConfig {
@@ -36,6 +55,9 @@ const DEFAULT_CONFIG: TouchInferrerConfig = {
   maxChangesThreshold: 50,
   debounceMs: 300,
 };
+
+/** Throttle debug-level notifications to every Nth poll */
+const DEBUG_NOTIFY_EVERY = 10;
 
 /**
  * Infer a UIInteraction from a StateChange produced by hierarchy diffing.
@@ -166,19 +188,31 @@ export class TouchInferrer {
   private logger: InteractionLogger;
   private hierarchyReader: HierarchyReader;
   private config: TouchInferrerConfig;
+  private notifier?: PollingNotifier;
   private timer: ReturnType<typeof setInterval> | null = null;
-  private previousHierarchy: string | null = null;
+  private previousHierarchy: UIHierarchyNode | null = null;
   private lastInferredAt = 0;
   private polling = false;
+  private suppressed = false;
+
+  // ── Polling health counters ──
+  private pollCount = 0;
+  private successCount = 0;
+  private errorCount = 0;
+  private inferredCount = 0;
+  private lastError?: string;
+  private startedAt?: number;
 
   constructor(
     logger: InteractionLogger,
     hierarchyReader: HierarchyReader,
     config: Partial<TouchInferrerConfig> = {},
+    notifier?: PollingNotifier,
   ) {
     this.logger = logger;
     this.hierarchyReader = hierarchyReader;
     this.config = { ...DEFAULT_CONFIG, ...config };
+    this.notifier = notifier;
   }
 
   /**
@@ -187,9 +221,15 @@ export class TouchInferrer {
   start(sessionId: string): void {
     if (this.timer) return; // already running
 
+    this.startedAt = Date.now();
     console.error(
       `[TouchInferrer] start: polling every ${this.config.pollingIntervalMs}ms for session ${sessionId}`,
     );
+    this.notify('info', {
+      event: 'polling_started',
+      sessionId,
+      pollingIntervalMs: this.config.pollingIntervalMs,
+    });
 
     this.timer = setInterval(() => {
       // Guard against overlapping polls
@@ -212,8 +252,43 @@ export class TouchInferrer {
       this.timer = null;
       this.previousHierarchy = null;
       this.polling = false;
-      console.error('[TouchInferrer] stop: polling stopped');
+      console.error(
+        `[TouchInferrer] stop: polling stopped (polls: ${this.pollCount}, success: ${this.successCount}, errors: ${this.errorCount}, inferred: ${this.inferredCount})`,
+      );
     }
+  }
+
+  /**
+   * Get current polling health status.
+   */
+  /**
+   * Suppress the next inferred interaction.
+   * Used by execute_ui_action to prevent double-logging.
+   * The poller will still update its baseline hierarchy but skip logging.
+   */
+  suppress(): void {
+    this.suppressed = true;
+  }
+
+  /**
+   * Get current polling health status, including rate metrics.
+   */
+  getStatus(): PollingStatus {
+    const status: PollingStatus = {
+      pollCount: this.pollCount,
+      successCount: this.successCount,
+      errorCount: this.errorCount,
+      inferredCount: this.inferredCount,
+      lastError: this.lastError,
+      configuredPollingRateMs: this.config.pollingIntervalMs,
+    };
+    if (this.startedAt && this.pollCount > 0) {
+      const elapsed = Date.now() - this.startedAt;
+      status.elapsedMs = elapsed;
+      status.expectedPolls = Math.floor(elapsed / this.config.pollingIntervalMs);
+      status.actualPollingRateMs = Math.round(elapsed / this.pollCount);
+    }
+    return status;
   }
 
   /**
@@ -222,29 +297,47 @@ export class TouchInferrer {
    */
   async pollOnce(sessionId: string): Promise<UIInteraction | null> {
     this.polling = true;
+    this.pollCount++;
     try {
       const currentHierarchy = await this.hierarchyReader();
+      this.successCount++;
+
+      // Periodic debug notification (throttled)
+      if (this.pollCount % DEBUG_NOTIFY_EVERY === 0) {
+        this.notify('debug', {
+          event: 'poll_status',
+          pollCount: this.pollCount,
+          successCount: this.successCount,
+          errorCount: this.errorCount,
+          inferredCount: this.inferredCount,
+        });
+      }
 
       if (!this.previousHierarchy) {
         // First snapshot — no diff possible yet
         this.previousHierarchy = currentHierarchy;
         console.error('[TouchInferrer] pollOnce: captured initial baseline snapshot');
+        this.notify('info', { event: 'baseline_captured', pollCount: this.pollCount });
         return null;
       }
 
-      // Quick equality check before parsing
-      if (HierarchyDiffer.areEqual(this.previousHierarchy, currentHierarchy)) {
-        console.error('[TouchInferrer] pollOnce: no change detected');
+      // Quick equality check using tree comparison
+      if (HierarchyDiffer.areEqualTrees(this.previousHierarchy, currentHierarchy)) {
         return null;
       }
 
-      // Parse and diff
-      const beforeTree = HierarchyParser.parse(this.previousHierarchy);
-      const afterTree = HierarchyParser.parse(currentHierarchy);
-      const stateChange = HierarchyDiffer.diff(beforeTree, afterTree);
+      // Diff the parsed trees directly
+      const stateChange = HierarchyDiffer.diff(this.previousHierarchy, currentHierarchy);
 
       // Update previous for next iteration
       this.previousHierarchy = currentHierarchy;
+
+      // If suppressed (AI-led action already logged this), skip inference but keep baseline
+      if (this.suppressed) {
+        this.suppressed = false;
+        console.error('[TouchInferrer] pollOnce: diff detected but suppressed (AI-led action)');
+        return null;
+      }
 
       // Debounce: skip if we just inferred an interaction
       const now = Date.now();
@@ -256,15 +349,45 @@ export class TouchInferrer {
       const interaction = inferInteraction(sessionId, stateChange, this.config);
       if (interaction) {
         this.lastInferredAt = now;
+        this.inferredCount++;
         await this.logger(interaction);
-        console.error(
-          `[TouchInferrer] inferred: ${interaction.actionType} on "${interaction.element.id || interaction.element.accessibilityLabel || interaction.element.text || 'unknown'}"`,
-        );
+        const target =
+          interaction.element.id ||
+          interaction.element.accessibilityLabel ||
+          interaction.element.text ||
+          'unknown';
+        console.error(`[TouchInferrer] inferred: ${interaction.actionType} on "${target}"`);
+        this.notify('info', {
+          event: 'interaction_inferred',
+          actionType: interaction.actionType,
+          target,
+          inferredCount: this.inferredCount,
+        });
       }
 
       return interaction;
+    } catch (err) {
+      this.errorCount++;
+      this.lastError = err instanceof Error ? err.message : String(err);
+      this.notify('warning', {
+        event: 'poll_error',
+        errorCount: this.errorCount,
+        error: this.lastError,
+      });
+      throw err; // re-throw so the caller's catch handler still logs it
     } finally {
       this.polling = false;
+    }
+  }
+
+  /** Send a notification to the MCP client if a notifier is configured */
+  private notify(level: string, data: Record<string, unknown>): void {
+    if (this.notifier) {
+      try {
+        this.notifier(level, data);
+      } catch {
+        // Notifications are best-effort — never crash the poller
+      }
     }
   }
 }
