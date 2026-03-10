@@ -16,7 +16,7 @@ import { Correlator, YamlGenerator, StubWriter } from './synthesis/index.js';
 import { SegmentFingerprint, SegmentRegistry } from './segments/index.js';
 import { StubServer } from './wiremock/index.js';
 import type { MockingConfig } from './synthesis/index.js';
-import type { NetworkEvent } from './types.js';
+import type { NetworkEvent, StateChange } from './types.js';
 import type {
     StartRecordingInput,
     StartRecordingOutput,
@@ -50,7 +50,18 @@ export async function handleStartRecording(
         throw new Error(`No booted ${input.platform} simulator found. Please boot a device first.`);
     }
 
-    await sessionManager.create(sessionId, input.appBundleId, input.platform, input.filterDomains);
+    // Fast-fail if Java or Maestro isn't available
+    await maestroWrapper.validateSetup();
+
+    await sessionManager.create(
+        sessionId,
+        input.appBundleId,
+        input.platform,
+        input.filterDomains,
+        input.captureMode,
+        input.pollingIntervalMs,
+        input.settleTimeoutMs,
+    );
 
     // Snapshot Proxyman baseline so we can scope the HAR export later
     try {
@@ -201,6 +212,9 @@ export async function handleStopAndCompile(
     await sessionManager.transition(input.sessionId, 'done');
     sessionManager.stopPolling(input.sessionId);
 
+    // Purge hierarchy snapshots to free memory
+    await sessionManager.purgeSnapshots(input.sessionId);
+
     return {
         sessionId: input.sessionId,
         yaml,
@@ -236,6 +250,28 @@ export async function handleExecuteUIAction(
         input.element.id ?? input.element.accessibilityLabel ?? input.element.text ?? 'unknown element';
     console.error(`[MCP] execute_ui_action: ${input.action} on "${targetDesc}"`);
 
+    // Retrieve session to check capture mode
+    const session = await sessionManager.getSession(input.sessionId);
+    const captureMode = session?.captureMode || 'event-triggered';
+    const settleTimeoutMs = session?.settleTimeoutMs ?? 3000;
+
+    // ── Pre-action snapshot (event-triggered mode) ──
+    let preActionHierarchy: string | undefined;
+    if (captureMode === 'event-triggered') {
+        try {
+            preActionHierarchy = await maestroWrapper.dumpHierarchy();
+            await sessionManager.insertSnapshot({
+                sessionId: input.sessionId,
+                timestamp: new Date().toISOString(),
+                trigger: 'pre-action',
+                hierarchyJson: preActionHierarchy,
+            });
+        } catch (err) {
+            console.error('[MCP] execute_ui_action: pre-action snapshot failed (non-fatal)', err);
+        }
+    }
+
+    // ── Execute the action ──
     const result = await maestroWrapper.executeAction(input.action, input.element, input.textInput);
     if (!result.success) {
         throw new Error(`Failed to execute action: ${result.error}`);
@@ -248,6 +284,37 @@ export async function handleExecuteUIAction(
         element: input.element,
         textInput: input.textInput
     });
+
+    // ── Post-settle snapshot + diff (event-triggered mode) ──
+    let stateChange: StateChange | undefined;
+    if (captureMode === 'event-triggered' && preActionHierarchy) {
+        try {
+            const { hierarchy: postHierarchy, settleDurationMs } =
+                await maestroWrapper.dumpHierarchyUntilSettled(settleTimeoutMs);
+
+            await sessionManager.insertSnapshot({
+                sessionId: input.sessionId,
+                timestamp: new Date().toISOString(),
+                trigger: 'post-settle',
+                hierarchyJson: postHierarchy,
+            });
+
+            // Compute the diff
+            const { HierarchyParser } = await import('./maestro/index.js');
+            const { HierarchyDiffer } = await import('./maestro/hierarchy-differ.js');
+            const beforeTree = HierarchyParser.parse(preActionHierarchy);
+            const afterTree = HierarchyParser.parse(postHierarchy);
+            stateChange = HierarchyDiffer.diff(beforeTree, afterTree, undefined, settleDurationMs);
+
+            if (stateChange.elementsAdded.length > 0 || stateChange.elementsRemoved.length > 0) {
+                console.error(
+                    `[MCP] execute_ui_action: state change detected: +${stateChange.elementsAdded.length} / -${stateChange.elementsRemoved.length} elements (settled in ${settleDurationMs}ms)`
+                );
+            }
+        } catch (err) {
+            console.error('[MCP] execute_ui_action: post-settle snapshot failed (non-fatal)', err);
+        }
+    }
 
     return {
         success: true,

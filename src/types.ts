@@ -10,6 +10,7 @@
 
 export type SessionStatus = 'idle' | 'recording' | 'compiling' | 'done';
 export type MobilePlatform = 'ios' | 'android';
+export type CaptureMode = 'event-triggered' | 'polling';
 
 export interface Session {
     id: string;
@@ -22,6 +23,12 @@ export interface Session {
     proxymanBaseline?: number;
     /** Domain filter for Proxyman traffic isolation (e.g., ["localhost.proxyman.io:3031"]) */
     filterDomains?: string[];
+    /** Hierarchy capture fidelity — defaults to 'event-triggered' */
+    captureMode?: CaptureMode;
+    /** Polling interval in ms (only used when captureMode is 'polling') */
+    pollingIntervalMs?: number;
+    /** How long to wait for UI to stabilize after an action (ms) */
+    settleTimeoutMs?: number;
 }
 
 // ----- UI Types -----
@@ -55,6 +62,32 @@ export interface UIHierarchyNode {
     children: UIHierarchyNode[];
 }
 
+// ----- Hierarchy Capture Types -----
+
+export interface HierarchySnapshot {
+    id?: number;
+    sessionId: string;
+    timestamp: string;
+    /** What triggered this snapshot */
+    trigger: 'pre-action' | 'post-settle' | 'poll';
+    /** Links to the interaction that triggered this (for event-triggered mode) */
+    actionId?: number;
+    /** Raw JSON string from maestro hierarchy */
+    hierarchyJson: string;
+}
+
+export interface StateChange {
+    timestamp: string;
+    /** Links to the interaction that caused this change */
+    actionId?: number;
+    /** Elements that appeared between pre-action and post-settle snapshots */
+    elementsAdded: UIElement[];
+    /** Elements that disappeared between pre-action and post-settle snapshots */
+    elementsRemoved: UIElement[];
+    /** How long the UI took to stabilize (ms) */
+    settleDurationMs: number;
+}
+
 // ----- Network Types -----
 
 export interface NetworkEvent {
@@ -68,3 +101,4 @@ export interface NetworkEvent {
     responseBody?: string;
     durationMs?: number;
 }
+

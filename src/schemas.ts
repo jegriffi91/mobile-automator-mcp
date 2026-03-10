@@ -76,6 +76,24 @@ export const StartRecordingInputSchema = z.object({
         .describe(
             'Optional domain list for Proxyman traffic isolation (e.g., ["localhost.proxyman.io:3031"]). Enables concurrent sessions on different ports.'
         ),
+    captureMode: z
+        .enum(['event-triggered', 'polling'])
+        .optional()
+        .describe(
+            'Hierarchy capture fidelity. "event-triggered" (default) captures pre/post-action snapshots with settle detection. "polling" captures at a fixed interval for high-fidelity transient state recording.'
+        ),
+    pollingIntervalMs: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe('Polling interval in ms when captureMode is "polling" (default: 500)'),
+    settleTimeoutMs: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe('How long to wait for the UI to stabilize after an action, in ms (default: 3000)'),
 });
 
 export const StopAndCompileInputSchema = z.object({

@@ -1,5 +1,5 @@
 import initSqlJs, { type Database, type SqlJsStatic } from 'sql.js';
-import type { Session, SessionStatus, UIInteraction, NetworkEvent, MobilePlatform } from '../types.js';
+import type { Session, SessionStatus, UIInteraction, NetworkEvent, MobilePlatform, HierarchySnapshot, CaptureMode } from '../types.js';
 
 export class SessionDatabase {
     private db: Database | null = null;
@@ -27,7 +27,10 @@ export class SessionDatabase {
                 startedAt TEXT NOT NULL,
                 stoppedAt TEXT,
                 proxymanBaseline INTEGER,
-                filterDomains TEXT
+                filterDomains TEXT,
+                captureMode TEXT,
+                pollingIntervalMs INTEGER,
+                settleTimeoutMs INTEGER
             );
 
             CREATE TABLE IF NOT EXISTS ui_interactions (
@@ -58,6 +61,19 @@ export class SessionDatabase {
 
             CREATE INDEX IF NOT EXISTS idx_network_events_sessionId
                 ON network_events(sessionId);
+
+            CREATE TABLE IF NOT EXISTS hierarchy_snapshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                sessionId TEXT NOT NULL,
+                timestamp TEXT NOT NULL,
+                trigger TEXT NOT NULL,
+                actionId INTEGER,
+                hierarchyJson TEXT NOT NULL,
+                FOREIGN KEY(sessionId) REFERENCES sessions(id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_hierarchy_snapshots_sessionId
+                ON hierarchy_snapshots(sessionId);
         `);
     }
 
@@ -73,8 +89,20 @@ export class SessionDatabase {
      */
     insertSession(session: Session): void {
         const db = this.getDb();
-        const stmt = db.prepare(`INSERT INTO sessions (id, appBundleId, platform, status, startedAt, stoppedAt, proxymanBaseline, filterDomains) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`);
-        stmt.run([session.id, session.appBundleId, session.platform, session.status, session.startedAt, session.stoppedAt || null, session.proxymanBaseline ?? null, session.filterDomains ? JSON.stringify(session.filterDomains) : null]);
+        const stmt = db.prepare(`INSERT INTO sessions (id, appBundleId, platform, status, startedAt, stoppedAt, proxymanBaseline, filterDomains, captureMode, pollingIntervalMs, settleTimeoutMs) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+        stmt.run([
+            session.id,
+            session.appBundleId,
+            session.platform,
+            session.status,
+            session.startedAt,
+            session.stoppedAt || null,
+            session.proxymanBaseline ?? null,
+            session.filterDomains ? JSON.stringify(session.filterDomains) : null,
+            session.captureMode || null,
+            session.pollingIntervalMs ?? null,
+            session.settleTimeoutMs ?? null,
+        ]);
         stmt.free();
     }
 
@@ -127,6 +155,9 @@ export class SessionDatabase {
                 stoppedAt: (row.stoppedAt as string) || undefined,
                 proxymanBaseline: row.proxymanBaseline != null ? (row.proxymanBaseline as number) : undefined,
                 filterDomains: row.filterDomains ? JSON.parse(row.filterDomains as string) : undefined,
+                captureMode: (row.captureMode as CaptureMode) || undefined,
+                pollingIntervalMs: row.pollingIntervalMs != null ? (row.pollingIntervalMs as number) : undefined,
+                settleTimeoutMs: row.settleTimeoutMs != null ? (row.settleTimeoutMs as number) : undefined,
             };
         }
         stmt.free();
@@ -215,6 +246,67 @@ export class SessionDatabase {
         }
         stmt.free();
         return results;
+    }
+
+    // ----- Hierarchy Snapshots -----
+
+    /**
+     * Insert a hierarchy snapshot.
+     * Returns the auto-generated row ID.
+     */
+    insertSnapshot(snapshot: HierarchySnapshot): number {
+        const db = this.getDb();
+        const stmt = db.prepare(
+            `INSERT INTO hierarchy_snapshots (sessionId, timestamp, trigger, actionId, hierarchyJson) VALUES (?, ?, ?, ?, ?)`
+        );
+        stmt.run([
+            snapshot.sessionId,
+            snapshot.timestamp,
+            snapshot.trigger,
+            snapshot.actionId ?? null,
+            snapshot.hierarchyJson,
+        ]);
+        stmt.free();
+
+        // Get the last inserted row ID
+        const result = db.exec('SELECT last_insert_rowid() as id');
+        return result[0]?.values[0]?.[0] as number;
+    }
+
+    /**
+     * Get all hierarchy snapshots for a session, ordered by timestamp.
+     */
+    getSnapshots(sessionId: string): HierarchySnapshot[] {
+        const db = this.getDb();
+        const stmt = db.prepare(
+            `SELECT * FROM hierarchy_snapshots WHERE sessionId = ? ORDER BY timestamp ASC`
+        );
+        stmt.bind([sessionId]);
+        const results: HierarchySnapshot[] = [];
+        while (stmt.step()) {
+            const row = stmt.getAsObject();
+            results.push({
+                id: row.id as number,
+                sessionId: row.sessionId as string,
+                timestamp: row.timestamp as string,
+                trigger: row.trigger as HierarchySnapshot['trigger'],
+                actionId: row.actionId != null ? (row.actionId as number) : undefined,
+                hierarchyJson: row.hierarchyJson as string,
+            });
+        }
+        stmt.free();
+        return results;
+    }
+
+    /**
+     * Purge all hierarchy snapshots for a session.
+     * Call after compilation to free memory.
+     */
+    purgeSnapshots(sessionId: string): void {
+        const db = this.getDb();
+        const stmt = db.prepare(`DELETE FROM hierarchy_snapshots WHERE sessionId = ?`);
+        stmt.run([sessionId]);
+        stmt.free();
     }
 
     /**

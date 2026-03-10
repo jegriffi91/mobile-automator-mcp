@@ -10,6 +10,7 @@
 
 export { MaestroWrapper } from './wrapper.js';
 export { HierarchyParser } from './hierarchy.js';
+export { HierarchyDiffer } from './hierarchy-differ.js';
 
 import { MaestroWrapper } from './wrapper.js';
 export const maestroWrapper = new MaestroWrapper();

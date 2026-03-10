@@ -10,7 +10,7 @@
  *   • getInteractions() / getNetworkEvents(): query session logs
  */
 
-import type { Session, SessionStatus, UIInteraction, NetworkEvent, MobilePlatform } from '../types.js';
+import type { Session, SessionStatus, UIInteraction, NetworkEvent, MobilePlatform, HierarchySnapshot, CaptureMode } from '../types.js';
 import { SessionDatabase } from './database.js';
 
 const VALID_TRANSITIONS: Record<SessionStatus, SessionStatus[]> = {
@@ -37,7 +37,15 @@ export class SessionManager {
     /**
      * Create a new recording session.
      */
-    async create(sessionId: string, appBundleId: string, platform: MobilePlatform, filterDomains?: string[]): Promise<Session> {
+    async create(
+        sessionId: string,
+        appBundleId: string,
+        platform: MobilePlatform,
+        filterDomains?: string[],
+        captureMode?: CaptureMode,
+        pollingIntervalMs?: number,
+        settleTimeoutMs?: number,
+    ): Promise<Session> {
         const session: Session = {
             id: sessionId,
             appBundleId,
@@ -45,9 +53,12 @@ export class SessionManager {
             status: 'recording',
             startedAt: new Date().toISOString(),
             filterDomains,
+            captureMode: captureMode || 'event-triggered',
+            pollingIntervalMs: pollingIntervalMs ?? 500,
+            settleTimeoutMs: settleTimeoutMs ?? 3000,
         };
         this.db.insertSession(session);
-        console.error(`[SessionManager] create: ${sessionId} started processing.`);
+        console.error(`[SessionManager] create: ${sessionId} started (captureMode: ${session.captureMode}).`);
         return session;
     }
 
@@ -126,6 +137,30 @@ export class SessionManager {
     async updateBaseline(sessionId: string, baseline: number): Promise<void> {
         this.db.updateSessionBaseline(sessionId, baseline);
         console.error(`[SessionManager] updateBaseline: session ${sessionId} baseline = ${baseline}`);
+    }
+
+    // ----- Hierarchy Snapshots -----
+
+    /**
+     * Store a hierarchy snapshot for the session.
+     */
+    async insertSnapshot(snapshot: HierarchySnapshot): Promise<number> {
+        return this.db.insertSnapshot(snapshot);
+    }
+
+    /**
+     * Get all hierarchy snapshots for a session.
+     */
+    async getSnapshots(sessionId: string): Promise<HierarchySnapshot[]> {
+        return this.db.getSnapshots(sessionId);
+    }
+
+    /**
+     * Purge hierarchy snapshots after compilation to free memory.
+     */
+    async purgeSnapshots(sessionId: string): Promise<void> {
+        this.db.purgeSnapshots(sessionId);
+        console.error(`[SessionManager] purgeSnapshots: purged snapshots for ${sessionId}`);
     }
 
     private activePollers: Map<string, any> = new Map();

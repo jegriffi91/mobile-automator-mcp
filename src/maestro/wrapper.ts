@@ -10,6 +10,7 @@
 
 import { execFile } from 'child_process';
 import { promisify } from 'util';
+import * as fsSync from 'fs';
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import * as os from 'os';
@@ -20,6 +21,7 @@ const execFileAsync = promisify(execFile);
 
 export class MaestroWrapper {
     private maestroBin: string;
+    private activeDeviceId?: string;
 
     constructor(maestroBin?: string) {
         if (maestroBin) {
@@ -36,7 +38,7 @@ export class MaestroWrapper {
             this.maestroBin = candidates[candidates.length - 1]; // default fallback
             for (const candidate of candidates) {
                 try {
-                    require('fs').accessSync(candidate, require('fs').constants.X_OK);
+                    fsSync.accessSync(candidate, fsSync.constants.X_OK);
                     this.maestroBin = candidate;
                     break;
                 } catch { /* continue */ }
@@ -45,20 +47,86 @@ export class MaestroWrapper {
     }
 
     /**
+     * Build Maestro CLI args, prepending `--udid <deviceId>` when a target device
+     * is known. This prevents the interactive multi-device selection prompt.
+     */
+    private buildArgs(subcommandArgs: string[]): string[] {
+        if (this.activeDeviceId) {
+            return ['--udid', this.activeDeviceId, ...subcommandArgs];
+        }
+        return subcommandArgs;
+    }
+
+    /**
+     * Fast-fail validation of Maestro + Java availability.
+     * Call once at session start — throws immediately if the toolchain is broken.
+     */
+    async validateSetup(): Promise<void> {
+        const env = this.getExecEnv();
+
+        // 1. Check Java is reachable
+        try {
+            await execFileAsync('java', ['-version'], { env, timeout: 5_000 });
+        } catch (error: any) {
+            if (error.killed || error.signal === 'SIGTERM') {
+                throw new Error('Java validation timed out (5s). Is JAVA_HOME set correctly?');
+            }
+            throw new Error(
+                `Java not found. Maestro requires a JDK.\n` +
+                `  JAVA_HOME = ${env['JAVA_HOME'] || '(not set)'}\n` +
+                `  Error: ${error.message || String(error)}`
+            );
+        }
+
+        // 2. Check Maestro is executable
+        try {
+            await execFileAsync(this.maestroBin, ['--version'], { env, timeout: 5_000 });
+        } catch (error: any) {
+            if (error.killed || error.signal === 'SIGTERM') {
+                throw new Error('Maestro validation timed out (5s). Is Maestro installed correctly?');
+            }
+            throw new Error(
+                `Maestro not functional at ${this.maestroBin}.\n` +
+                `  Error: ${error.message || String(error)}`
+            );
+        }
+
+        console.error(`[MaestroWrapper] validateSetup: Java + Maestro OK (bin: ${this.maestroBin})`);
+    }
+
+    /**
      * Build an environment map that ensures Java and Maestro are on the PATH.
      */
     private getExecEnv(): Record<string, string> {
         const home = os.homedir();
         const extraPaths = [
+            '/opt/homebrew/opt/openjdk@17/bin',
             '/opt/homebrew/opt/openjdk/bin',
             path.join(home, '.maestro', 'bin'),
             '/opt/homebrew/bin',
         ];
         const currentPath = process.env['PATH'] || '/usr/bin:/bin';
+
+        // Resolve JAVA_HOME: prefer env var, then probe for installed openjdk versions
+        let javaHome = process.env['JAVA_HOME'] || '';
+        if (!javaHome) {
+            const candidates = [
+                '/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home',
+                '/opt/homebrew/opt/openjdk/libexec/openjdk.jdk/Contents/Home',
+            ];
+            for (const c of candidates) {
+                try {
+                    fsSync.accessSync(c);
+                    javaHome = c;
+                    break;
+                } catch { /* continue */ }
+            }
+        }
+
         return {
             ...process.env as Record<string, string>,
             PATH: [...extraPaths, currentPath].join(':'),
-            JAVA_HOME: process.env['JAVA_HOME'] || '/opt/homebrew/opt/openjdk',
+            JAVA_HOME: javaHome,
         };
     }
 
@@ -76,6 +144,7 @@ export class MaestroWrapper {
                     const devices = data.devices[runtime];
                     for (const device of devices) {
                         if (device.state === 'Booted') {
+                            this.activeDeviceId = device.udid;
                             return { booted: true, deviceId: device.udid };
                         }
                     }
@@ -87,6 +156,7 @@ export class MaestroWrapper {
                 for (const line of lines.slice(1)) {
                     if (line.includes('\tdevice')) {
                         const deviceId = line.split('\t')[0];
+                        this.activeDeviceId = deviceId;
                         return { booted: true, deviceId };
                     }
                 }
@@ -99,17 +169,79 @@ export class MaestroWrapper {
     }
 
     /**
+     * Kill any orphaned `maestro hierarchy` Java processes from previous timed-out calls.
+     */
+    private async killStaleMaestroProcesses(): Promise<void> {
+        try {
+            await execFileAsync('pkill', ['-f', 'maestro.cli.AppKt hierarchy'], { timeout: 3_000 });
+            console.error('[MaestroWrapper] Cleaned up stale maestro hierarchy processes');
+            // Brief pause to let the OS reclaim resources
+            await new Promise((r) => setTimeout(r, 500));
+        } catch {
+            // pkill returns non-zero if no matching processes — that's fine
+        }
+    }
+
+    /**
      * Dump the current UI hierarchy.
      * Exclusively uses `maestro hierarchy` to avoid the unstable `idb` dependency.
      */
     async dumpHierarchy(): Promise<string> {
+        // Clean up any orphaned processes from previous timed-out attempts
+        await this.killStaleMaestroProcesses();
+
         try {
-            const { stdout } = await execFileAsync(this.maestroBin, ['hierarchy'], { env: this.getExecEnv() });
+            const args = this.buildArgs(['hierarchy']);
+            const { stdout } = await execFileAsync(this.maestroBin, args, {
+                env: this.getExecEnv(),
+                timeout: 30_000, // 30s — prevent indefinite hang
+            });
             return stdout;
         } catch (error: any) {
             console.error('[MaestroWrapper] dumpHierarchy failed:', error);
+            // Clean up the process we just spawned (timeout only kills the parent)
+            await this.killStaleMaestroProcesses();
+
+            if (error.killed || error.signal === 'SIGTERM') {
+                throw new Error('Hierarchy dump timed out after 30s. Is the simulator responsive?');
+            }
             throw new Error(`Failed to dump hierarchy: ${error.message || String(error)}`);
         }
+    }
+
+    /**
+     * Repeatedly dump the hierarchy until the UI has settled (two consecutive
+     * snapshots with identical elements). Used by event-triggered capture mode.
+     *
+     * @param settleTimeoutMs - Max time to wait for settle (default 3000ms)
+     * @returns The settled hierarchy JSON and how long the settle took
+     */
+    async dumpHierarchyUntilSettled(
+        settleTimeoutMs = 3000,
+    ): Promise<{ hierarchy: string; settleDurationMs: number }> {
+        const { HierarchyDiffer } = await import('./hierarchy-differ.js');
+        const start = Date.now();
+        let previousSnapshot = await this.dumpHierarchy();
+        const pollInterval = 300;
+
+        while (Date.now() - start < settleTimeoutMs) {
+            await new Promise((r) => setTimeout(r, pollInterval));
+            const currentSnapshot = await this.dumpHierarchy();
+
+            if (HierarchyDiffer.areEqual(previousSnapshot, currentSnapshot)) {
+                // UI has settled — two consecutive snapshots match
+                const settleDurationMs = Date.now() - start;
+                console.error(`[MaestroWrapper] dumpHierarchyUntilSettled: settled in ${settleDurationMs}ms`);
+                return { hierarchy: currentSnapshot, settleDurationMs };
+            }
+
+            previousSnapshot = currentSnapshot;
+        }
+
+        // Timeout — return the last snapshot
+        const settleDurationMs = Date.now() - start;
+        console.error(`[MaestroWrapper] dumpHierarchyUntilSettled: timed out after ${settleDurationMs}ms, returning last snapshot`);
+        return { hierarchy: previousSnapshot, settleDurationMs };
     }
 
     /**
@@ -167,7 +299,7 @@ export class MaestroWrapper {
             await fs.writeFile(tmpFile, yamlContent, 'utf-8');
 
             // Execute the temporary script
-            await execFileAsync(this.maestroBin, ['test', tmpFile], { env: this.getExecEnv() });
+            await execFileAsync(this.maestroBin, this.buildArgs(['test', tmpFile]), { env: this.getExecEnv(), timeout: 30_000 });
 
             // Cleanup
             await fs.unlink(tmpFile).catch(() => { });
@@ -190,7 +322,7 @@ export class MaestroWrapper {
         try {
             const { stdout, stderr } = await execFileAsync(
                 this.maestroBin,
-                ['test', yamlPath],
+                this.buildArgs(['test', yamlPath]),
                 {
                     env: this.getExecEnv(),
                     maxBuffer: 10 * 1024 * 1024, // 10MB buffer for verbose output
