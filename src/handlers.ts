@@ -16,6 +16,7 @@ import { proxymanWrapper, PayloadValidator } from './proxyman/index.js';
 import { Correlator, YamlGenerator, StubWriter } from './synthesis/index.js';
 import { SegmentFingerprint, SegmentRegistry } from './segments/index.js';
 import { StubServer } from './wiremock/index.js';
+import { extractTrackEvents } from './session/track-event-extractor.js';
 import type { MockingConfig } from './synthesis/index.js';
 import type { NetworkEvent, StateChange } from './types.js';
 import type { PollingNotifier } from './session/touch-inferrer.js';
@@ -90,6 +91,7 @@ export async function handleStartRecording(
         input.captureMode,
         input.pollingIntervalMs,
         input.settleTimeoutMs,
+        input.trackEventPaths,
     );
 
     // Snapshot Proxyman baseline so we can scope the HAR export later
@@ -132,7 +134,7 @@ export async function handleStopAndCompile(
     let proxymanEvents: NetworkEvent[] = [];
     try {
         const baseline = session.proxymanBaseline ?? 0;
-        await proxymanWrapper.exportHarScoped(scopedHarPath, baseline, session.filterDomains);
+        await proxymanWrapper.exportHarScoped(scopedHarPath, baseline, session.filterDomains, session.startedAt);
         const raw = await fs.readFile(scopedHarPath, 'utf-8');
         const har = JSON.parse(raw);
         proxymanEvents = (har.log?.entries || []).map((entry: any) => ({
@@ -167,13 +169,49 @@ export async function handleStopAndCompile(
         }
     }
 
+    // ── Step 2b: Extract tracked interactions from network events ──
+    const trackPaths = session.trackEventPaths;
     console.error(
-        `[MCP] stop_and_compile_test: correlating ${interactions.length} interactions with ${allNetworkEvents.length} network events`
+        `[MCP] stop_and_compile_test: track extraction — ` +
+        `totalEvents: ${allNetworkEvents.length}, ` +
+        `trackEventPaths: ${JSON.stringify(trackPaths)}, ` +
+        `POST events: ${allNetworkEvents.filter(e => e.method === 'POST').length}`
+    );
+    // Log events that match the track path pattern
+    const matchingEvents = allNetworkEvents.filter(e =>
+        e.method === 'POST' && (trackPaths ?? ['/__track']).some(p => e.url.includes(p))
+    );
+    console.error(
+        `[MCP] stop_and_compile_test: matching track events: ${matchingEvents.length}`
+    );
+    for (const me of matchingEvents) {
+        console.error(
+            `[MCP]   → ${me.url} | requestBody present: ${!!me.requestBody} | body: ${me.requestBody?.substring(0, 200)}`
+        );
+    }
+    const trackedInteractions = extractTrackEvents(
+        allNetworkEvents,
+        input.sessionId,
+        { paths: session.trackEventPaths },
+    );
+    if (trackedInteractions.length > 0) {
+        console.error(
+            `[MCP] stop_and_compile_test: extracted ${trackedInteractions.length} tracked interaction(s) from network events`
+        );
+    }
+
+    // Merge all interaction sources: dispatched (AI-led) + inferred (touch) + tracked (app-side)
+    const allInteractions = [...interactions, ...trackedInteractions].sort(
+        (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime(),
+    );
+
+    console.error(
+        `[MCP] stop_and_compile_test: correlating ${allInteractions.length} interactions (${interactions.length} dispatched/inferred + ${trackedInteractions.length} tracked) with ${allNetworkEvents.length} network events`
     );
 
     // ── Step 3: Correlate UI actions with network events ──
     const correlator = new Correlator();
-    const steps = correlator.correlate(interactions, allNetworkEvents);
+    const steps = correlator.correlate(allInteractions, allNetworkEvents);
 
     // ── Step 4: Generate YAML ──
     const generator = new YamlGenerator(session.appBundleId);
@@ -251,7 +289,7 @@ export async function handleStopAndCompile(
         );
     }
 
-    if (interactions.length === 0 && pollingDiagnostics) {
+    if (allInteractions.length === 0 && pollingDiagnostics) {
         if (pollingDiagnostics.errorCount > 0) {
             console.error(
                 `[MCP] ⚠️  No interactions captured. Polling had ${pollingDiagnostics.errorCount} error(s). Last error: ${pollingDiagnostics.lastError}`

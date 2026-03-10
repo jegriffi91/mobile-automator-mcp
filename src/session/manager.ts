@@ -50,6 +50,7 @@ export class SessionManager {
         captureMode?: CaptureMode,
         pollingIntervalMs?: number,
         settleTimeoutMs?: number,
+        trackEventPaths?: string[],
     ): Promise<Session> {
         const session: Session = {
             id: sessionId,
@@ -61,6 +62,7 @@ export class SessionManager {
             captureMode: captureMode || 'event-triggered',
             pollingIntervalMs: pollingIntervalMs ?? 500,
             settleTimeoutMs: settleTimeoutMs ?? 3000,
+            trackEventPaths,
         };
         this.db.insertSession(session);
         console.error(`[SessionManager] create: ${sessionId} started (captureMode: ${session.captureMode}).`);

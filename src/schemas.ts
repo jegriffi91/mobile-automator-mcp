@@ -94,6 +94,12 @@ export const StartRecordingInputSchema = z.object({
         .positive()
         .optional()
         .describe('How long to wait for the UI to stabilize after an action, in ms (default: 3000)'),
+    trackEventPaths: z
+        .array(z.string())
+        .optional()
+        .describe(
+            'URL path patterns for network-based interaction tracking (e.g., ["/__track"]). When the app POSTs to matching paths, the events are extracted as user interactions during compilation.'
+        ),
 });
 
 export const StopAndCompileInputSchema = z.object({

@@ -29,6 +29,8 @@ export interface Session {
     pollingIntervalMs?: number;
     /** How long to wait for UI to stabilize after an action (ms) */
     settleTimeoutMs?: number;
+    /** URL path patterns for network-based interaction tracking (e.g., ['/__track']) */
+    trackEventPaths?: string[];
 }
 
 // ----- UI Types -----
@@ -51,8 +53,8 @@ export interface UIInteraction {
     actionType: UIActionType;
     element: UIElement;
     textInput?: string;
-    /** How this interaction was captured: 'dispatched' (via execute_ui_action) or 'inferred' (passive touch capture) */
-    source?: 'dispatched' | 'inferred';
+    /** How this interaction was captured: 'dispatched' (via execute_ui_action), 'inferred' (passive touch capture), or 'tracked' (app-side event tracking) */
+    source?: 'dispatched' | 'inferred' | 'tracked';
 }
 
 export interface UIHierarchyNode {

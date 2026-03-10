@@ -100,12 +100,17 @@ export class ProxymanWrapper {
 
     /**
      * Export Proxyman traffic scoped to entries captured AFTER the baseline.
-     * Slices the HAR to only include entries beyond the baseline count.
+     *
+     * Preferred: pass `afterTimestamp` to filter by entry time (Proxyman does
+     * not guarantee chronological ordering in the HAR array, so index-based
+     * slicing is unreliable).  Falls back to `entries.slice(baselineCount)` if
+     * no timestamp is given (legacy path).
      */
     async exportHarScoped(
         outputPath: string,
         baselineCount: number,
-        domains?: string[]
+        domains?: string[],
+        afterTimestamp?: string,
     ): Promise<string> {
         const tmpFile = path.join(os.tmpdir(), `proxyman-scoped-${randomUUID()}.har`);
         try {
@@ -113,13 +118,24 @@ export class ProxymanWrapper {
             const raw = await fs.readFile(tmpFile, 'utf-8');
             const har: HarLog = JSON.parse(raw);
 
-            // Slice entries to only those after the baseline
-            har.log.entries = har.log.entries.slice(baselineCount);
+            if (afterTimestamp) {
+                // Timestamp-based scoping (reliable regardless of HAR ordering)
+                const cutoff = new Date(afterTimestamp).getTime();
+                har.log.entries = har.log.entries.filter(
+                    (e) => new Date(e.startedDateTime).getTime() >= cutoff,
+                );
+                console.error(
+                    `[ProxymanWrapper] exportHarScoped: ${har.log.entries.length} entries after ${afterTimestamp}`,
+                );
+            } else {
+                // Legacy: slice by position (unreliable if Proxyman reorders)
+                har.log.entries = har.log.entries.slice(baselineCount);
+                console.error(
+                    `[ProxymanWrapper] exportHarScoped: ${har.log.entries.length} new entries (baseline was ${baselineCount})`,
+                );
+            }
 
             await fs.writeFile(outputPath, JSON.stringify(har, null, 2), 'utf-8');
-            console.error(
-                `[ProxymanWrapper] exportHarScoped: ${har.log.entries.length} new entries (baseline was ${baselineCount})`
-            );
             return outputPath;
         } catch (error: any) {
             console.error('[ProxymanWrapper] exportHarScoped failed:', error);
