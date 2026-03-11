@@ -120,3 +120,33 @@ export interface NetworkEvent {
     durationMs?: number;
 }
 
+// ----- Timeout Config -----
+
+/** Centralized timeout configuration for Maestro CLI and daemon operations. */
+export interface TimeoutConfig {
+    /** Timeout for hierarchy dump calls (ms). Default: 15000 */
+    hierarchyDumpMs: number;
+    /** Timeout for lightweight/polling hierarchy calls (ms). Default: 10000 */
+    hierarchyLiteMs: number;
+    /** Timeout for single UI action execution (ms). Default: 15000 */
+    actionMs: number;
+    /** Timeout for full test run (ms). Default: 120000 */
+    testRunMs: number;
+    /** Timeout for setup validation calls (ms). Default: 5000 */
+    setupValidationMs: number;
+    /** Timeout for daemon JSON-RPC requests (ms). Default: 15000 */
+    daemonRequestMs: number;
+    /** Timeout for daemon graceful shutdown (ms). Default: 3000 */
+    daemonShutdownMs: number;
+}
+
+export const DEFAULT_TIMEOUTS: TimeoutConfig = {
+    hierarchyDumpMs: 15_000,
+    hierarchyLiteMs: 10_000,
+    actionMs: 15_000,
+    testRunMs: 120_000,
+    setupValidationMs: 5_000,
+    daemonRequestMs: 15_000,
+    daemonShutdownMs: 3_000,
+};
+

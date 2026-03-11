@@ -14,7 +14,8 @@ import * as fs from 'fs/promises';
 import * as path from 'path';
 import * as os from 'os';
 import { randomUUID } from 'crypto';
-import type { UIActionType, UIElement, MobilePlatform } from '../types.js';
+import type { UIActionType, UIElement, MobilePlatform, TimeoutConfig } from '../types.js';
+import { DEFAULT_TIMEOUTS } from '../types.js';
 import { resolveMaestroBin, getExecEnv } from './env.js';
 
 const execFileAsync = promisify(execFile);
@@ -34,9 +35,11 @@ export class MaestroWrapper {
     }
     private maestroBin: string;
     private activeDeviceId?: string;
+    private timeouts: TimeoutConfig;
 
-    constructor(maestroBin?: string) {
+    constructor(maestroBin?: string, timeouts?: Partial<TimeoutConfig>) {
         this.maestroBin = resolveMaestroBin(maestroBin);
+        this.timeouts = { ...DEFAULT_TIMEOUTS, ...timeouts };
     }
 
     /**
@@ -59,9 +62,9 @@ export class MaestroWrapper {
 
         // 1. Check Java is reachable
         try {
-            await execFileAsync('java', ['-version'], { env, timeout: 5_000 });
+            await execFileAsync('java', ['-version'], { env, timeout: this.timeouts.setupValidationMs });
         } catch (error: any) {
-            if (error.killed || error.signal === 'SIGTERM') {
+            if ((error as NodeJS.ErrnoException & { killed?: boolean }).killed || error.signal === 'SIGTERM') {
                 throw new Error('Java validation timed out (5s). Is JAVA_HOME set correctly?');
             }
             throw new Error(
@@ -73,7 +76,7 @@ export class MaestroWrapper {
 
         // 2. Check Maestro is executable
         try {
-            await execFileAsync(this.maestroBin, ['--version'], { env, timeout: 5_000 });
+            await execFileAsync(this.maestroBin, ['--version'], { env, timeout: this.timeouts.setupValidationMs });
         } catch (error: any) {
             if (error.killed || error.signal === 'SIGTERM') {
                 throw new Error('Maestro validation timed out (5s). Is Maestro installed correctly?');
@@ -183,7 +186,7 @@ export class MaestroWrapper {
             const args = this.buildArgs(['hierarchy']);
             const { stdout } = await execFileAsync(this.maestroBin, args, {
                 env: getExecEnv(),
-                timeout: 15_000, // 15s — fail fast if XCTest driver is dead
+                timeout: this.timeouts.hierarchyDumpMs,
             });
             return MaestroWrapper.stripHierarchyPrefix(stdout);
         } catch (error: any) {
@@ -192,7 +195,7 @@ export class MaestroWrapper {
             await this.killStaleMaestroProcesses();
 
             if (error.killed || error.signal === 'SIGTERM') {
-                throw new Error('Hierarchy dump timed out after 15s. Is the simulator responsive?');
+                throw new Error(`Hierarchy dump timed out after ${this.timeouts.hierarchyDumpMs}ms. Is the simulator responsive?`);
             }
             throw new Error(`Failed to dump hierarchy: ${error.message || String(error)}`);
         }
@@ -214,12 +217,12 @@ export class MaestroWrapper {
             const args = this.buildArgs(['hierarchy']);
             const { stdout } = await execFileAsync(this.maestroBin, args, {
                 env: getExecEnv(),
-                timeout: 10_000, // 10s — shorter timeout for frequent polling
+                timeout: this.timeouts.hierarchyLiteMs,
             });
             return MaestroWrapper.stripHierarchyPrefix(stdout);
         } catch (error: any) {
             if (error.killed || error.signal === 'SIGTERM') {
-                throw new Error('Hierarchy dump (lite) timed out after 10s.');
+                throw new Error(`Hierarchy dump (lite) timed out after ${this.timeouts.hierarchyLiteMs}ms.`);
             }
             throw new Error(`Failed to dump hierarchy (lite): ${error.message || String(error)}`);
         }
@@ -315,7 +318,7 @@ export class MaestroWrapper {
             await fs.writeFile(tmpFile, yamlContent, 'utf-8');
 
             // Execute the temporary script
-            await execFileAsync(this.maestroBin, this.buildArgs(['test', tmpFile]), { env: getExecEnv(), timeout: 15_000 });
+            await execFileAsync(this.maestroBin, this.buildArgs(['test', tmpFile]), { env: getExecEnv(), timeout: this.timeouts.actionMs });
 
             // Cleanup
             await fs.unlink(tmpFile).catch(() => { });
@@ -333,16 +336,17 @@ export class MaestroWrapper {
      * @param yamlPath - Path to the Maestro YAML test file
      * @returns Test result with pass/fail, output, and duration
      */
-    async runTest(yamlPath: string): Promise<{ passed: boolean; output: string; durationMs: number }> {
+    async runTest(yamlPath: string, env?: Record<string, string>): Promise<{ passed: boolean; output: string; durationMs: number }> {
         const start = Date.now();
+        const envArgs = Object.entries(env ?? {}).flatMap(([k, v]) => ['-e', `${k}=${v}`]);
         try {
             const { stdout, stderr } = await execFileAsync(
                 this.maestroBin,
-                this.buildArgs(['test', yamlPath]),
+                this.buildArgs(['test', ...envArgs, yamlPath]),
                 {
                     env: getExecEnv(),
                     maxBuffer: 10 * 1024 * 1024, // 10MB buffer for verbose output
-                    timeout: 120_000, // 120s — full test flows need more time than single actions
+                    timeout: this.timeouts.testRunMs,
                 }
             );
             const durationMs = Date.now() - start;

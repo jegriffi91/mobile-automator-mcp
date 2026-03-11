@@ -6,9 +6,9 @@ Session lifecycle management and SQLite persistence. Owns the recording session 
 
 ## Architecture Boundaries
 
-- **Owns:** Session CRUD, status transitions (`idle → recording → compiling → done`), UI interaction logging, network event logging.
-- **Must NOT** import from `maestro/`, `proxyman/`, or `synthesis/`. This module is a dependency of `handlers.ts`, not of other submodules.
-- **May import:** `types.ts` for domain models (`Session`, `UIInteraction`, `NetworkEvent`).
+- **Owns:** Session CRUD, status transitions (`idle → recording → compiling → done`), UI interaction logging, network event logging, passive touch capture.
+- **Must NOT** import from `proxyman/` or `synthesis/`.
+- **May import:** `types.ts` for domain models (`Session`, `UIInteraction`, `NetworkEvent`). `maestro/driver.ts` for `AutomationDriver` type (used by `startPolling()`).
 
 ## File Inventory
 
@@ -16,9 +16,16 @@ Session lifecycle management and SQLite persistence. Owns the recording session 
 |---|---|
 | `index.ts` | Barrel exports + global `sessionManager` singleton |
 | `database.ts` | sql.js wrapper — schema creation, raw SQL queries for sessions, interactions, and network events |
-| `manager.ts` | High-level session API — create, start, stop, log interaction, log network event, query |
+| `manager.ts` | High-level session API — create, start, stop, log interaction, log network event, query. Accepts `AutomationDriver` for polling. |
 | `touch-inferrer.ts` | Passive touch capture — diffs consecutive hierarchy snapshots to infer `UIInteraction` records |
 | `touch-inferrer.test.ts` | Unit tests for touch inference logic |
+| `track-event-extractor.ts` | Extracts tracked interactions from network events posted to `/__track` endpoints |
+| `track-event-extractor.test.ts` | Unit tests for track event extraction |
+
+## Key Design Notes
+
+- **`startPolling()` accepts `AutomationDriver`** — the driver provides a `createTreeReader()` method for the `TouchInferrer`. The caller (handlers.ts) is responsible for creating and starting the driver.
+- **No daemon management in SessionManager** — daemon lifecycle (start/stop) is managed by the driver itself. SessionManager only needs to call `driver.createTreeReader()`.
 
 ## Coding Standards
 
@@ -30,6 +37,6 @@ Session lifecycle management and SQLite persistence. Owns the recording session 
 ## Testing
 
 - **Testable:** Both `database.ts` and `manager.ts` contain pure logic (sql.js is in-process, no external I/O).
-- **No existing tests** — candidate for new test coverage.
+- **`touch-inferrer.test.ts`** — Comprehensive test suite (37 tests), including polling status, notifier, suppress, rate tracking, and diagnostic counters.
 - See [Testing Strategy](../../docs/testing-strategy.md) for patterns and commands.
 - Run tests: `npm test`

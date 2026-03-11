@@ -3,6 +3,9 @@
  *
  * Input/output types are derived from Zod schemas (schemas.ts) —
  * the single source of truth for tool I/O shapes.
+ *
+ * Handlers use AutomationDriver (from driver.ts) to interact with Maestro,
+ * decoupling tool logic from the specific backend (CLI vs MCP daemon).
  */
 
 import { randomUUID } from 'crypto';
@@ -10,8 +13,8 @@ import * as fs from 'fs/promises';
 import * as path from 'path';
 import * as os from 'os';
 import { sessionManager } from './session/index.js';
-import { maestroWrapper, HierarchyParser } from './maestro/index.js';
-import { MaestroDaemon } from './maestro/daemon.js';
+import { DriverFactory, type AutomationDriver } from './maestro/driver.js';
+import { HierarchyParser } from './maestro/index.js';
 import { proxymanWrapper, PayloadValidator } from './proxyman/index.js';
 import { Correlator, YamlGenerator, StubWriter } from './synthesis/index.js';
 import { SegmentFingerprint, SegmentRegistry } from './segments/index.js';
@@ -63,6 +66,9 @@ function createPollingNotifier(): PollingNotifier | undefined {
     };
 }
 
+// ── Per-session driver instances ──
+const activeDrivers: Map<string, AutomationDriver> = new Map();
+
 // ---- start_recording_session ----
 export async function handleStartRecording(
     input: StartRecordingInput
@@ -72,16 +78,19 @@ export async function handleStartRecording(
         `[MCP] start_recording_session: starting session ${sessionId} for ${input.appBundleId} on ${input.platform}`
     );
 
-    const validation = await maestroWrapper.validateSimulator(input.platform);
+    // Create driver with optional timeout overrides
+    const driver = await DriverFactory.create(input.timeouts);
+
+    const validation = await driver.validateSimulator(input.platform);
     if (!validation.booted) {
         throw new Error(`No booted ${input.platform} simulator found. Please boot a device first.`);
     }
 
     // Fast-fail if Java or Maestro isn't available
-    await maestroWrapper.validateSetup();
+    await driver.validateSetup();
 
     // Uninstall stale Maestro driver — next `maestro` command will reinstall a fresh copy
-    await maestroWrapper.uninstallDriver(input.platform, validation.deviceId);
+    await driver.uninstallDriver(input.platform, validation.deviceId);
 
     await sessionManager.create(
         sessionId,
@@ -103,10 +112,13 @@ export async function handleStartRecording(
         // Non-fatal: we'll still capture all traffic at compile time
     }
 
-    // Start polling — prefer daemon (sub-second) with CLI fallback
-    const daemon = new MaestroDaemon();
+    // Start the driver (initializes daemon if using MaestroDaemonDriver)
+    await driver.start(validation.deviceId);
+    activeDrivers.set(sessionId, driver);
+
+    // Start polling — driver provides the hierarchy reader
     const notifier = createPollingNotifier();
-    await sessionManager.startPolling(sessionId, input.platform, input.appBundleId, maestroWrapper, daemon, notifier);
+    await sessionManager.startPolling(sessionId, input.platform, input.appBundleId, driver, notifier);
 
     return {
         sessionId,
@@ -323,8 +335,14 @@ export async function handleStopAndCompile(
     await sessionManager.transition(input.sessionId, 'done');
     await sessionManager.stopPolling(input.sessionId);
 
-    // Clean up Maestro driver so it doesn't go stale between sessions
-    await maestroWrapper.uninstallDriver(session.platform, undefined);
+    // Stop the driver (shuts down daemon if active)
+    const driver = activeDrivers.get(input.sessionId);
+    if (driver) {
+        // Clean up Maestro driver so it doesn't go stale between sessions
+        await driver.uninstallDriver(session.platform, undefined);
+        await driver.stop();
+        activeDrivers.delete(input.sessionId);
+    }
 
     // Purge hierarchy snapshots to free memory
     await sessionManager.purgeSnapshots(input.sessionId);
@@ -348,7 +366,11 @@ export async function handleGetUIHierarchy(
 ): Promise<GetUIHierarchyOutput> {
     console.error(`[MCP] get_ui_hierarchy: capturing current screen`);
 
-    const rawOutput = await maestroWrapper.dumpHierarchy();
+    // Use the first active driver, or create a CLI-only one
+    const driver = activeDrivers.values().next().value ??
+        await DriverFactory.createCliOnly();
+
+    const rawOutput = await driver.dumpHierarchy();
     const hierarchy = HierarchyParser.parse(rawOutput);
 
     return {
@@ -365,6 +387,12 @@ export async function handleExecuteUIAction(
         input.element.id ?? input.element.accessibilityLabel ?? input.element.text ?? 'unknown element';
     console.error(`[MCP] execute_ui_action: ${input.action} on "${targetDesc}"`);
 
+    // Get the driver for this session
+    const driver = activeDrivers.get(input.sessionId);
+    if (!driver) {
+        throw new Error(`No active driver for session ${input.sessionId}. Was start_recording_session called?`);
+    }
+
     // Retrieve session to check capture mode
     const session = await sessionManager.getSession(input.sessionId);
     const captureMode = session?.captureMode || 'event-triggered';
@@ -374,7 +402,7 @@ export async function handleExecuteUIAction(
     let preActionHierarchy: string | undefined;
     if (captureMode === 'event-triggered') {
         try {
-            preActionHierarchy = await maestroWrapper.dumpHierarchy();
+            preActionHierarchy = await driver.dumpHierarchy();
             await sessionManager.insertSnapshot({
                 sessionId: input.sessionId,
                 timestamp: new Date().toISOString(),
@@ -390,7 +418,7 @@ export async function handleExecuteUIAction(
     // Suppress the poller to prevent double-logging
     sessionManager.suppressNextInference(input.sessionId);
 
-    const result = await maestroWrapper.executeAction(input.action, input.element, input.textInput);
+    const result = await driver.executeAction(input.action, input.element, input.textInput);
     if (!result.success) {
         throw new Error(`Failed to execute action: ${result.error}`);
     }
@@ -409,7 +437,7 @@ export async function handleExecuteUIAction(
     if (captureMode === 'event-triggered' && preActionHierarchy) {
         try {
             const { hierarchy: postHierarchy, settleDurationMs } =
-                await maestroWrapper.dumpHierarchyUntilSettled(settleTimeoutMs);
+                await driver.dumpHierarchyUntilSettled(settleTimeoutMs);
 
             await sessionManager.insertSnapshot({
                 sessionId: input.sessionId,
@@ -419,7 +447,6 @@ export async function handleExecuteUIAction(
             });
 
             // Compute the diff
-            const { HierarchyParser } = await import('./maestro/index.js');
             const { HierarchyDiffer } = await import('./maestro/hierarchy-differ.js');
             const beforeTree = HierarchyParser.parse(preActionHierarchy);
             const afterTree = HierarchyParser.parse(postHierarchy);
@@ -590,13 +617,16 @@ export async function handleRunTest(
 ): Promise<RunTestOutput> {
     console.error(`[MCP] run_test: running ${input.yamlPath}`);
 
-    // Validate simulator + clean stale driver (same as handleStartRecording)
+    // Create a CLI-only driver for test execution (no daemon needed)
+    const driver = await DriverFactory.createCliOnly();
+
+    // Validate simulator + clean stale driver
     const platform = input.platform ?? 'ios';
-    const validation = await maestroWrapper.validateSimulator(platform);
+    const validation = await driver.validateSimulator(platform);
     if (!validation.booted) {
         throw new Error(`No booted ${platform} simulator found. Please boot a device first.`);
     }
-    await maestroWrapper.uninstallDriver(platform, validation.deviceId);
+    await driver.uninstallDriver(platform, validation.deviceId);
 
     let stubServer: StubServer | undefined;
     let stubServerPort: number | undefined;
@@ -611,7 +641,7 @@ export async function handleRunTest(
         }
 
         // Step 2: Run Maestro test
-        const result = await maestroWrapper.runTest(input.yamlPath);
+        const result = await driver.runTest(input.yamlPath, input.env);
 
         return {
             passed: result.passed,

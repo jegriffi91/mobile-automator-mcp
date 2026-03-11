@@ -14,9 +14,7 @@ import type { Session, SessionStatus, UIInteraction, NetworkEvent, MobilePlatfor
 import { SessionDatabase } from './database.js';
 import { TouchInferrer } from './touch-inferrer.js';
 import type { PollingStatus, PollingNotifier } from './touch-inferrer.js';
-import { HierarchyParser } from '../maestro/hierarchy.js';
-import type { MaestroWrapper } from '../maestro/wrapper.js';
-import type { MaestroDaemon } from '../maestro/daemon.js';
+import type { AutomationDriver } from '../maestro/driver.js';
 
 const VALID_TRANSITIONS: Record<SessionStatus, SessionStatus[]> = {
     idle: ['recording'],
@@ -171,22 +169,20 @@ export class SessionManager {
     }
 
     private activePollers: Map<string, TouchInferrer> = new Map();
-    private activeDaemons: Map<string, MaestroDaemon> = new Map();
 
     /**
      * Start background hierarchy polling to capture manual UI touches.
      * Uses TouchInferrer to diff consecutive hierarchy snapshots and
      * infer UIInteraction records from detected changes.
      *
-     * When a MaestroDaemon is provided, it is used for sub-second hierarchy
-     * reads on a warm JVM. Otherwise falls back to MaestroWrapper CLI calls.
+     * The driver provides a hierarchy reader — whether it uses the daemon
+     * (sub-second) or CLI (5s+ per call) is managed by the driver itself.
      */
     async startPolling(
         sessionId: string,
         platform: MobilePlatform,
         appBundleId: string,
-        maestro?: MaestroWrapper,
-        daemon?: MaestroDaemon,
+        driver: AutomationDriver,
         notifier?: PollingNotifier,
     ): Promise<void> {
         if (this.activePollers.has(sessionId)) return;
@@ -195,38 +191,9 @@ export class SessionManager {
         const pollingIntervalMs = session?.pollingIntervalMs ?? 500;
         const logger = (interaction: UIInteraction) => this.logInteraction(interaction);
 
-        // Prefer daemon (sub-second) over wrapper (5s+ per call)
-        if (daemon) {
-            try {
-                const deviceId = maestro ? undefined : undefined; // deviceId resolved during session start
-                await daemon.start(deviceId);
-                this.activeDaemons.set(sessionId, daemon);
+        console.error(`[SessionManager] startPolling: using driver for ${sessionId} (interval: ${pollingIntervalMs}ms)`);
 
-                console.error(`[SessionManager] startPolling: using MaestroDaemon for ${sessionId} (interval: ${pollingIntervalMs}ms)`);
-
-                const hierarchyReader = daemon.createTreeReader();
-                const inferrer = new TouchInferrer(logger, hierarchyReader, { pollingIntervalMs }, notifier);
-                inferrer.start(sessionId);
-                this.activePollers.set(sessionId, inferrer);
-                return;
-            } catch (err) {
-                console.error(`[SessionManager] startPolling: daemon start failed, falling back to CLI:`, err);
-                this.activeDaemons.delete(sessionId);
-            }
-        }
-
-        // Fallback: use MaestroWrapper CLI calls
-        if (!maestro) {
-            console.error(`[SessionManager] startPolling: no MaestroWrapper provided, skipping passive capture for ${sessionId}`);
-            return;
-        }
-
-        console.error(`[SessionManager] startPolling: using CLI wrapper for ${sessionId} on ${platform} (interval: ${pollingIntervalMs}ms)`);
-
-        const hierarchyReader = async () => {
-            const raw = await maestro.dumpHierarchyLite();
-            return HierarchyParser.parse(raw);
-        };
+        const hierarchyReader = driver.createTreeReader();
         const inferrer = new TouchInferrer(logger, hierarchyReader, { pollingIntervalMs }, notifier);
         inferrer.start(sessionId);
         this.activePollers.set(sessionId, inferrer);
@@ -254,7 +221,6 @@ export class SessionManager {
 
     /**
      * Stop background polling for a session.
-     * Also stops the daemon if one was started.
      */
     async stopPolling(sessionId: string): Promise<void> {
         const inferrer = this.activePollers.get(sessionId);
@@ -262,13 +228,6 @@ export class SessionManager {
             inferrer.stop();
             this.activePollers.delete(sessionId);
             console.error(`[SessionManager] stopPolling: stopped passive capture for ${sessionId}`);
-        }
-
-        const daemon = this.activeDaemons.get(sessionId);
-        if (daemon) {
-            await daemon.stop();
-            this.activeDaemons.delete(sessionId);
-            console.error(`[SessionManager] stopPolling: stopped daemon for ${sessionId}`);
         }
     }
 }

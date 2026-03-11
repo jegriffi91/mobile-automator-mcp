@@ -11,7 +11,8 @@
 import { spawn, type ChildProcess } from 'child_process';
 import { resolveMaestroBin, getExecEnv } from './env.js';
 import { parseCsvHierarchy } from './csv-hierarchy-parser.js';
-import type { UIHierarchyNode } from '../types.js';
+import type { UIHierarchyNode, TimeoutConfig } from '../types.js';
+import { DEFAULT_TIMEOUTS } from '../types.js';
 
 /** Returns a parsed UIHierarchyNode tree for the TouchInferrer */
 export type TreeHierarchyReader = () => Promise<UIHierarchyNode>;
@@ -27,9 +28,11 @@ export class MaestroDaemon {
     { resolve: (value: unknown) => void; reject: (reason: unknown) => void }
   >();
   private initialized = false;
+  private timeouts: TimeoutConfig;
 
-  constructor(maestroBin?: string) {
+  constructor(maestroBin?: string, timeouts?: Partial<TimeoutConfig>) {
     this.maestroBin = resolveMaestroBin(maestroBin);
+    this.timeouts = { ...DEFAULT_TIMEOUTS, ...timeouts };
   }
 
   /**
@@ -164,7 +167,7 @@ export class MaestroDaemon {
           this.process.kill('SIGKILL');
         }
         resolve();
-      }, 3000);
+      }, this.timeouts.daemonShutdownMs);
 
       this.process?.on('exit', () => {
         clearTimeout(timeout);
@@ -207,11 +210,11 @@ export class MaestroDaemon {
 
       this.pendingRequests.set(id, { resolve, reject });
 
-      // Timeout after 15s
+      // Timeout after configured duration
       const timeout = setTimeout(() => {
         this.pendingRequests.delete(id);
-        reject(new Error(`Request ${method} (id: ${id}) timed out after 15s`));
-      }, 15_000);
+        reject(new Error(`Request ${method} (id: ${id}) timed out after ${this.timeouts.daemonRequestMs}ms`));
+      }, this.timeouts.daemonRequestMs);
 
       // Wrap the resolve/reject to clear timeout
       const original = this.pendingRequests.get(id)!;

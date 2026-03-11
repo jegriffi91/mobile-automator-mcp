@@ -100,6 +100,25 @@ export const StartRecordingInputSchema = z.object({
         .describe(
             'URL path patterns for network-based interaction tracking (e.g., ["/__track"]). When the app POSTs to matching paths, the events are extracted as user interactions during compilation.'
         ),
+    timeouts: z
+        .object({
+            hierarchyDumpMs: z.number().int().positive().optional()
+                .describe('Timeout for hierarchy dump calls (ms). Default: 15000'),
+            hierarchyLiteMs: z.number().int().positive().optional()
+                .describe('Timeout for lightweight/polling hierarchy calls (ms). Default: 10000'),
+            actionMs: z.number().int().positive().optional()
+                .describe('Timeout for single UI action execution (ms). Default: 15000'),
+            testRunMs: z.number().int().positive().optional()
+                .describe('Timeout for full test run (ms). Default: 120000'),
+            setupValidationMs: z.number().int().positive().optional()
+                .describe('Timeout for setup validation calls (ms). Default: 5000'),
+            daemonRequestMs: z.number().int().positive().optional()
+                .describe('Timeout for daemon JSON-RPC requests (ms). Default: 15000'),
+            daemonShutdownMs: z.number().int().positive().optional()
+                .describe('Timeout for daemon graceful shutdown (ms). Default: 3000'),
+        })
+        .optional()
+        .describe('Optional timeout overrides. All values merge with defaults — only override what you need.'),
 });
 
 export const StopAndCompileInputSchema = z.object({
@@ -205,6 +224,12 @@ export const RunTestInputSchema = z.object({
         .number()
         .optional()
         .describe('Port for the stub server (default: auto-select available port)'),
+    env: z
+        .record(z.string())
+        .optional()
+        .describe(
+            'Environment variables passed to Maestro via -e KEY=VALUE flags (e.g., { "APP_ID": "io.appcision.project-doombot" })'
+        ),
 });
 
 // ──────────────────────────────────────────────
