@@ -5,10 +5,12 @@
  *   - appId header + launchApp
  *   - Per-step UI commands (tapOn, inputText, scroll, swipe, back, assertVisible)
  *   - Inline comments documenting correlated network calls and fixture references
+ *   - ⚠️ warnings for low-confidence selectors and secure text field placeholders
  */
 
 import type { CorrelatedStep } from './correlator.js';
 import type { UIElement } from '../types.js';
+import { assessSelectorQuality } from './selector-quality.js';
 
 export class YamlGenerator {
     private appBundleId: string;
@@ -40,6 +42,12 @@ export class YamlGenerator {
                 lines.push(`# ── ${this.describeAction(interaction.actionType, interaction.element)} (${summary}) ──`);
             }
 
+            // Emit selector quality warnings
+            const warnings = assessSelectorQuality(interaction.element);
+            for (const w of warnings) {
+                lines.push(`# ⚠️ ${w.message}`);
+            }
+
             switch (interaction.actionType) {
                 case 'tap':
                     lines.push(`- tapOn:`);
@@ -48,7 +56,10 @@ export class YamlGenerator {
                 case 'type':
                     lines.push(`- tapOn:`);
                     lines.push(`    ${selector}`);
-                    if (interaction.textInput) {
+                    if (interaction.element.isSecure) {
+                        lines.push(`# ⚠️ Secure field detected — use -e SECURE_INPUT=<value> at runtime`);
+                        lines.push(`- inputText: "\${SECURE_INPUT}"`);
+                    } else if (interaction.textInput) {
                         lines.push(`- inputText: "${YamlGenerator.escapeYaml(interaction.textInput)}"`);
                     }
                     break;

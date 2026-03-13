@@ -141,6 +141,58 @@ describe('YamlGenerator', () => {
         ]);
         expect(yaml).toContain('text: "Say \\"Hello\\""');
     });
+
+    it('should emit env-var placeholder for secure text fields', () => {
+        const yaml = gen.toYaml([
+            makeStep({
+                interaction: {
+                    actionType: 'type',
+                    element: { id: 'passwordField', isSecure: true },
+                    textInput: 'secret123',
+                },
+            }),
+        ]);
+        expect(yaml).toContain('${SECURE_INPUT}');
+        expect(yaml).not.toContain('secret123');
+        expect(yaml).toContain('Secure field detected');
+    });
+
+    it('should emit regular text for non-secure type actions', () => {
+        const yaml = gen.toYaml([
+            makeStep({
+                interaction: {
+                    actionType: 'type',
+                    element: { id: 'emailField' },
+                    textInput: 'user@example.com',
+                },
+            }),
+        ]);
+        expect(yaml).toContain('user@example.com');
+        expect(yaml).not.toContain('SECURE_INPUT');
+    });
+
+    it('should emit selector quality warnings as YAML comments', () => {
+        const yaml = gen.toYaml([
+            makeStep({ interaction: { element: { text: '3' } } }),
+        ]);
+        expect(yaml).toContain('# ⚠️');
+        expect(yaml).toContain('falling back to visible text');
+    });
+
+    it('should emit transient ID warning', () => {
+        const yaml = gen.toYaml([
+            makeStep({ interaction: { element: { id: 'shimmer-row-1' } } }),
+        ]);
+        expect(yaml).toContain('# ⚠️');
+        expect(yaml).toContain('transient');
+    });
+
+    it('should not emit warnings for well-identified elements', () => {
+        const yaml = gen.toYaml([
+            makeStep({ interaction: { element: { id: 'submit-button' } } }),
+        ]);
+        expect(yaml).not.toContain('⚠️');
+    });
 });
 
 describe('YamlGenerator.buildSelector', () => {
