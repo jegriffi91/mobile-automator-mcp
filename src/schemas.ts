@@ -260,7 +260,7 @@ export const RunTestInputSchema = z.object({
     stubsDir: z
         .string()
         .optional()
-        .describe('Path to WireMock stubs directory (session-xxx/wiremock/). If provided, a stub server is started automatically.'),
+        .describe('Path to WireMock stubs root directory (session-xxx/wiremock/) containing mappings/ and __files/ subdirectories. If provided, a stub server is started automatically.'),
     platform: z
         .enum(['ios', 'android'])
         .optional()
@@ -291,7 +291,7 @@ export const StopAndCompileOutputSchema = z.object({
     yaml: z.string().describe('The generated Maestro YAML test script content'),
     yamlPath: z.string().describe('File path where the YAML was written'),
     fixturesDir: z.string().optional().describe('Directory containing WireMock response fixtures'),
-    stubsDir: z.string().optional().describe('Directory containing WireMock mapping stubs'),
+    stubsDir: z.string().optional().describe('WireMock stubs root directory containing mappings/ and __files/ subdirectories'),
     manifestPath: z.string().optional().describe('Path to the session manifest JSON'),
     segmentFingerprint: z
         .string()

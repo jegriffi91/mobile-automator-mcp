@@ -45,8 +45,12 @@ export class StubServer {
      *     __files/*_response.json
      */
     async loadStubs(stubsDir: string): Promise<number> {
-        const mappingsDir = path.join(stubsDir, 'mappings');
-        this.filesDir = path.join(stubsDir, '__files');
+        // Normalize: if caller passed the mappings/ subdirectory directly, go up one level
+        const normalizedDir = path.basename(stubsDir) === 'mappings'
+            ? path.dirname(stubsDir)
+            : stubsDir;
+        const mappingsDir = path.join(normalizedDir, 'mappings');
+        this.filesDir = path.join(normalizedDir, '__files');
 
         try {
             const files = await fs.readdir(mappingsDir);

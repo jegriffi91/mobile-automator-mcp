@@ -253,7 +253,7 @@ export async function handleStopAndCompile(
         );
 
         fixturesDir = path.join(sessionDir, 'wiremock', '__files');
-        stubsDir = path.join(sessionDir, 'wiremock', 'mappings');
+        stubsDir = path.join(sessionDir, 'wiremock');
         manifestPath = path.join(sessionDir, 'manifest.json');
 
         console.error(

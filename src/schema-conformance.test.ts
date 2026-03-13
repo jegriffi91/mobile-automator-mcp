@@ -62,7 +62,7 @@ describe('Schema Conformance', () => {
         yaml: 'appId: com.example.app\n---\n- tapOn:\n    id: "button"',
         yamlPath: '/tmp/maestro-test-session-abc123.yaml',
         fixturesDir: '/tmp/session-abc123/wiremock/__files',
-        stubsDir: '/tmp/session-abc123/wiremock/mappings',
+        stubsDir: '/tmp/session-abc123/wiremock',
         manifestPath: '/tmp/session-abc123/manifest.json',
         segmentFingerprint: 'abcd1234',
         matchedSegments: [
