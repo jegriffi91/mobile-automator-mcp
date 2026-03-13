@@ -111,6 +111,14 @@ Since Proxyman captures the full URL including port, domain filtering effectivel
 
 ---
 
+## Recording vs. Replay
+
+> **Important:** `run_test` is a **replay-only** tool. It executes a static Maestro YAML script against a booted simulator, optionally serving pre-recorded WireMock stubs. It does **not** connect to live Proxyman or capture new network traffic during execution.
+>
+> To record new test scripts, use the full recording lifecycle (`start_recording_session` → interactions → `stop_and_compile_test`). To replay them, use `run_test` with the generated YAML and optional stubs directory.
+
+---
+
 ## Key Technical Decisions
 
 | Decision | Rationale |

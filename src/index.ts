@@ -248,7 +248,7 @@ server.registerTool(
     {
         title: 'Run Test',
         description:
-            'Run a Maestro YAML test file with optional WireMock stub replay. Automatically starts an in-process stub server, runs the test, and tears down. Returns pass/fail status, output, and duration.',
+            'Run a Maestro YAML test file with optional WireMock stub replay. Automatically starts an in-process stub server, runs the test, and tears down. Returns pass/fail status, output, and duration. Note: this tool replays a static YAML script against a booted simulator — it does NOT connect to live Proxyman or record new network traffic during execution.',
         inputSchema: RunTestInputSchema,
         outputSchema: RunTestOutputSchema,
         annotations: {

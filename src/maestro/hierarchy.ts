@@ -36,6 +36,19 @@ export class HierarchyParser {
         const accessibilityLabel = attrs.accessibilityLabel || attrs.accessibilityText || attrs['content-desc'] || attrs['accessibility-id'] || node.accessibilityText || node.contentDesc;
         const role = attrs.class || attrs.type || node.class || node.role || 'Element';
 
+        // Detect secure text fields (password inputs)
+        // iOS: secureTextEntry attribute or SecureTextField type
+        // Android: password attribute or isPassword flag
+        const isSecure = !!(
+            attrs.secureTextEntry === true ||
+            attrs.secureTextEntry === 'true' ||
+            attrs.isPassword === true ||
+            attrs.isPassword === 'true' ||
+            attrs.password === true ||
+            attrs.password === 'true' ||
+            role === 'SecureTextField'
+        ) || undefined;
+
         const children = Array.isArray(node.children)
             ? node.children.map((c: any) => HierarchyParser.normalizeNode(c))
             : [];
@@ -46,7 +59,8 @@ export class HierarchyParser {
             accessibilityLabel,
             text,
             role,
-            children
+            children,
+            ...(isSecure ? { isSecure } : {}),
         };
     }
 

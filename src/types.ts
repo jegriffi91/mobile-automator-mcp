@@ -44,6 +44,8 @@ export interface UIElement {
     text?: string;
     role?: string;
     bounds?: { x: number; y: number; width: number; height: number };
+    /** True when the element is a secure text field (password input). Used to emit env-var placeholders instead of literal credentials. */
+    isSecure?: boolean;
 }
 
 export interface UIInteraction {
@@ -64,6 +66,8 @@ export interface UIHierarchyNode {
     text?: string;
     role: string;
     children: UIHierarchyNode[];
+    /** True when the node is a secure text field (password input) */
+    isSecure?: boolean;
     /**
      * Pre-computed hash of the tree's identifiable elements.
      * Enables O(1) equality comparison in HierarchyDiffer.areEqualTrees.
