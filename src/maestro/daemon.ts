@@ -112,7 +112,7 @@ export class MaestroDaemon {
 
     const result = await this.sendRequest('tools/call', {
       name: 'inspect_view_hierarchy',
-      arguments: {},
+      arguments: this.deviceId ? { device_id: this.deviceId } : {},
     }) as { content?: Array<{ type: string; text: string }> };
 
     // Extract text content from the MCP tool response
