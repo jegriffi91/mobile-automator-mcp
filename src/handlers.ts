@@ -148,13 +148,10 @@ export async function handleStopAndCompile(
     }
 
     // ── Step 1: Export scoped Proxyman HAR ──
-    const scopedHarPath = path.join(os.tmpdir(), `proxyman-scoped-${input.sessionId}.har`);
     let proxymanEvents: NetworkEvent[] = [];
     try {
         const baseline = session.proxymanBaseline ?? 0;
-        await proxymanWrapper.exportHarScoped(scopedHarPath, baseline, session.filterDomains, session.startedAt);
-        const raw = await fs.readFile(scopedHarPath, 'utf-8');
-        const har = JSON.parse(raw);
+        const har = await proxymanWrapper.exportHarScopedParsed(baseline, session.filterDomains, session.startedAt);
         proxymanEvents = (har.log?.entries || []).map((entry: any) => ({
             sessionId: input.sessionId,
             timestamp: entry.startedDateTime,
@@ -168,8 +165,6 @@ export async function handleStopAndCompile(
         console.error(`[MCP] stop_and_compile_test: ${proxymanEvents.length} scoped network events from Proxyman`);
     } catch (error) {
         console.error('[MCP] stop_and_compile_test: Proxyman scoped export failed, using session DB events only', error);
-    } finally {
-        await fs.unlink(scopedHarPath).catch(() => { });
     }
 
     // ── Step 2: Fetch UI interactions from session DB ──
@@ -570,13 +565,7 @@ export async function handleGetNetworkLogs(
     }
 
     // Also persist Proxyman events to the session DB for future correlation
-    for (const event of proxymanEvents) {
-        try {
-            await sessionManager.logNetworkEvent(event);
-        } catch {
-            // Ignore duplicates or session-not-found for non-active sessions
-        }
-    }
+    await sessionManager.batchLogNetworkEvents(proxymanEvents);
 
     const limit = input.limit ?? 50;
     const limited = merged.slice(0, limit);

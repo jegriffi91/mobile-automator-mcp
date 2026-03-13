@@ -10,6 +10,7 @@
  */
 
 import type { UIHierarchyNode } from '../types.js';
+import { computeStructuralHash } from './structural-hash.js';
 
 interface CsvRow {
   elementNum: number;
@@ -156,5 +157,7 @@ export function parseCsvHierarchy(csv: string): UIHierarchyNode {
     delete (node as unknown as Record<string, unknown>)['_parentNum'];
   }
 
-  return root || { role: 'Application', children: [] };
+  const result = root || { role: 'Application', children: [] };
+  result.structuralHash = computeStructuralHash(result);
+  return result;
 }

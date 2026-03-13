@@ -73,36 +73,38 @@ export class StubWriter {
         // Filter based on mocking config
         const filteredCaptures = this.filterCaptures(uniqueCaptures, config);
 
-        const routes: StubRoute[] = [];
+        // Write fixture files and WireMock mappings in parallel
+        const routeEntries = await Promise.all(
+            filteredCaptures.map(async (capture) => {
+                const fixtureFileName = `${capture.fixtureId}_response.json`;
+                const mappingFileName = `${capture.fixtureId}.json`;
 
-        // Write fixture files and WireMock mappings
-        for (const capture of filteredCaptures) {
-            const fixtureFileName = `${capture.fixtureId}_response.json`;
-            const mappingFileName = `${capture.fixtureId}.json`;
+                // Write response body fixture
+                const responseBody = capture.event.responseBody || '{}';
+                const contentType = this.inferContentType(responseBody);
+                const mapping = this.buildMapping(capture, fixtureFileName, contentType);
 
-            // Write response body fixture
-            const responseBody = capture.event.responseBody || '{}';
-            await fs.writeFile(path.join(filesDir, fixtureFileName), responseBody, 'utf-8');
+                // Parallel write of fixture + mapping
+                await Promise.all([
+                    fs.writeFile(path.join(filesDir, fixtureFileName), responseBody, 'utf-8'),
+                    fs.writeFile(
+                        path.join(mappingsDir, mappingFileName),
+                        JSON.stringify(mapping, null, 2),
+                        'utf-8',
+                    ),
+                ]);
 
-            // Determine content type from response
-            const contentType = this.inferContentType(responseBody);
+                return {
+                    method: capture.requestPattern.method,
+                    path: capture.requestPattern.pathPattern,
+                    fixtureFile: fixtureFileName,
+                    statusCode: capture.event.statusCode,
+                    contentType,
+                } as StubRoute;
+            })
+        );
 
-            // Write WireMock mapping
-            const mapping = this.buildMapping(capture, fixtureFileName, contentType);
-            await fs.writeFile(
-                path.join(mappingsDir, mappingFileName),
-                JSON.stringify(mapping, null, 2),
-                'utf-8'
-            );
-
-            routes.push({
-                method: capture.requestPattern.method,
-                path: capture.requestPattern.pathPattern,
-                fixtureFile: fixtureFileName,
-                statusCode: capture.event.statusCode,
-                contentType,
-            });
-        }
+        const routes: StubRoute[] = routeEntries;
 
         // Write catch-all proxy mapping for include/exclude modes
         if (config.mode !== 'full' && config.proxyBaseUrl) {

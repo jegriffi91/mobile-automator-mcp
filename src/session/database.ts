@@ -30,7 +30,8 @@ export class SessionDatabase {
                 filterDomains TEXT,
                 captureMode TEXT,
                 pollingIntervalMs INTEGER,
-                settleTimeoutMs INTEGER
+                settleTimeoutMs INTEGER,
+                trackEventPaths TEXT
             );
 
             CREATE TABLE IF NOT EXISTS ui_interactions (
@@ -40,6 +41,7 @@ export class SessionDatabase {
                 actionType TEXT NOT NULL,
                 element TEXT NOT NULL,
                 textInput TEXT,
+                source TEXT,
                 FOREIGN KEY(sessionId) REFERENCES sessions(id)
             );
 
@@ -89,7 +91,7 @@ export class SessionDatabase {
      */
     insertSession(session: Session): void {
         const db = this.getDb();
-        const stmt = db.prepare(`INSERT INTO sessions (id, appBundleId, platform, status, startedAt, stoppedAt, proxymanBaseline, filterDomains, captureMode, pollingIntervalMs, settleTimeoutMs) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+        const stmt = db.prepare(`INSERT INTO sessions (id, appBundleId, platform, status, startedAt, stoppedAt, proxymanBaseline, filterDomains, captureMode, pollingIntervalMs, settleTimeoutMs, trackEventPaths) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
         stmt.run([
             session.id,
             session.appBundleId,
@@ -102,6 +104,7 @@ export class SessionDatabase {
             session.captureMode || null,
             session.pollingIntervalMs ?? null,
             session.settleTimeoutMs ?? null,
+            session.trackEventPaths ? JSON.stringify(session.trackEventPaths) : null,
         ]);
         stmt.free();
     }
@@ -158,6 +161,7 @@ export class SessionDatabase {
                 captureMode: (row.captureMode as CaptureMode) || undefined,
                 pollingIntervalMs: row.pollingIntervalMs != null ? (row.pollingIntervalMs as number) : undefined,
                 settleTimeoutMs: row.settleTimeoutMs != null ? (row.settleTimeoutMs as number) : undefined,
+                trackEventPaths: row.trackEventPaths ? JSON.parse(row.trackEventPaths as string) : undefined,
             };
         }
         stmt.free();
@@ -169,13 +173,14 @@ export class SessionDatabase {
      */
     insertUIInteraction(interaction: UIInteraction): void {
         const db = this.getDb();
-        const stmt = db.prepare(`INSERT INTO ui_interactions (sessionId, timestamp, actionType, element, textInput) VALUES (?, ?, ?, ?, ?)`);
+        const stmt = db.prepare(`INSERT INTO ui_interactions (sessionId, timestamp, actionType, element, textInput, source) VALUES (?, ?, ?, ?, ?, ?)`);
         stmt.run([
             interaction.sessionId,
             interaction.timestamp,
             interaction.actionType,
             JSON.stringify(interaction.element),
             interaction.textInput || null,
+            interaction.source || null,
         ]);
         stmt.free();
     }
@@ -197,6 +202,7 @@ export class SessionDatabase {
                 actionType: row.actionType as UIInteraction['actionType'],
                 element: JSON.parse(row.element as string),
                 textInput: row.textInput != null ? (row.textInput as string) : undefined,
+                source: (row.source as UIInteraction['source']) || undefined,
             });
         }
         stmt.free();
@@ -220,6 +226,39 @@ export class SessionDatabase {
             event.durationMs || null,
         ]);
         stmt.free();
+    }
+
+    /**
+     * Batch-insert network events in a single transaction.
+     * Uses INSERT OR IGNORE to silently skip duplicates.
+     * ~10-50x faster than individual insertNetworkEvent() calls.
+     */
+    batchInsertNetworkEvents(events: NetworkEvent[]): void {
+        if (events.length === 0) return;
+        const db = this.getDb();
+        db.run('BEGIN TRANSACTION');
+        try {
+            const stmt = db.prepare(
+                `INSERT OR IGNORE INTO network_events (sessionId, timestamp, method, url, statusCode, requestBody, responseBody, durationMs) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+            );
+            for (const event of events) {
+                stmt.run([
+                    event.sessionId,
+                    event.timestamp,
+                    event.method,
+                    event.url,
+                    event.statusCode,
+                    event.requestBody || null,
+                    event.responseBody || null,
+                    event.durationMs || null,
+                ]);
+            }
+            stmt.free();
+            db.run('COMMIT');
+        } catch (error) {
+            db.run('ROLLBACK');
+            throw error;
+        }
     }
 
     /**

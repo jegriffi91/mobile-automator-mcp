@@ -137,6 +137,19 @@ export class SessionManager {
     }
 
     /**
+     * Batch-insert network events in a single transaction.
+     * Silently skips duplicate entries and events for non-existent sessions.
+     */
+    async batchLogNetworkEvents(events: NetworkEvent[]): Promise<void> {
+        if (events.length === 0) return;
+        try {
+            this.db.batchInsertNetworkEvents(events);
+        } catch {
+            // Silently handle errors (e.g., session not found for completed sessions)
+        }
+    }
+
+    /**
      * Store the Proxyman baseline entry count for a session.
      */
     async updateBaseline(sessionId: string, baseline: number): Promise<void> {

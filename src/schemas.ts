@@ -45,6 +45,7 @@ const UIHierarchyNodeSchema: z.ZodType<UIHierarchyNodeShape> = z.lazy(() =>
         text: z.string().optional(),
         role: z.string(),
         children: z.array(UIHierarchyNodeSchema),
+        structuralHash: z.string().optional().describe('Pre-computed structural hash for O(1) tree equality comparison'),
     })
 );
 
@@ -56,6 +57,7 @@ interface UIHierarchyNodeShape {
     text?: string;
     role: string;
     children: UIHierarchyNodeShape[];
+    structuralHash?: string;
 }
 
 // ──────────────────────────────────────────────
@@ -317,6 +319,22 @@ export const StopAndCompileOutputSchema = z.object({
             expectedPolls: z.number().optional().describe('Expected poll count based on elapsed time'),
             actualPollingRateMs: z.number().optional().describe('Average actual polling interval (ms)'),
             configuredPollingRateMs: z.number().optional().describe('Configured polling interval (ms)'),
+            equalTreeCount: z
+                .number()
+                .optional()
+                .describe('Polls where hierarchy was identical to previous (no diff needed)'),
+            thresholdExceededCount: z
+                .number()
+                .optional()
+                .describe('Diffs exceeding maxChangesThreshold (discarded as full-screen transitions)'),
+            diffButNullInferenceCount: z
+                .number()
+                .optional()
+                .describe('Diffs with changes but no identifiable elements for inference'),
+            baselineElementCount: z
+                .number()
+                .optional()
+                .describe('Number of identifiable elements in the baseline hierarchy snapshot'),
         })
         .optional()
         .describe('Health diagnostics from the passive capture polling loop'),

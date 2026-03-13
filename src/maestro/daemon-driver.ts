@@ -99,15 +99,23 @@ export class MaestroDaemonDriver implements AutomationDriver {
         return this.wrapper.uninstallDriver(platform, deviceId);
     }
 
-    // ── Hierarchy tree reader (daemon fast path with CLI fallback) ──
+    // ── Hierarchy tree reader (runtime daemon check with CLI fallback) ──
 
     createTreeReader(): TreeHierarchyReader {
-        if (this.daemonStarted) {
-            return this.daemon.createTreeReader();
-        }
-
-        // Fallback to CLI-based reader
+        // Evaluate daemon health at CALL time, not creation time.
+        // If the daemon crashes after the reader is created, the reader
+        // falls back to CLI instead of throwing.
         return async () => {
+            if (this.daemonStarted) {
+                try {
+                    return await this.daemon.getHierarchy();
+                } catch (err) {
+                    console.error(
+                        '[MaestroDaemonDriver] daemon tree reader failed, falling back to CLI:',
+                        err,
+                    );
+                }
+            }
             const raw = await this.wrapper.dumpHierarchyLite();
             return HierarchyParser.parse(raw);
         };

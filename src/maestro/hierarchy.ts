@@ -8,6 +8,7 @@
  */
 
 import type { UIHierarchyNode } from '../types.js';
+import { computeStructuralHash } from './structural-hash.js';
 
 export class HierarchyParser {
     /**
@@ -16,10 +17,12 @@ export class HierarchyParser {
     static parse(rawOutput: string): UIHierarchyNode {
         try {
             const parsed = JSON.parse(rawOutput);
-            return HierarchyParser.normalizeNode(parsed);
+            const root = HierarchyParser.normalizeNode(parsed);
+            root.structuralHash = computeStructuralHash(root);
+            return root;
         } catch (e) {
             console.error("[HierarchyParser] Failed to parse hierarchy:", e);
-            return { role: 'Application', children: [] };
+            return { role: 'Application', children: [], structuralHash: computeStructuralHash({ role: 'Application', children: [] }) };
         }
     }
 

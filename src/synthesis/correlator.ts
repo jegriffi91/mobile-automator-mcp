@@ -47,12 +47,23 @@ export class Correlator {
         interactions: UIInteraction[],
         networkEvents: NetworkEvent[]
     ): CorrelatedStep[] {
+        // Pre-parse timestamps to avoid repeated Date allocations in sort + correlation
+        const timeCache = new Map<string, number>();
+        const getTime = (ts: string): number => {
+            let t = timeCache.get(ts);
+            if (t === undefined) {
+                t = new Date(ts).getTime();
+                timeCache.set(ts, t);
+            }
+            return t;
+        };
+
         // Sort both by timestamp ascending
         const sortedInteractions = [...interactions].sort(
-            (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
+            (a, b) => getTime(a.timestamp) - getTime(b.timestamp)
         );
         const sortedEvents = [...networkEvents].sort(
-            (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
+            (a, b) => getTime(a.timestamp) - getTime(b.timestamp)
         );
 
         const claimed = new Set<number>(); // indices of already-matched network events
@@ -60,13 +71,13 @@ export class Correlator {
 
         for (let i = 0; i < sortedInteractions.length; i++) {
             const interaction = sortedInteractions[i];
-            const interactionTime = new Date(interaction.timestamp).getTime();
+            const interactionTime = getTime(interaction.timestamp);
             const matched: NetworkEvent[] = [];
 
             for (let j = 0; j < sortedEvents.length; j++) {
                 if (claimed.has(j)) continue;
 
-                const eventTime = new Date(sortedEvents[j].timestamp).getTime();
+                const eventTime = getTime(sortedEvents[j].timestamp);
                 const delta = eventTime - interactionTime;
 
                 // Event must be after the interaction and within the window

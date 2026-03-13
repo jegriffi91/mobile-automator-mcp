@@ -143,9 +143,16 @@ export class HierarchyDiffer {
 
     /**
      * Compare two parsed UIHierarchyNode trees for equality.
-     * Used by TouchInferrer for fast tree comparison without JSON serialization.
+     * Uses pre-computed structural hashes for O(1) comparison when available.
+     * Falls back to full flatten + set compare for trees without hashes.
      */
     static areEqualTrees(treeA: UIHierarchyNode, treeB: UIHierarchyNode): boolean {
+        // O(1) path: use pre-computed structural hashes if both trees have them
+        if (treeA.structuralHash && treeB.structuralHash) {
+            return treeA.structuralHash === treeB.structuralHash;
+        }
+
+        // Fallback: full flatten + set compare (backward compat for unhashed trees)
         const keysA = new Set(flattenToElements(treeA).map(elementKey));
         const keysB = new Set(flattenToElements(treeB).map(elementKey));
         if (keysA.size !== keysB.size) return false;

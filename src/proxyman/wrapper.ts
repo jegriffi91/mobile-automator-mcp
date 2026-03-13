@@ -112,6 +112,20 @@ export class ProxymanWrapper {
         domains?: string[],
         afterTimestamp?: string,
     ): Promise<string> {
+        const har = await this.exportHarScopedParsed(baselineCount, domains, afterTimestamp);
+        await fs.writeFile(outputPath, JSON.stringify(har, null, 2), 'utf-8');
+        return outputPath;
+    }
+
+    /**
+     * Export scoped Proxyman traffic and return the parsed HAR directly.
+     * Avoids the write-then-read-then-delete roundtrip of `exportHarScoped`.
+     */
+    async exportHarScopedParsed(
+        baselineCount: number,
+        domains?: string[],
+        afterTimestamp?: string,
+    ): Promise<HarLog> {
         const tmpFile = path.join(os.tmpdir(), `proxyman-scoped-${randomUUID()}.har`);
         try {
             await this.exportHar(tmpFile, domains);
@@ -119,27 +133,25 @@ export class ProxymanWrapper {
             const har: HarLog = JSON.parse(raw);
 
             if (afterTimestamp) {
-                // Timestamp-based scoping (reliable regardless of HAR ordering)
                 const cutoff = new Date(afterTimestamp).getTime();
                 har.log.entries = har.log.entries.filter(
                     (e) => new Date(e.startedDateTime).getTime() >= cutoff,
                 );
                 console.error(
-                    `[ProxymanWrapper] exportHarScoped: ${har.log.entries.length} entries after ${afterTimestamp}`,
+                    `[ProxymanWrapper] exportHarScopedParsed: ${har.log.entries.length} entries after ${afterTimestamp}`,
                 );
             } else {
-                // Legacy: slice by position (unreliable if Proxyman reorders)
                 har.log.entries = har.log.entries.slice(baselineCount);
                 console.error(
-                    `[ProxymanWrapper] exportHarScoped: ${har.log.entries.length} new entries (baseline was ${baselineCount})`,
+                    `[ProxymanWrapper] exportHarScopedParsed: ${har.log.entries.length} new entries (baseline was ${baselineCount})`,
                 );
             }
 
-            await fs.writeFile(outputPath, JSON.stringify(har, null, 2), 'utf-8');
-            return outputPath;
-        } catch (error: any) {
-            console.error('[ProxymanWrapper] exportHarScoped failed:', error);
-            throw new Error(`Failed to export scoped HAR: ${error.message || String(error)}`);
+            return har;
+        } catch (error: unknown) {
+            const msg = error instanceof Error ? error.message : String(error);
+            console.error('[ProxymanWrapper] exportHarScopedParsed failed:', error);
+            throw new Error(`Failed to export scoped HAR: ${msg}`);
         } finally {
             await fs.unlink(tmpFile).catch(() => { });
         }

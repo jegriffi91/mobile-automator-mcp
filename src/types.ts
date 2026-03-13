@@ -64,6 +64,12 @@ export interface UIHierarchyNode {
     text?: string;
     role: string;
     children: UIHierarchyNode[];
+    /**
+     * Pre-computed hash of the tree's identifiable elements.
+     * Enables O(1) equality comparison in HierarchyDiffer.areEqualTrees.
+     * Computed during parsing — only present on root nodes.
+     */
+    structuralHash?: string;
 }
 
 // ----- Hierarchy Capture Types -----
