@@ -57,4 +57,62 @@ export class HierarchyParser {
         }
         return result;
     }
+
+    /**
+     * Filter the tree to only nodes that have at least one identifier
+     * (id, testId, accessibilityLabel, text) or have interactive descendants.
+     * Dramatically reduces output size for LLM consumers.
+     */
+    static filterInteractive(node: UIHierarchyNode): UIHierarchyNode {
+        const filteredChildren = node.children
+            .map((c) => HierarchyParser.filterInteractive(c))
+            .filter((c) => HierarchyParser.hasIdentifier(c));
+
+        return { ...node, children: filteredChildren };
+    }
+
+    /**
+     * Compact the tree by collapsing single-child chains of anonymous containers
+     * and stripping empty anonymous nodes. Reduces tree depth without losing
+     * identifiable elements.
+     */
+    static compact(node: UIHierarchyNode): UIHierarchyNode {
+        // Recursively compact children first
+        let compactedChildren = node.children.map((c) => HierarchyParser.compact(c));
+
+        // Collapse single-child chains where the single child is anonymous
+        while (
+            compactedChildren.length === 1 &&
+            !HierarchyParser.hasOwnIdentifier(compactedChildren[0])
+        ) {
+            compactedChildren = compactedChildren[0].children;
+        }
+
+        // Strip empty anonymous containers
+        compactedChildren = compactedChildren.filter((c) => HierarchyParser.hasIdentifier(c));
+
+        return { ...node, children: compactedChildren };
+    }
+
+    /**
+     * Count total nodes in the tree.
+     */
+    static countNodes(node: UIHierarchyNode): number {
+        return 1 + node.children.reduce((sum, c) => sum + HierarchyParser.countNodes(c), 0);
+    }
+
+    /**
+     * Check if a node or any of its descendants has an identifier.
+     */
+    private static hasIdentifier(node: UIHierarchyNode): boolean {
+        if (node.id || node.testId || node.accessibilityLabel || node.text) return true;
+        return node.children.some((c) => HierarchyParser.hasIdentifier(c));
+    }
+
+    /**
+     * Check if this specific node (not descendants) has an identifier.
+     */
+    private static hasOwnIdentifier(node: UIHierarchyNode): boolean {
+        return !!(node.id || node.testId || node.accessibilityLabel || node.text);
+    }
 }

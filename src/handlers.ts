@@ -1,5 +1,5 @@
 /**
- * MCP tool handlers for all 8 tools.
+ * MCP tool handlers for all 9 tools.
  *
  * Input/output types are derived from Zod schemas (schemas.ts) —
  * the single source of truth for tool I/O shapes.
@@ -9,6 +9,8 @@
  */
 
 import { randomUUID } from 'crypto';
+import { execFile } from 'child_process';
+import { promisify } from 'util';
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import * as os from 'os';
@@ -41,7 +43,11 @@ import type {
     RegisterSegmentOutput,
     RunTestInput,
     RunTestOutput,
+    ListDevicesInput,
+    ListDevicesOutput,
 } from './schemas.js';
+
+const execFileAsync = promisify(execFile);
 
 // ── MCP Server reference for sending logging notifications ──
 let mcpServer: McpServer | undefined;
@@ -362,21 +368,80 @@ export async function handleStopAndCompile(
 
 // ---- get_ui_hierarchy ----
 export async function handleGetUIHierarchy(
-    _input: GetUIHierarchyInput
+    input: GetUIHierarchyInput
 ): Promise<GetUIHierarchyOutput> {
     console.error(`[MCP] get_ui_hierarchy: capturing current screen`);
 
-    // Use the first active driver, or create a CLI-only one
-    const driver = activeDrivers.values().next().value ??
-        await DriverFactory.createCliOnly();
+    // 1. Resolve driver: session-specific → auto-target booted device
+    let driver: AutomationDriver;
 
+    if (input.sessionId) {
+        const sessionDriver = activeDrivers.get(input.sessionId);
+        if (!sessionDriver) {
+            throw new Error(
+                `No active driver for session ${input.sessionId}. ` +
+                    `Was start_recording_session called?`
+            );
+        }
+        driver = sessionDriver;
+        console.error(`[MCP] get_ui_hierarchy: using session driver for ${input.sessionId}`);
+    } else {
+        // No session — create a temporary CLI driver and auto-target
+        driver = await DriverFactory.createCliOnly();
+        const iosSim = await driver.validateSimulator('ios');
+        if (!iosSim.booted) {
+            const androidSim = await driver.validateSimulator('android');
+            if (!androidSim.booted) {
+                throw new Error(
+                    'No booted iOS or Android simulator found. ' +
+                        'Boot a device or pass a sessionId from an active recording.'
+                );
+            }
+            console.error(
+                `[MCP] get_ui_hierarchy: auto-targeted Android device ${androidSim.deviceId}`
+            );
+        } else {
+            console.error(`[MCP] get_ui_hierarchy: auto-targeted iOS device ${iosSim.deviceId}`);
+        }
+    }
+
+    // 2. Dump hierarchy + parse (MCP owns sanitization)
     const rawOutput = await driver.dumpHierarchy();
-    const hierarchy = HierarchyParser.parse(rawOutput);
+    let hierarchy = HierarchyParser.parse(rawOutput);
 
-    return {
-        hierarchy,
-        rawXml: rawOutput,
-    };
+    // 3. Apply interactiveOnly filter
+    if (input.interactiveOnly) {
+        hierarchy = HierarchyParser.filterInteractive(hierarchy);
+        console.error(`[MCP] get_ui_hierarchy: filtered to interactive-only elements`);
+    }
+
+    // 4. Apply compact mode
+    if (input.compact) {
+        hierarchy = HierarchyParser.compact(hierarchy);
+        console.error(`[MCP] get_ui_hierarchy: compacted tree`);
+    }
+
+    const nodeCount = HierarchyParser.countNodes(hierarchy);
+
+    // 5. Artifact path: write full tree to file, return summary
+    if (input.artifactPath) {
+        await fs.writeFile(input.artifactPath, JSON.stringify(hierarchy, null, 2), 'utf-8');
+        console.error(
+            `[MCP] get_ui_hierarchy: wrote ${nodeCount} nodes to ${input.artifactPath}`
+        );
+        return {
+            hierarchy: { role: hierarchy.role, children: [] },
+            nodeCount,
+            artifactPath: input.artifactPath,
+        };
+    }
+
+    // 6. Build response — raw output opt-in only
+    const result: GetUIHierarchyOutput = { hierarchy, nodeCount };
+    if (input.includeRawOutput) {
+        result.rawOutput = rawOutput;
+    }
+    return result;
 }
 
 // ---- execute_ui_action ----
@@ -656,4 +721,96 @@ export async function handleRunTest(
             console.error('[MCP] run_test: stub server stopped');
         }
     }
+}
+
+// ---- list_devices ----
+
+/** Shape of each device in the xcrun simctl JSON output */
+interface SimctlDevice {
+    udid: string;
+    name: string;
+    state: string;
+    isAvailable: boolean;
+}
+
+/** Extract a human-readable OS version from a CoreSimulator runtime identifier */
+function runtimeToOsVersion(runtime: string): string {
+    // "com.apple.CoreSimulator.SimRuntime.iOS-18-1" → "iOS 18.1"
+    return runtime
+        .replace('com.apple.CoreSimulator.SimRuntime.', '')
+        .replace(/-/g, ' ')
+        .replace(/(\w+)\s(\d+)\s(\d+)/, '$1 $2.$3');
+}
+
+export async function handleListDevices(
+    input: ListDevicesInput
+): Promise<ListDevicesOutput> {
+    console.error(`[MCP] list_devices: platform=${input.platform ?? 'all'}, state=${input.state ?? 'all'}`);
+
+    const devices: ListDevicesOutput['devices'] = [];
+
+    // ── iOS: xcrun simctl list devices -j ──
+    if (!input.platform || input.platform === 'ios') {
+        try {
+            const { stdout } = await execFileAsync('xcrun', ['simctl', 'list', 'devices', '-j']);
+            const data = JSON.parse(stdout) as { devices: Record<string, SimctlDevice[]> };
+
+            for (const runtime in data.devices) {
+                const osVersion = runtimeToOsVersion(runtime);
+
+                // Apply OS version filter
+                if (input.osVersionContains && !osVersion.includes(input.osVersionContains)) {
+                    continue;
+                }
+
+                for (const device of data.devices[runtime]) {
+                    // Skip unavailable runtimes (old Xcode installs, etc.)
+                    if (!device.isAvailable) continue;
+
+                    // Apply state filter
+                    if (input.state && device.state !== input.state) continue;
+
+                    devices.push({
+                        platform: 'ios',
+                        udid: device.udid,
+                        name: device.name,
+                        state: device.state,
+                        osVersion,
+                        isAvailable: device.isAvailable,
+                    });
+                }
+            }
+        } catch (error) {
+            console.error('[MCP] list_devices: xcrun simctl failed:', error);
+            // Non-fatal — still try Android if requested
+        }
+    }
+
+    // ── Android: adb devices ──
+    if (!input.platform || input.platform === 'android') {
+        try {
+            const { stdout } = await execFileAsync('adb', ['devices']);
+            const lines = stdout.split('\n');
+            for (const line of lines.slice(1)) {
+                if (line.includes('\tdevice')) {
+                    const deviceId = line.split('\t')[0];
+                    // adb only shows connected (booted) devices
+                    if (input.state && input.state !== 'Booted') continue;
+
+                    devices.push({
+                        platform: 'android',
+                        udid: deviceId,
+                        name: deviceId, // adb doesn't provide device name inline
+                        state: 'Booted',
+                    });
+                }
+            }
+        } catch (error) {
+            console.error('[MCP] list_devices: adb failed (Android SDK may not be installed):', error);
+            // Non-fatal
+        }
+    }
+
+    console.error(`[MCP] list_devices: found ${devices.length} device(s)`);
+    return { devices, total: devices.length };
 }

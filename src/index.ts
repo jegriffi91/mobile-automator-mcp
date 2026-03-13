@@ -28,6 +28,8 @@ import {
     RegisterSegmentOutputSchema,
     RunTestInputSchema,
     RunTestOutputSchema,
+    ListDevicesInputSchema,
+    ListDevicesOutputSchema,
     TOOL_NAMES,
 } from './schemas.js';
 
@@ -40,6 +42,7 @@ import {
     handleVerifySDUIPayload,
     handleRegisterSegment,
     handleRunTest,
+    handleListDevices,
     setMcpServer,
 } from './handlers.js';
 
@@ -115,7 +118,7 @@ server.registerTool(
     {
         title: 'Get UI Hierarchy',
         description:
-            'Capture a snapshot of the current UI element tree from the connected simulator. Returns a normalized accessibility tree prioritizing id/testID, then accessibilityLabel, then visible text.',
+            'Capture the current UI element tree from a booted simulator. Works standalone (auto-targets the sole booted device) or within a recording session via sessionId. Returns a normalized accessibility tree. Use interactiveOnly to filter to tappable elements. Raw output is opt-in via includeRawOutput.',
         inputSchema: GetUIHierarchyInputSchema,
         outputSchema: GetUIHierarchyOutputSchema,
         annotations: {
@@ -258,6 +261,32 @@ server.registerTool(
     },
     async (args) => {
         const result = await handleRunTest(args);
+        return {
+            content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
+            structuredContent: result,
+        };
+    }
+);
+
+// ── 9. list_devices ──
+server.registerTool(
+    TOOL_NAMES.LIST_DEVICES,
+    {
+        title: 'List Devices',
+        description:
+            'List available iOS simulators and Android emulators. Filter by platform, state (Booted/Shutdown), or OS version. Use this to discover device UDIDs before calling get_ui_hierarchy.',
+        inputSchema: ListDevicesInputSchema,
+        outputSchema: ListDevicesOutputSchema,
+        annotations: {
+            title: 'List Devices',
+            readOnlyHint: true,
+            destructiveHint: false,
+            idempotentHint: true,
+            openWorldHint: false,
+        },
+    },
+    async (args) => {
+        const result = await handleListDevices(args);
         return {
             content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
             structuredContent: result,

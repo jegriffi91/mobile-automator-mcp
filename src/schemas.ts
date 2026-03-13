@@ -155,7 +155,50 @@ export const GetUIHierarchyInputSchema = z.object({
     sessionId: z
         .string()
         .optional()
-        .describe('Active session ID (optional; will capture current screen state)'),
+        .describe('Active session ID. If omitted, auto-targets the sole booted simulator.'),
+    interactiveOnly: z
+        .boolean()
+        .optional()
+        .describe(
+            'If true, return only elements with id, label, or text — stripping non-interactive nodes.'
+        ),
+    compact: z
+        .boolean()
+        .optional()
+        .describe(
+            'If true, collapse single-child chains and strip anonymous containers to reduce tree depth.'
+        ),
+    includeRawOutput: z
+        .boolean()
+        .optional()
+        .describe(
+            'If true, include the raw CLI/daemon output string in the response (default: omitted to save context).'
+        ),
+    artifactPath: z
+        .string()
+        .optional()
+        .describe(
+            'If set, write the full hierarchy JSON to this file path and return only a summary with node count.'
+        ),
+});
+
+export const ListDevicesInputSchema = z.object({
+    platform: z
+        .enum(['ios', 'android'])
+        .optional()
+        .describe(
+            'Filter by platform. If omitted, returns both iOS simulators and Android emulators.'
+        ),
+    state: z
+        .enum(['Booted', 'Shutdown'])
+        .optional()
+        .describe('Filter by device state. If omitted, returns all states.'),
+    osVersionContains: z
+        .string()
+        .optional()
+        .describe(
+            'Filter iOS runtimes containing this string (e.g., "18" for iOS 18.x).'
+        ),
 });
 
 export const ExecuteUIActionInputSchema = z.object({
@@ -295,7 +338,31 @@ export const RunTestOutputSchema = z.object({
 
 export const GetUIHierarchyOutputSchema = z.object({
     hierarchy: UIHierarchyNodeSchema.describe('Normalized UI element tree'),
-    rawXml: z.string().optional().describe('Raw XML dump from the simulator'),
+    rawOutput: z
+        .string()
+        .optional()
+        .describe(
+            'Raw output from the automation backend (CSV from daemon, JSON from CLI). Only included when includeRawOutput is true.'
+        ),
+    nodeCount: z.number().optional().describe('Total number of nodes in the hierarchy tree.'),
+    artifactPath: z
+        .string()
+        .optional()
+        .describe('Path where the full hierarchy was written, if artifactPath was specified.'),
+});
+
+const DeviceInfoSchema = z.object({
+    platform: z.enum(['ios', 'android']),
+    udid: z.string(),
+    name: z.string(),
+    state: z.string(),
+    osVersion: z.string().optional().describe('iOS runtime version (e.g., "iOS 18.1")'),
+    isAvailable: z.boolean().optional(),
+});
+
+export const ListDevicesOutputSchema = z.object({
+    devices: z.array(DeviceInfoSchema).describe('List of discovered simulators/emulators'),
+    total: z.number().describe('Number of devices returned'),
 });
 
 export const ExecuteUIActionOutputSchema = z.object({
@@ -345,6 +412,9 @@ export type RegisterSegmentOutput = z.infer<typeof RegisterSegmentOutputSchema>;
 export type RunTestInput = z.infer<typeof RunTestInputSchema>;
 export type RunTestOutput = z.infer<typeof RunTestOutputSchema>;
 
+export type ListDevicesInput = z.infer<typeof ListDevicesInputSchema>;
+export type ListDevicesOutput = z.infer<typeof ListDevicesOutputSchema>;
+
 // ──────────────────────────────────────────────
 // Tool name constants
 // ──────────────────────────────────────────────
@@ -358,4 +428,5 @@ export const TOOL_NAMES = {
     VERIFY_SDUI_PAYLOAD: 'verify_sdui_payload',
     REGISTER_SEGMENT: 'register_segment',
     RUN_TEST: 'run_test',
+    LIST_DEVICES: 'list_devices',
 } as const;
