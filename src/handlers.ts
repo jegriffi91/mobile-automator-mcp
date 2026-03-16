@@ -25,6 +25,7 @@ import { extractTrackEvents } from './session/track-event-extractor.js';
 import type { MockingConfig } from './synthesis/index.js';
 import type { NetworkEvent, StateChange } from './types.js';
 import type { PollingNotifier } from './session/touch-inferrer.js';
+import type { ProfilingDriver, ProfilingMetrics } from './profiling/profiler.js';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type {
     StartRecordingInput,
@@ -684,6 +685,8 @@ export async function handleRunTest(
 
     let stubServer: StubServer | undefined;
     let stubServerPort: number | undefined;
+    let profiler: ProfilingDriver | undefined;
+    let profilingMetrics: ProfilingMetrics | undefined;
 
     try {
         // Step 1: Start stub server if stubs are provided
@@ -694,20 +697,90 @@ export async function handleRunTest(
             console.error(`[MCP] run_test: stub server started on port ${stubServerPort}`);
         }
 
-        // Step 2: Run Maestro test
+        // Step 2: Start profiling if requested (non-fatal on failure)
+        if (input.profiling && validation.deviceId) {
+            try {
+                const { createProfiler } = await import('./profiling/index.js');
+                profiler = createProfiler(platform, input.profiling.template);
+                // Resolve app bundle ID: prefer env var, then parse from YAML front-matter
+                let appId = input.env?.APP_ID ?? '';
+                if (!appId) {
+                    try {
+                        const yamlContent = await fs.readFile(input.yamlPath, 'utf-8');
+                        const appIdMatch = yamlContent.match(/^appId:\s*(.+)$/m);
+                        if (appIdMatch) {
+                            appId = appIdMatch[1].trim();
+                        }
+                    } catch {
+                        // Best-effort — YAML read failure is non-fatal
+                    }
+                }
+                if (!appId) {
+                    throw new Error(
+                        'Cannot start profiling: app bundle ID is required. ' +
+                        'Set env.APP_ID or include appId in the YAML front-matter.',
+                    );
+                }
+                await profiler.start(validation.deviceId, appId, input.profiling);
+                console.error(`[MCP] run_test: profiling started (template: ${input.profiling.template})`);
+            } catch (err) {
+                console.error('[MCP] run_test: profiling failed to start (non-fatal):', err);
+                profiler = undefined;
+            }
+        }
+
+        // Step 3: Run Maestro test
         const result = await driver.runTest(input.yamlPath, input.env);
+
+        // Step 4: Stop profiling and collect metrics (non-fatal on failure)
+        if (profiler?.isActive) {
+            try {
+                profilingMetrics = await profiler.stop();
+                const cpuStr = profilingMetrics.cpuUsagePercent ?? profilingMetrics.launchTimeMs
+                    ? `CPU: ${profilingMetrics.cpuUsagePercent ?? 'N/A'}%`
+                    : `Launch: ${profilingMetrics.launchTimeMs ?? 'N/A'}ms`;
+                console.error(
+                    `[MCP] run_test: profiling complete — ${cpuStr}, ` +
+                    `Memory: ${profilingMetrics.memoryFootprintMb ?? profilingMetrics.peakMemoryMb ?? 'N/A'} MB, ` +
+                    `Duration: ${profilingMetrics.profilingDurationMs}ms` +
+                    (profilingMetrics.sampleCount !== undefined ? `, Samples: ${profilingMetrics.sampleCount}` : '')
+                );
+            } catch (err) {
+                console.error('[MCP] run_test: profiling failed to stop (non-fatal):', err);
+            }
+        } else if (profiler && !profiler.isActive && input.profiling?.template === 'app-launch') {
+            // App-launch profiler completes during start() — stop() returns cached metrics
+            try {
+                profilingMetrics = await profiler.stop();
+                console.error(
+                    `[MCP] run_test: app-launch profiling complete — ` +
+                    `Launch: ${profilingMetrics.launchTimeMs ?? 'N/A'}ms`
+                );
+            } catch (err) {
+                console.error('[MCP] run_test: app-launch profiling failed to stop (non-fatal):', err);
+            }
+        }
 
         return {
             passed: result.passed,
             output: result.output,
             stubServerPort,
             durationMs: result.durationMs,
+            profiling: profilingMetrics,
         };
     } finally {
-        // Step 3: Tear down stub server
+        // Step 5: Tear down stub server
         if (stubServer) {
             await stubServer.stop();
             console.error('[MCP] run_test: stub server stopped');
+        }
+        // Step 6: Ensure profiler is stopped on error paths
+        if (profiler?.isActive) {
+            try {
+                await profiler.stop();
+            } catch {
+                // Best-effort cleanup
+            }
         }
     }
 }

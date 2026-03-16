@@ -275,6 +275,31 @@ export const RunTestInputSchema = z.object({
         .describe(
             'Environment variables passed to Maestro via -e KEY=VALUE flags (e.g., { "APP_ID": "io.appcision.project-doombot" })'
         ),
+    profiling: z
+        .object({
+            template: z
+                .enum(['time-profiler', 'allocations', 'app-launch', 'memory-snapshot'])
+                .describe('Profiling template to use during the test run'),
+            timeLimitSeconds: z
+                .number()
+                .int()
+                .positive()
+                .optional()
+                .describe('Max profiling duration in seconds. Defaults to test duration.'),
+            outputDir: z
+                .string()
+                .optional()
+                .describe('Directory for raw trace files. Defaults to os.tmpdir().'),
+            cleanupTrace: z
+                .boolean()
+                .optional()
+                .describe('Delete raw trace after extracting metrics (default: true)'),
+        })
+        .optional()
+        .describe(
+            'Optional performance profiling configuration. When provided, an xctrace (iOS) or dumpsys (Android) ' +
+            'profiling session runs in parallel with the test. Results are returned as structured metrics.'
+        ),
 });
 
 // ──────────────────────────────────────────────
@@ -347,11 +372,51 @@ export const RegisterSegmentOutputSchema = z.object({
     message: z.string().describe('Human-readable confirmation message'),
 });
 
+const ProfilingMetricsSchema = z.object({
+    platform: z.enum(['ios', 'android']),
+    cpuUsagePercent: z
+        .number()
+        .optional()
+        .describe('Average CPU usage percentage during profiling (0-100)'),
+    peakMemoryMb: z
+        .number()
+        .optional()
+        .describe('Peak memory usage in MB'),
+    memoryFootprintMb: z
+        .number()
+        .optional()
+        .describe('Total memory footprint in MB'),
+    launchTimeMs: z
+        .number()
+        .optional()
+        .describe('App launch time in ms (app-launch template only)'),
+    peakCpuPercent: z
+        .number()
+        .optional()
+        .describe('Peak CPU usage percentage during profiling (0-100)'),
+    sampleCount: z
+        .number()
+        .int()
+        .optional()
+        .describe('Number of profiling samples collected (lightweight sampling mode)'),
+    profilingDurationMs: z.number().describe('Total profiling duration in ms'),
+    rawTracePath: z
+        .string()
+        .optional()
+        .describe('Path to raw trace file for manual inspection in Instruments/Perfetto UI'),
+    warnings: z
+        .array(z.string())
+        .describe('Informational warnings (e.g., simulator accuracy caveats)'),
+});
+
 export const RunTestOutputSchema = z.object({
     passed: z.boolean().describe('Whether the Maestro test passed'),
     output: z.string().describe('Maestro CLI stdout/stderr output'),
     stubServerPort: z.number().optional().describe('Port the stub server ran on (if stubs were used)'),
     durationMs: z.number().describe('Total test execution time in milliseconds'),
+    profiling: ProfilingMetricsSchema.optional().describe(
+        'Performance metrics from the profiling session (only present when profiling was requested)'
+    ),
 });
 
 export const GetUIHierarchyOutputSchema = z.object({

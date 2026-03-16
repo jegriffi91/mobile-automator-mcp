@@ -22,14 +22,15 @@ Reference document for AI agents and human contributors. Follow the link from th
 └──┬──────────┬──────────────┬───────────────┬──────────┬─────────────┘
    │          │              │               │          │
    ▼          ▼              ▼               ▼          ▼
-┌─────────┐ ┌────────────┐ ┌────────────┐ ┌──────────┐ ┌────────────┐
-│session/ │ │ maestro/   │ │ proxyman/  │ │synthesis/│ │segments/   │
-│         │ │            │ │            │ │          │ │wiremock/   │
-│database │ │ wrapper    │ │ wrapper    │ │correlator│ │            │
-│manager  │ │ daemon     │ │ validator  │ │generator │ │fingerprint │
-│touch-   │ │ hierarchy  │ │            │ │stub-     │ │registry    │
-│inferrer │ │ hier-differ│ │            │ │writer    │ │stub-server │
-└─────────┘ └────────────┘ └────────────┘ └──────────┘ └────────────┘
+┌─────────┐ ┌────────────┐ ┌────────────┐ ┌──────────┐ ┌────────────┐ ┌────────────┐
+│session/ │ │ maestro/   │ │ proxyman/  │ │synthesis/│ │segments/   │ │profiling/  │
+│         │ │            │ │            │ │          │ │wiremock/   │ │            │
+│database │ │ wrapper    │ │ wrapper    │ │correlator│ │            │ │ios-profiler│
+│manager  │ │ daemon     │ │ validator  │ │generator │ │fingerprint │ │android-    │
+│touch-   │ │ hierarchy  │ │            │ │stub-     │ │registry    │ │ profiler   │
+│inferrer │ │ hier-differ│ │            │ │writer    │ │stub-server │ │metric-     │
+│         │ │            │ │            │ │          │ │            │ │ parser     │
+└─────────┘ └────────────┘ └────────────┘ └──────────┘ └────────────┘ └────────────┘
 ```
 
 ---
@@ -72,12 +73,13 @@ Registers all 8 tools with the MCP SDK. Should only change when adding/removing 
 ## Cross-Module Dependency Rules
 
 ```
-handlers.ts ──imports──▶ session/, maestro/, proxyman/, synthesis/, segments/, wiremock/
+handlers.ts ──imports──▶ session/, maestro/, proxyman/, synthesis/, segments/, wiremock/, profiling/
 synthesis/  ──imports──▶ types.ts (for UIInteraction, NetworkEvent)
 session/    ──imports──▶ types.ts (for Session, UIInteraction, NetworkEvent)
 maestro/    ──imports──▶ types.ts (for UIHierarchyNode, UIElement)
 proxyman/   ──imports──▶ types.ts (for NetworkEvent)
 segments/   ──imports──▶ types.ts (for CorrelatedStep)
+profiling/  ──imports──▶ types.ts (for MobilePlatform)
 wiremock/   ──imports──▶ (standalone — no cross-module deps)
 ```
 
