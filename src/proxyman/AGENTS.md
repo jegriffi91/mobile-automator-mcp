@@ -23,7 +23,7 @@ Network interception via the Proxyman CLI and SDUI payload validation. Wraps `pr
 
 - CLI calls in `wrapper.ts` must use `execFile` (not `exec`) to avoid shell injection.
 - All CLI calls must be wrapped in `try/catch` — capture `stderr` and rethrow with context.
-- The `proxyman-cli` binary path is `/Applications/Proxyman.app/Contents/MacOS/proxyman-cli`. Do not hardcode alternative paths without checking.
+- The `proxyman-cli` binary is resolved via a multi-step cascade: `PROXYMAN_CLI_PATH` env var → canonical app bundle path → `which proxyman-cli` → `which proxyman`. The resolved path is cached for the process lifetime. See `resolveCliPath()` in `wrapper.ts`.
 - `validator.ts` is pure logic — no I/O. It receives parsed JSON objects and returns match results.
 - See [Proxyman Setup](../../docs/proxyman-setup.md) for simulator and localhost configuration.
 

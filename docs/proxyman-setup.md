@@ -138,3 +138,25 @@ url: "http://localhost.proxyman.io:3030/api/your-endpoint"
 | `export-log` "nothing to export" | Use `-m all` instead of `-m domains` |
 | Server not reachable via alias | Ensure server binds to `0.0.0.0`, not `127.0.0.1` |
 | App still uses mock data | Check for explicit `.environment()` overrides in the app entry point |
+| CLI not found errors | Set `PROXYMAN_CLI_PATH` env var to the binary location (see below) |
+
+### CLI Path Resolution
+
+The MCP tool resolves the `proxyman-cli` binary using a multi-step cascade:
+
+1. `PROXYMAN_CLI_PATH` environment variable (explicit override)
+2. `/Applications/Proxyman.app/Contents/MacOS/proxyman-cli` (canonical path)
+3. `which proxyman-cli` (PATH lookup)
+4. `which proxyman` (common symlink)
+
+Set the env var if the binary is in a non-standard location:
+
+```bash
+export PROXYMAN_CLI_PATH=/usr/local/bin/proxyman
+```
+
+### App-Scoped Traffic Filtering
+
+> [!NOTE]
+> Proxyman CLI (`export-log`) does **not** support filtering by app/process — only by domain. When recording a session, use `filterDomains` on `start_recording_session` to isolate your app's API traffic and exclude background noise from unrelated services (Outlook, Teams, Safe Browsing, etc.).
+

@@ -148,206 +148,224 @@ export async function handleStopAndCompile(
         throw new Error(`Session not found: ${input.sessionId}`);
     }
 
-    // ── Step 1: Export scoped Proxyman HAR ──
+    // All compilation artifacts — populated inside the try block
     let proxymanEvents: NetworkEvent[] = [];
-    try {
-        const baseline = session.proxymanBaseline ?? 0;
-        const har = await proxymanWrapper.exportHarScopedParsed(baseline, session.filterDomains, session.startedAt);
-        proxymanEvents = (har.log?.entries || []).map((entry: any) => ({
-            sessionId: input.sessionId,
-            timestamp: entry.startedDateTime,
-            method: entry.request.method,
-            url: entry.request.url,
-            statusCode: entry.response.status,
-            requestBody: entry.request.postData?.text,
-            responseBody: entry.response.content?.text,
-            durationMs: entry.time ? Math.round(entry.time) : undefined,
-        }));
-        console.error(`[MCP] stop_and_compile_test: ${proxymanEvents.length} scoped network events from Proxyman`);
-    } catch (error) {
-        console.error('[MCP] stop_and_compile_test: Proxyman scoped export failed, using session DB events only', error);
-    }
-
-    // ── Step 2: Fetch UI interactions from session DB ──
-    const interactions = await sessionManager.getInteractions(input.sessionId);
-
-    // Merge Proxyman events with any already-logged session DB events
-    const dbEvents = await sessionManager.getNetworkEvents(input.sessionId);
-    const seen = new Set<string>();
+    let allInteractions: typeof interactions = [];
+    let interactions: Awaited<ReturnType<typeof sessionManager.getInteractions>> = [];
     const allNetworkEvents: NetworkEvent[] = [];
-    for (const event of [...dbEvents, ...proxymanEvents]) {
-        const key = `${event.url}|${event.timestamp}`;
-        if (!seen.has(key)) {
-            seen.add(key);
-            allNetworkEvents.push(event);
-        }
-    }
-
-    // ── Step 2b: Extract tracked interactions from network events ──
-    const trackPaths = session.trackEventPaths;
-    console.error(
-        `[MCP] stop_and_compile_test: track extraction — ` +
-        `totalEvents: ${allNetworkEvents.length}, ` +
-        `trackEventPaths: ${JSON.stringify(trackPaths)}, ` +
-        `POST events: ${allNetworkEvents.filter(e => e.method === 'POST').length}`
-    );
-    // Log events that match the track path pattern
-    const matchingEvents = allNetworkEvents.filter(e =>
-        e.method === 'POST' && (trackPaths ?? ['/__track']).some(p => e.url.includes(p))
-    );
-    console.error(
-        `[MCP] stop_and_compile_test: matching track events: ${matchingEvents.length}`
-    );
-    for (const me of matchingEvents) {
-        console.error(
-            `[MCP]   → ${me.url} | requestBody present: ${!!me.requestBody} | body: ${me.requestBody?.substring(0, 200)}`
-        );
-    }
-    const trackedInteractions = extractTrackEvents(
-        allNetworkEvents,
-        input.sessionId,
-        { paths: session.trackEventPaths },
-    );
-    if (trackedInteractions.length > 0) {
-        console.error(
-            `[MCP] stop_and_compile_test: extracted ${trackedInteractions.length} tracked interaction(s) from network events`
-        );
-    }
-
-    // Merge all interaction sources: dispatched (AI-led) + inferred (touch) + tracked (app-side)
-    const allInteractions = [...interactions, ...trackedInteractions].sort(
-        (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime(),
-    );
-
-    console.error(
-        `[MCP] stop_and_compile_test: correlating ${allInteractions.length} interactions (${interactions.length} dispatched/inferred + ${trackedInteractions.length} tracked) with ${allNetworkEvents.length} network events`
-    );
-
-    // ── Step 3: Correlate UI actions with network events ──
-    const correlator = new Correlator();
-    const steps = correlator.correlate(allInteractions, allNetworkEvents);
-
-    // ── Step 4: Generate YAML ──
-    const generator = new YamlGenerator(session.appBundleId);
-    const yaml = generator.toYaml(steps, input.conditions);
-
-    // Write YAML
-    const outputPath = input.outputPath ?? path.join(os.tmpdir(), `maestro-test-${input.sessionId}.yaml`);
-    await fs.writeFile(outputPath, yaml, 'utf-8');
-
-    // ── Step 5: Generate WireMock stubs (if network events exist) ──
+    let steps: ReturnType<Correlator['correlate']> = [];
+    let yaml = '';
+    let outputPath = '';
     let fixturesDir: string | undefined;
     let stubsDir: string | undefined;
     let manifestPath: string | undefined;
-
-    if (allNetworkEvents.length > 0) {
-        const outputDir = path.dirname(outputPath);
-        const sessionDir = path.join(outputDir, `session-${input.sessionId}`);
-
-        const mockingConfig: MockingConfig = input.mockingConfig ?? { mode: 'full' };
-        const stubWriter = new StubWriter();
-        const manifest = await stubWriter.writeStubs(
-            input.sessionId,
-            steps,
-            sessionDir,
-            mockingConfig
-        );
-
-        fixturesDir = path.join(sessionDir, 'wiremock', '__files');
-        stubsDir = path.join(sessionDir, 'wiremock');
-        manifestPath = path.join(sessionDir, 'manifest.json');
-
-        console.error(
-            `[MCP] stop_and_compile_test: wrote ${manifest.routes.length} WireMock stubs to ${stubsDir}`
-        );
-    }
-
-    // ── Step 6: Compute segment fingerprint and check registry ──
     let segmentFingerprint: string | undefined;
     let matchedSegments: Array<{ name: string; fingerprint: string; similarity: number; yamlPath: string }> | undefined;
+    let pollingDiagnostics: ReturnType<typeof sessionManager.getPollingStatus> | undefined;
 
-    if (steps.length > 0) {
-        segmentFingerprint = SegmentFingerprint.compute(steps);
-        console.error(`[MCP] stop_and_compile_test: fingerprint = ${segmentFingerprint}`);
-
+    try {
+        // ── Step 1: Export scoped Proxyman HAR ──
         try {
-            const registryPath = path.join(process.cwd(), 'segments', 'registry.json');
-            const entries = await SegmentRegistry.load(registryPath);
-            const matches = SegmentRegistry.findMatches(entries, segmentFingerprint);
-            if (matches.length > 0) {
-                matchedSegments = matches.map((m) => ({
-                    name: m.entry.name,
-                    fingerprint: m.entry.fingerprint,
-                    similarity: m.similarity,
-                    yamlPath: m.entry.yamlPath,
-                }));
-                console.error(
-                    `[MCP] stop_and_compile_test: matched ${matches.length} existing segment(s): ${matches.map((m) => m.entry.name).join(', ')}`
-                );
-            }
-        } catch {
-            // Registry not found or invalid — not an error
+            const baseline = session.proxymanBaseline ?? 0;
+            const har = await proxymanWrapper.exportHarScopedParsed(baseline, session.filterDomains, session.startedAt);
+            proxymanEvents = (har.log?.entries || []).map((entry: any) => ({
+                sessionId: input.sessionId,
+                timestamp: entry.startedDateTime,
+                method: entry.request.method,
+                url: entry.request.url,
+                statusCode: entry.response.status,
+                requestBody: entry.request.postData?.text,
+                responseBody: entry.response.content?.text,
+                durationMs: entry.time ? Math.round(entry.time) : undefined,
+            }));
+            console.error(`[MCP] stop_and_compile_test: ${proxymanEvents.length} scoped network events from Proxyman`);
+        } catch (error) {
+            console.error('[MCP] stop_and_compile_test: Proxyman scoped export failed, using session DB events only', error);
         }
-    }
 
-    console.error(`[MCP] stop_and_compile_test: wrote ${steps.length} steps to ${outputPath}`);
+        // ── Step 2: Fetch UI interactions from session DB ──
+        interactions = await sessionManager.getInteractions(input.sessionId);
 
-    // ── Step 7: Capture polling diagnostics BEFORE stopping the poller ──
-    const pollingStatus = sessionManager.getPollingStatus(input.sessionId);
-    const pollingDiagnostics = pollingStatus ?? undefined;
+        // Merge Proxyman events with any already-logged session DB events
+        const dbEvents = await sessionManager.getNetworkEvents(input.sessionId);
+        const seen = new Set<string>();
+        for (const event of [...dbEvents, ...proxymanEvents]) {
+            const key = `${event.url}|${event.timestamp}`;
+            if (!seen.has(key)) {
+                seen.add(key);
+                allNetworkEvents.push(event);
+            }
+        }
 
-    if (pollingDiagnostics) {
+        // ── Step 2b: Extract tracked interactions from network events ──
+        const trackPaths = session.trackEventPaths;
         console.error(
-            `[MCP] stop_and_compile_test: polling diagnostics — polls: ${pollingDiagnostics.pollCount}, success: ${pollingDiagnostics.successCount}, errors: ${pollingDiagnostics.errorCount}, inferred: ${pollingDiagnostics.inferredCount}` +
-            (pollingDiagnostics.lastError ? `, lastError: ${pollingDiagnostics.lastError}` : '')
+            `[MCP] stop_and_compile_test: track extraction — ` +
+            `totalEvents: ${allNetworkEvents.length}, ` +
+            `trackEventPaths: ${JSON.stringify(trackPaths)}, ` +
+            `POST events: ${allNetworkEvents.filter(e => e.method === 'POST').length}`
         );
-    }
-
-    if (allInteractions.length === 0 && pollingDiagnostics) {
-        if (pollingDiagnostics.errorCount > 0) {
+        // Log events that match the track path pattern
+        const matchingEvents = allNetworkEvents.filter(e =>
+            e.method === 'POST' && (trackPaths ?? ['/__track']).some(p => e.url.includes(p))
+        );
+        console.error(
+            `[MCP] stop_and_compile_test: matching track events: ${matchingEvents.length}`
+        );
+        for (const me of matchingEvents) {
             console.error(
-                `[MCP] ⚠️  No interactions captured. Polling had ${pollingDiagnostics.errorCount} error(s). Last error: ${pollingDiagnostics.lastError}`
+                `[MCP]   → ${me.url} | requestBody present: ${!!me.requestBody} | body: ${me.requestBody?.substring(0, 200)}`
             );
-        } else if (pollingDiagnostics.pollCount === 0) {
-            console.error('[MCP] ⚠️  No interactions captured. Poller never ran — daemon may have failed to start.');
-        } else {
-            // Detailed breakdown of why no interactions were inferred
-            const diag = [
-                `polls: ${pollingDiagnostics.pollCount}`,
-                `equalTrees: ${pollingDiagnostics.equalTreeCount ?? 0}`,
-                `thresholdExceeded: ${pollingDiagnostics.thresholdExceededCount ?? 0}`,
-                `diffButNull: ${pollingDiagnostics.diffButNullInferenceCount ?? 0}`,
-                `baselineElements: ${pollingDiagnostics.baselineElementCount ?? 0}`,
-            ].join(', ');
-            console.error(`[MCP] ⚠️  No interactions captured. Diagnostic breakdown: ${diag}`);
+        }
+        const trackedInteractions = extractTrackEvents(
+            allNetworkEvents,
+            input.sessionId,
+            { paths: session.trackEventPaths },
+        );
+        if (trackedInteractions.length > 0) {
+            console.error(
+                `[MCP] stop_and_compile_test: extracted ${trackedInteractions.length} tracked interaction(s) from network events`
+            );
+        }
 
-            if ((pollingDiagnostics.equalTreeCount ?? 0) > pollingDiagnostics.pollCount * 0.9) {
-                console.error('[MCP] 💡 Hint: >90% of polls returned identical trees. The daemon may be returning stale/cached hierarchy data.');
-            }
-            if ((pollingDiagnostics.thresholdExceededCount ?? 0) > 0) {
-                console.error(`[MCP] 💡 Hint: ${pollingDiagnostics.thresholdExceededCount} diff(s) exceeded the maxChangesThreshold. Consider raising the threshold for apps with many UI elements.`);
-            }
-            if ((pollingDiagnostics.diffButNullInferenceCount ?? 0) > 0) {
-                console.error(`[MCP] 💡 Hint: ${pollingDiagnostics.diffButNullInferenceCount} diff(s) had changes but no identifiable elements. The app may lack accessibility IDs.`);
+        // Merge all interaction sources: dispatched (AI-led) + inferred (touch) + tracked (app-side)
+        allInteractions = [...interactions, ...trackedInteractions].sort(
+            (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime(),
+        );
+
+        console.error(
+            `[MCP] stop_and_compile_test: correlating ${allInteractions.length} interactions (${interactions.length} dispatched/inferred + ${trackedInteractions.length} tracked) with ${allNetworkEvents.length} network events`
+        );
+
+        // ── Step 3: Correlate UI actions with network events ──
+        const correlator = new Correlator();
+        steps = correlator.correlate(allInteractions, allNetworkEvents);
+
+        // ── Step 4: Generate YAML ──
+        const generator = new YamlGenerator(session.appBundleId);
+        yaml = generator.toYaml(steps, input.conditions);
+
+        // Write YAML
+        outputPath = input.outputPath ?? path.join(os.tmpdir(), `maestro-test-${input.sessionId}.yaml`);
+        await fs.writeFile(outputPath, yaml, 'utf-8');
+
+        // ── Step 5: Generate WireMock stubs (if network events exist) ──
+        if (allNetworkEvents.length > 0) {
+            const outputDir = path.dirname(outputPath);
+            const sessionDir = path.join(outputDir, `session-${input.sessionId}`);
+
+            const mockingConfig: MockingConfig = input.mockingConfig ?? { mode: 'full' };
+            const stubWriter = new StubWriter();
+            const manifest = await stubWriter.writeStubs(
+                input.sessionId,
+                steps,
+                sessionDir,
+                mockingConfig
+            );
+
+            fixturesDir = path.join(sessionDir, 'wiremock', '__files');
+            stubsDir = path.join(sessionDir, 'wiremock');
+            manifestPath = path.join(sessionDir, 'manifest.json');
+
+            console.error(
+                `[MCP] stop_and_compile_test: wrote ${manifest.routes.length} WireMock stubs to ${stubsDir}`
+            );
+        }
+
+        // ── Step 6: Compute segment fingerprint and check registry ──
+        if (steps.length > 0) {
+            segmentFingerprint = SegmentFingerprint.compute(steps);
+            console.error(`[MCP] stop_and_compile_test: fingerprint = ${segmentFingerprint}`);
+
+            try {
+                const registryPath = path.join(process.cwd(), 'segments', 'registry.json');
+                const entries = await SegmentRegistry.load(registryPath);
+                const matches = SegmentRegistry.findMatches(entries, segmentFingerprint);
+                if (matches.length > 0) {
+                    matchedSegments = matches.map((m) => ({
+                        name: m.entry.name,
+                        fingerprint: m.entry.fingerprint,
+                        similarity: m.similarity,
+                        yamlPath: m.entry.yamlPath,
+                    }));
+                    console.error(
+                        `[MCP] stop_and_compile_test: matched ${matches.length} existing segment(s): ${matches.map((m) => m.entry.name).join(', ')}`
+                    );
+                }
+            } catch {
+                // Registry not found or invalid — not an error
             }
         }
+
+        console.error(`[MCP] stop_and_compile_test: wrote ${steps.length} steps to ${outputPath}`);
+
+        // ── Step 7: Capture polling diagnostics BEFORE stopping the poller ──
+        const pollingStatus = sessionManager.getPollingStatus(input.sessionId);
+        pollingDiagnostics = pollingStatus ?? undefined;
+
+        if (pollingDiagnostics) {
+            console.error(
+                `[MCP] stop_and_compile_test: polling diagnostics — polls: ${pollingDiagnostics.pollCount}, success: ${pollingDiagnostics.successCount}, errors: ${pollingDiagnostics.errorCount}, inferred: ${pollingDiagnostics.inferredCount}` +
+                (pollingDiagnostics.lastError ? `, lastError: ${pollingDiagnostics.lastError}` : '')
+            );
+        }
+
+        if (allInteractions.length === 0 && pollingDiagnostics) {
+            if (pollingDiagnostics.errorCount > 0) {
+                console.error(
+                    `[MCP] ⚠️  No interactions captured. Polling had ${pollingDiagnostics.errorCount} error(s). Last error: ${pollingDiagnostics.lastError}`
+                );
+            } else if (pollingDiagnostics.pollCount === 0) {
+                console.error('[MCP] ⚠️  No interactions captured. Poller never ran — daemon may have failed to start.');
+            } else {
+                // Detailed breakdown of why no interactions were inferred
+                const diag = [
+                    `polls: ${pollingDiagnostics.pollCount}`,
+                    `equalTrees: ${pollingDiagnostics.equalTreeCount ?? 0}`,
+                    `thresholdExceeded: ${pollingDiagnostics.thresholdExceededCount ?? 0}`,
+                    `diffButNull: ${pollingDiagnostics.diffButNullInferenceCount ?? 0}`,
+                    `baselineElements: ${pollingDiagnostics.baselineElementCount ?? 0}`,
+                ].join(', ');
+                console.error(`[MCP] ⚠️  No interactions captured. Diagnostic breakdown: ${diag}`);
+
+                if ((pollingDiagnostics.equalTreeCount ?? 0) > pollingDiagnostics.pollCount * 0.9) {
+                    console.error('[MCP] 💡 Hint: >90% of polls returned identical trees. The daemon may be returning stale/cached hierarchy data.');
+                }
+                if ((pollingDiagnostics.thresholdExceededCount ?? 0) > 0) {
+                    console.error(`[MCP] 💡 Hint: ${pollingDiagnostics.thresholdExceededCount} diff(s) exceeded the maxChangesThreshold. Consider raising the threshold for apps with many UI elements.`);
+                }
+                if ((pollingDiagnostics.diffButNullInferenceCount ?? 0) > 0) {
+                    console.error(`[MCP] 💡 Hint: ${pollingDiagnostics.diffButNullInferenceCount} diff(s) had changes but no identifiable elements. The app may lack accessibility IDs.`);
+                }
+            }
+        }
+    } finally {
+        // ── Guaranteed cleanup — runs even if compilation fails ──
+        // Finalize session state
+        try {
+            await sessionManager.transition(input.sessionId, 'done');
+        } catch (err) {
+            console.error(`[MCP] stop_and_compile_test: failed to transition session to done (may already be done)`, err);
+        }
+
+        // Stop passive hierarchy polling
+        await sessionManager.stopPolling(input.sessionId);
+
+        // Stop and clean up the automation driver
+        const driver = activeDrivers.get(input.sessionId);
+        if (driver) {
+            try {
+                await driver.uninstallDriver(session.platform, undefined);
+                await driver.stop();
+            } catch (err) {
+                console.error('[MCP] stop_and_compile_test: driver cleanup failed (non-fatal)', err);
+            }
+            activeDrivers.delete(input.sessionId);
+        }
+
+        // Purge hierarchy snapshots to free memory
+        await sessionManager.purgeSnapshots(input.sessionId);
     }
-
-    // Finalize session
-    await sessionManager.transition(input.sessionId, 'done');
-    await sessionManager.stopPolling(input.sessionId);
-
-    // Stop the driver (shuts down daemon if active)
-    const driver = activeDrivers.get(input.sessionId);
-    if (driver) {
-        // Clean up Maestro driver so it doesn't go stale between sessions
-        await driver.uninstallDriver(session.platform, undefined);
-        await driver.stop();
-        activeDrivers.delete(input.sessionId);
-    }
-
-    // Purge hierarchy snapshots to free memory
-    await sessionManager.purgeSnapshots(input.sessionId);
 
     return {
         sessionId: input.sessionId,
