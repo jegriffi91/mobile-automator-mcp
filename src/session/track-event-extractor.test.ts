@@ -294,10 +294,52 @@ describe('DEFAULT_EVENT_MAPPING', () => {
     expect(DEFAULT_EVENT_MAPPING.ctaClicked).toBe('tap');
     expect(DEFAULT_EVENT_MAPPING.tap).toBe('tap');
     expect(DEFAULT_EVENT_MAPPING.pageDisplayed).toBe('assertVisible');
+    expect(DEFAULT_EVENT_MAPPING.screenChange).toBe('assertVisible');
     expect(DEFAULT_EVENT_MAPPING.textInput).toBe('type');
     expect(DEFAULT_EVENT_MAPPING.scroll).toBe('scroll');
     expect(DEFAULT_EVENT_MAPPING.swipe).toBe('swipe');
     expect(DEFAULT_EVENT_MAPPING.back).toBe('back');
+  });
+});
+
+describe('screenChange event extraction', () => {
+  const sessionId = 'screen-change-test';
+
+  it('should extract a screenChange event as assertVisible', () => {
+    const events: NetworkEvent[] = [
+      makeNetworkEvent({
+        requestBody: makeTrackBody({
+          event: 'screenChange',
+          elementId: undefined,
+          elementLabel: undefined,
+          elementText: undefined,
+          screen: 'DashboardScreen',
+        }),
+      }),
+    ];
+
+    const result = extractTrackEvents(events, sessionId);
+    expect(result).toHaveLength(1);
+    expect(result[0].actionType).toBe('assertVisible');
+    expect(result[0].element.text).toBe('DashboardScreen');
+    expect(result[0].source).toBe('tracked');
+  });
+
+  it('should extract screenChange with element ID when provided', () => {
+    const events: NetworkEvent[] = [
+      makeNetworkEvent({
+        requestBody: makeTrackBody({
+          event: 'screenChange',
+          elementId: 'dashboard_header',
+          screen: 'DashboardScreen',
+        }),
+      }),
+    ];
+
+    const result = extractTrackEvents(events, sessionId);
+    expect(result).toHaveLength(1);
+    expect(result[0].actionType).toBe('assertVisible');
+    expect(result[0].element.id).toBe('dashboard_header');
   });
 });
 

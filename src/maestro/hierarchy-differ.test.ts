@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { HierarchyDiffer } from './hierarchy-differ.js';
+import { HierarchyDiffer, flattenToElements } from './hierarchy-differ.js';
 import type { UIHierarchyNode } from '../types.js';
 
 describe('HierarchyDiffer', () => {
@@ -204,6 +204,48 @@ describe('HierarchyDiffer', () => {
 
         it('should return false for invalid JSON', () => {
             expect(HierarchyDiffer.areEqual('not json', '{}')).toBe(false);
+        });
+    });
+
+    describe('isSecure propagation', () => {
+        it('should propagate isSecure through flattenToElements', () => {
+            const tree: UIHierarchyNode = makeNode({
+                role: 'Application',
+                children: [
+                    makeNode({ role: 'SecureTextField', id: 'password_field', isSecure: true }),
+                    makeNode({ role: 'TextField', id: 'username_field' }),
+                ],
+            });
+
+            const elements = flattenToElements(tree);
+            const secureEl = elements.find((el: { id?: string }) => el.id === 'password_field');
+            const normalEl = elements.find((el: { id?: string }) => el.id === 'username_field');
+
+            expect(secureEl).toBeDefined();
+            expect(secureEl!.isSecure).toBe(true);
+            expect(normalEl).toBeDefined();
+            expect(normalEl!.isSecure).toBeUndefined();
+        });
+
+        it('should preserve isSecure in elementsChanged after diff', () => {
+            const before: UIHierarchyNode = makeNode({
+                role: 'Application',
+                children: [
+                    makeNode({ role: 'SecureTextField', id: 'password_field', isSecure: true }),
+                ],
+            });
+
+            const after: UIHierarchyNode = makeNode({
+                role: 'Application',
+                children: [
+                    makeNode({ role: 'SecureTextField', id: 'password_field', text: '••••', isSecure: true }),
+                ],
+            });
+
+            const result = HierarchyDiffer.diff(before, after);
+            expect(result.elementsChanged).toHaveLength(1);
+            expect(result.elementsChanged[0].after.isSecure).toBe(true);
+            expect(result.elementsChanged[0].before.isSecure).toBe(true);
         });
     });
 });

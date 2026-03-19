@@ -179,3 +179,52 @@ Then in YAML:
 ```
 
 **Also:** SwiftUI `TextField` with `.autocapitalization(.none)` still capitalizes the first character on some iOS versions. Use `.disableAutocorrection(true)` as a belt-and-suspenders approach.
+
+---
+
+## 13. Accessibility Audit for Automation Compatibility
+
+**When to use:** After capturing a UI hierarchy with `get_ui_hierarchy`, assess how automation-friendly the screen's accessibility identifiers are.
+
+### Compatibility Scoring
+
+For each screen, classify every identifiable element:
+
+| Tier | Selector Source | Score | Example |
+|------|----------------|-------|---------|
+| **A** | `id` (accessibilityIdentifier) | ✅ Best | `signin.password`, `submit_btn` |
+| **B** | `accessibilityLabel` only | ⚠️ OK | `label: "Sign In"` |
+| **C** | `text` only | ❌ Fragile | `text: "Submit"` |
+| **D** | No identifier | 🚫 Invisible | Container views, decorative images |
+
+**Compute:** `Score = (A_count × 3 + B_count × 2 + C_count) / (total × 3) × 100`
+
+### Red Flags to Surface
+
+When analyzing a hierarchy, flag these patterns to the developer:
+
+- **Suffix-only identifiers** (`logo_svg`, `showTextIcon`, `icon_chevron`): These are typically decorative and will produce spurious inferred taps during recording. Recommend renaming or removing the accessibility identifier.
+- **Numeric-only text** (`"42"`, `"100"`): Dynamic values that produce flaky selectors. Recommend adding a stable `accessibilityIdentifier` to the parent.
+- **Interactive elements without IDs**: Buttons, links, switches, text fields: these MUST have `accessibilityIdentifier`. Without it, recording inference cannot reliably target them.
+- **Transient elements** (spinners, shimmers, skeletons): If these have IDs, the poller may infer false interactions on them. Recommend removing their accessibility identifiers or using `accessibilityElementsHidden`.
+
+### Actionable Output Format
+
+When surfacing an audit, recommend specific code changes:
+
+```
+Accessibility Audit — Login Screen (Score: 62/100)
+
+🔴 Missing IDs (interactive):
+  - Button "Sign In" → add .accessibilityIdentifier("sign_in.button")
+  - TextField (password) → add .accessibilityIdentifier("signin.password")
+
+🟡 Decorative IDs (will cause false inferences):
+  - Image "logo_svg" → remove .accessibilityIdentifier or use .accessibilityElementsHidden(true)
+  - Image "showTextIcon" → rename to "password_visibility_toggle"
+
+🟢 Well-identified:
+  - TextField "signin.username" ✓
+  - Button "forgot_password" ✓
+```
+

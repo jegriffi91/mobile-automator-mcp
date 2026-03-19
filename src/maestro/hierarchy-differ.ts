@@ -22,6 +22,7 @@ export function flattenToElements(node: UIHierarchyNode): UIElement[] {
             accessibilityLabel: node.accessibilityLabel,
             text: node.text,
             role: node.role,
+            ...(node.isSecure ? { isSecure: node.isSecure } : {}),
         });
     }
 

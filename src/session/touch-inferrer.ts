@@ -238,6 +238,10 @@ export class TouchInferrer {
   private polling = false;
   private suppressed = false;
 
+  // ── Consecutive type deduplication ──
+  private lastInferredAction?: string;
+  private lastInferredTarget?: string;
+
   // ── Polling health counters ──
   private pollCount = 0;
   private successCount = 0;
@@ -250,6 +254,7 @@ export class TouchInferrer {
   private equalTreeCount = 0;
   private thresholdExceededCount = 0;
   private diffButNullInferenceCount = 0;
+  private consecutiveTypeDedupCount = 0;
   private baselineElementCount = 0;
   private pollRecords: PollRecord[] = [];
 
@@ -459,14 +464,38 @@ export class TouchInferrer {
       // Infer interaction from the diff
       const interaction = inferInteraction(sessionId, stateChange, this.config);
       if (interaction) {
-        this.lastInferredAt = now;
-        this.inferredCount++;
-        await this.logger(interaction);
         const target =
           interaction.element.id ||
           interaction.element.accessibilityLabel ||
           interaction.element.text ||
           'unknown';
+
+        // ── Consecutive type deduplication ──
+        // When the same field receives repeated text-change diffs (e.g., password
+        // field text updating as user types), skip emitting duplicate interactions.
+        // This prevents 4× signin.password steps collapsing to 1.
+        if (
+          interaction.actionType === 'type' &&
+          this.lastInferredAction === 'type' &&
+          this.lastInferredTarget === target
+        ) {
+          this.consecutiveTypeDedupCount++;
+          console.error(
+            `[TouchInferrer] dedup: skipping consecutive type on "${target}" (dedup count: ${this.consecutiveTypeDedupCount})`,
+          );
+          this.pollRecords.push({
+            timestamp: new Date(pollStart).toISOString(),
+            durationMs: readDuration,
+            result: 'debounced',
+          });
+          return null;
+        }
+
+        this.lastInferredAt = now;
+        this.lastInferredAction = interaction.actionType;
+        this.lastInferredTarget = target;
+        this.inferredCount++;
+        await this.logger(interaction);
         console.error(`[TouchInferrer] inferred: ${interaction.actionType} on "${target}"`);
         this.notify('info', {
           event: 'interaction_inferred',

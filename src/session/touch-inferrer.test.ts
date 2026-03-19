@@ -587,6 +587,158 @@ describe('TouchInferrer.diagnosticCounters', () => {
   });
 });
 
+describe('TouchInferrer.consecutiveTypeDedup', () => {
+  const sessionId = 'dedup-test';
+
+  it('should deduplicate consecutive type inferences on the same field', async () => {
+    // Simulate a user typing into signin.password across 4 polls.
+    // Each poll changes the text value progressively.
+    const baseline = {
+      role: 'view', id: 'root', children: [
+        { role: 'textfield', id: 'signin.password', children: [] },
+      ],
+    };
+    const poll2 = {
+      role: 'view', id: 'root', children: [
+        { role: 'textfield', id: 'signin.password', text: 'P', children: [] },
+      ],
+    };
+    const poll3 = {
+      role: 'view', id: 'root', children: [
+        { role: 'textfield', id: 'signin.password', text: 'Pa', children: [] },
+      ],
+    };
+    const poll4 = {
+      role: 'view', id: 'root', children: [
+        { role: 'textfield', id: 'signin.password', text: 'Pas', children: [] },
+      ],
+    };
+    const poll5 = {
+      role: 'view', id: 'root', children: [
+        { role: 'textfield', id: 'signin.password', text: 'Pass', children: [] },
+      ],
+    };
+
+    const reader = vi.fn()
+      .mockResolvedValueOnce(baseline)
+      .mockResolvedValueOnce(poll2)
+      .mockResolvedValueOnce(poll3)
+      .mockResolvedValueOnce(poll4)
+      .mockResolvedValueOnce(poll5);
+    const logger = vi.fn().mockResolvedValue(undefined);
+    const inferrer = new TouchInferrer(logger, reader, {
+      pollingIntervalMs: 10000,
+      debounceMs: 0,
+      maxChangesThreshold: 50,
+    });
+
+    await inferrer.pollOnce(sessionId); // baseline
+    await inferrer.pollOnce(sessionId); // first type → logged
+    await inferrer.pollOnce(sessionId); // second type → deduped
+    await inferrer.pollOnce(sessionId); // third type → deduped
+    await inferrer.pollOnce(sessionId); // fourth type → deduped
+
+    // Only 1 interaction should be logged (the first type)
+    expect(logger).toHaveBeenCalledTimes(1);
+    expect(logger.mock.calls[0][0].actionType).toBe('type');
+    expect(logger.mock.calls[0][0].element.id).toBe('signin.password');
+    expect(inferrer.getStatus().inferredCount).toBe(1);
+  });
+
+  it('should NOT deduplicate type on different fields', async () => {
+    const baseline = {
+      role: 'view', id: 'root', children: [
+        { role: 'textfield', id: 'username', children: [] },
+        { role: 'textfield', id: 'password', children: [] },
+      ],
+    };
+    const poll2 = {
+      role: 'view', id: 'root', children: [
+        { role: 'textfield', id: 'username', text: 'admin', children: [] },
+        { role: 'textfield', id: 'password', children: [] },
+      ],
+    };
+    const poll3 = {
+      role: 'view', id: 'root', children: [
+        { role: 'textfield', id: 'username', text: 'admin', children: [] },
+        { role: 'textfield', id: 'password', text: 'secret', children: [] },
+      ],
+    };
+
+    const reader = vi.fn()
+      .mockResolvedValueOnce(baseline)
+      .mockResolvedValueOnce(poll2)
+      .mockResolvedValueOnce(poll3);
+    const logger = vi.fn().mockResolvedValue(undefined);
+    const inferrer = new TouchInferrer(logger, reader, {
+      pollingIntervalMs: 10000,
+      debounceMs: 0,
+      maxChangesThreshold: 50,
+    });
+
+    await inferrer.pollOnce(sessionId); // baseline
+    await inferrer.pollOnce(sessionId); // type on username
+    await inferrer.pollOnce(sessionId); // type on password (different field)
+
+    // Both should be logged
+    expect(logger).toHaveBeenCalledTimes(2);
+    expect(logger.mock.calls[0][0].element.id).toBe('username');
+    expect(logger.mock.calls[1][0].element.id).toBe('password');
+  });
+
+  it('should reset dedup when a non-type action intervenes', async () => {
+    const baseline = {
+      role: 'view', id: 'root', children: [
+        { role: 'textfield', id: 'field', children: [] },
+      ],
+    };
+    const poll2 = {
+      role: 'view', id: 'root', children: [
+        { role: 'textfield', id: 'field', text: 'a', children: [] },
+      ],
+    };
+    // A tap navigates away
+    const poll3 = {
+      role: 'view', id: 'root', children: [
+        { role: 'view', id: 'dashboard', children: [] },
+      ],
+    };
+    // Then back to the same field
+    const poll4 = {
+      role: 'view', id: 'root', children: [
+        { role: 'textfield', id: 'field', children: [] },
+      ],
+    };
+    const poll5 = {
+      role: 'view', id: 'root', children: [
+        { role: 'textfield', id: 'field', text: 'b', children: [] },
+      ],
+    };
+
+    const reader = vi.fn()
+      .mockResolvedValueOnce(baseline)
+      .mockResolvedValueOnce(poll2)
+      .mockResolvedValueOnce(poll3)
+      .mockResolvedValueOnce(poll4)
+      .mockResolvedValueOnce(poll5);
+    const logger = vi.fn().mockResolvedValue(undefined);
+    const inferrer = new TouchInferrer(logger, reader, {
+      pollingIntervalMs: 10000,
+      debounceMs: 0,
+      maxChangesThreshold: 50,
+    });
+
+    await inferrer.pollOnce(sessionId); // baseline
+    await inferrer.pollOnce(sessionId); // type on field → logged
+    await inferrer.pollOnce(sessionId); // tap (navigation) → logged, resets dedup
+    await inferrer.pollOnce(sessionId); // tap (navigation back) → logged
+    await inferrer.pollOnce(sessionId); // type on field again → logged (dedup reset)
+
+    // All 4 interactions logged (type, tap, tap, type)
+    expect(logger).toHaveBeenCalledTimes(4);
+  });
+});
+
 describe('inferInteraction — low-confidence element rejection', () => {
   const sessionId = 'reject-test';
 

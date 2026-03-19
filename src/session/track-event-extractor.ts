@@ -18,6 +18,7 @@ export const DEFAULT_EVENT_MAPPING: Record<string, UIActionType> = {
   ctaClicked: 'tap',
   tap: 'tap',
   pageDisplayed: 'assertVisible',
+  screenChange: 'assertVisible',
   textInput: 'type',
   scroll: 'scroll',
   swipe: 'swipe',
