@@ -511,6 +511,19 @@ export async function handleGetUIHierarchy(
     if (input.includeRawOutput) {
         result.rawOutput = rawOutput;
     }
+
+    // 7. Diagnostic warning: parsed tree is empty but raw output has data
+    if (nodeCount <= 1 && rawOutput.length > 500 && !input.artifactPath) {
+        result.diagnostics = [
+            'Parsed tree is nearly empty but raw output contains data. ' +
+            'The app may be backgrounded, or the hierarchy parser collapsed non-identifiable nodes. ' +
+            'Try: includeRawOutput: true, or foreground the app manually.',
+        ];
+        console.error(
+            `[MCP] get_ui_hierarchy: ⚠️ empty parsed tree (${nodeCount} node(s)) but raw output has ${rawOutput.length} chars`,
+        );
+    }
+
     return result;
 }
 

@@ -441,6 +441,12 @@ export const GetUIHierarchyOutputSchema = z.object({
         .string()
         .optional()
         .describe('Path where the full hierarchy was written, if artifactPath was specified.'),
+    diagnostics: z
+        .array(z.string())
+        .optional()
+        .describe(
+            'Diagnostic warnings when the result may be incomplete (e.g., empty parsed tree with non-empty raw output).'
+        ),
 });
 
 const DeviceInfoSchema = z.object({

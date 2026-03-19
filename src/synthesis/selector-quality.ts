@@ -7,6 +7,7 @@
  */
 
 import type { UIElement } from '../types.js';
+import { TRANSIENT_PATTERNS } from '../session/element-quality.js';
 
 export type SelectorWarningKind =
     | 'short-or-numeric'
@@ -18,16 +19,6 @@ export interface SelectorWarning {
     kind: SelectorWarningKind;
     message: string;
 }
-
-/** Patterns that indicate transient or generic element identifiers */
-const TRANSIENT_PATTERNS = [
-    /shimmer/i,
-    /loading/i,
-    /placeholder/i,
-    /spinner/i,
-    /skeleton/i,
-    /progress/i,
-];
 
 /**
  * Assess the quality of a UIElement's selector and return warnings

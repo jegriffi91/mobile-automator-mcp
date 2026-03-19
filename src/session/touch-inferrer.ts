@@ -13,6 +13,7 @@
 
 import type { UIInteraction, UIElement, UIActionType, StateChange, UIHierarchyNode } from '../types.js';
 import { HierarchyDiffer, flattenToElements } from '../maestro/hierarchy-differ.js';
+import { isLowConfidenceElement } from './element-quality.js';
 
 /** Health status returned by TouchInferrer.getStatus() */
 export interface PollingStatus {
@@ -102,7 +103,11 @@ export function inferInteraction(
     // otherwise be silently discarded.
     const transitionTarget = findBestTapTarget(elementsRemoved)
       ?? findBestTapTarget(elementsAdded);
-    if (transitionTarget && (transitionTarget.id || transitionTarget.accessibilityLabel)) {
+    if (
+      transitionTarget &&
+      (transitionTarget.id || transitionTarget.accessibilityLabel) &&
+      !isLowConfidenceElement(transitionTarget)
+    ) {
       return {
         ...buildInteraction(sessionId, 'tap', transitionTarget, stateChange.timestamp),
         source: 'inferred-transition' as const,
@@ -190,9 +195,13 @@ export function findFirstIdentifiable(elements: UIElement[]): UIElement | null {
   return elements.find(hasIdentity) ?? null;
 }
 
-/** Check whether a UIElement has at least one identifier */
+/** Check whether a UIElement has at least one usable identifier.
+ *  Rejects low-confidence elements (spinners, shimmers, short text, decorative labels)
+ *  so they never become inferred tap targets.
+ */
 function hasIdentity(el: UIElement): boolean {
-  return !!(el.id || el.accessibilityLabel || el.text);
+  if (!(el.id || el.accessibilityLabel || el.text)) return false;
+  return !isLowConfidenceElement(el);
 }
 
 /** Build a UIInteraction from inferred data */

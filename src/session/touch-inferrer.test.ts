@@ -586,3 +586,93 @@ describe('TouchInferrer.diagnosticCounters', () => {
     expect(status).toHaveProperty('baselineElementCount');
   });
 });
+
+describe('inferInteraction — low-confidence element rejection', () => {
+  const sessionId = 'reject-test';
+
+  it('should return null when only spinner elements are in the diff', () => {
+    const change = makeStateChange({
+      elementsAdded: [
+        makeElement({ id: 'ExperianLogoSpinner', role: 'image' }),
+        makeElement({ id: 'full_screen_spinner', role: 'view' }),
+      ],
+    });
+
+    expect(inferInteraction(sessionId, change)).toBeNull();
+  });
+
+  it('should return null when only shimmer/loading elements are present', () => {
+    const change = makeStateChange({
+      elementsRemoved: [makeElement({ id: 'shimmer-block', role: 'view' })],
+      elementsAdded: [makeElement({ id: 'loading-placeholder', role: 'view' })],
+    });
+
+    expect(inferInteraction(sessionId, change)).toBeNull();
+  });
+
+  it('should return null when only short numeric text targets exist', () => {
+    const change = makeStateChange({
+      elementsAdded: [makeElement({ text: '1', role: 'staticText' })],
+    });
+
+    expect(inferInteraction(sessionId, change)).toBeNull();
+  });
+
+  it('should return null for decorative "Logo" label without interactive role', () => {
+    const change = makeStateChange({
+      elementsAdded: [makeElement({ accessibilityLabel: 'Logo', role: 'image' })],
+    });
+
+    expect(inferInteraction(sessionId, change)).toBeNull();
+  });
+
+  it('should still infer tap on a button with a clean id amid transient elements', () => {
+    const change = makeStateChange({
+      elementsRemoved: [
+        makeElement({ id: 'shimmer-block', role: 'view' }),
+        makeElement({ id: 'submit-btn', role: 'button' }),
+      ],
+      elementsAdded: [makeElement({ id: 'dashboard-title', role: 'staticText' })],
+    });
+
+    const result = inferInteraction(sessionId, change);
+    expect(result).not.toBeNull();
+    expect(result!.element.id).toBe('submit-btn');
+  });
+
+  it('should return null for transition with only transient elements exceeding threshold', () => {
+    // 60 spinner-like elements — exceeds threshold, and transition-target also transient
+    const manyElements = Array.from({ length: 60 }, (_, i) =>
+      makeElement({ id: `spinner-${i}`, role: 'image' }),
+    );
+    const change = makeStateChange({ elementsAdded: manyElements });
+
+    expect(inferInteraction(sessionId, change, { maxChangesThreshold: 50 })).toBeNull();
+  });
+
+  it('should infer tap on a clean element when transient elements are also present', () => {
+    const change = makeStateChange({
+      elementsAdded: [
+        makeElement({ id: 'skeleton-row-1', role: 'view' }),
+        makeElement({ id: 'welcome-header', role: 'staticText' }),
+        makeElement({ id: 'progress-bar', role: 'view' }),
+      ],
+    });
+
+    const result = inferInteraction(sessionId, change);
+    expect(result).not.toBeNull();
+    expect(result!.element.id).toBe('welcome-header');
+  });
+
+  it('should return null when all targets are numeric-only text', () => {
+    const change = makeStateChange({
+      elementsAdded: [
+        makeElement({ text: '42', role: 'staticText' }),
+        makeElement({ text: '100', role: 'staticText' }),
+      ],
+    });
+
+    expect(inferInteraction(sessionId, change)).toBeNull();
+  });
+});
+
