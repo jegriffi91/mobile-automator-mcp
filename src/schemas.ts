@@ -206,7 +206,7 @@ export const ListDevicesInputSchema = z.object({
 export const ExecuteUIActionInputSchema = z.object({
     sessionId: z.string().describe('Active session ID'),
     action: z
-        .enum(['tap', 'type', 'scroll', 'swipe', 'back', 'assertVisible'])
+        .enum(['tap', 'type', 'scroll', 'swipe', 'scrollUntilVisible', 'swipeUntilVisible', 'back', 'assertVisible'])
         .describe('The UI action to perform'),
     element: UIElementSchema.describe('Target UI element to act on'),
     textInput: z

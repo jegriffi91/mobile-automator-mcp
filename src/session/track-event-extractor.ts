@@ -21,6 +21,8 @@ export const DEFAULT_EVENT_MAPPING: Record<string, UIActionType> = {
   textInput: 'type',
   scroll: 'scroll',
   swipe: 'swipe',
+  scrollUntilVisible: 'scrollUntilVisible',
+  swipeUntilVisible: 'swipeUntilVisible',
   back: 'back',
 };
 

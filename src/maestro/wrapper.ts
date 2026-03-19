@@ -302,6 +302,12 @@ export class MaestroWrapper {
                 case 'swipe':
                     commandStr = `- swipe:\n    direction: DOWN`;
                     break;
+                case 'scrollUntilVisible':
+                    commandStr = `- scrollUntilVisible:\n    element:\n      ${target}\n    direction: DOWN`;
+                    break;
+                case 'swipeUntilVisible':
+                    commandStr = `- scrollUntilVisible:\n    element:\n      ${target}\n    direction: RIGHT`;
+                    break;
                 case 'back':
                     commandStr = `- back`;
                     break;

@@ -71,6 +71,18 @@ export class YamlGenerator {
                     lines.push(`    direction: DOWN`);
                     lines.push(`    duration: 400`);
                     break;
+                case 'scrollUntilVisible':
+                    lines.push(`- scrollUntilVisible:`);
+                    lines.push(`    element:`);
+                    lines.push(`      ${YamlGenerator.buildSelector(interaction.element)}`);
+                    lines.push(`    direction: DOWN`);
+                    break;
+                case 'swipeUntilVisible':
+                    lines.push(`- scrollUntilVisible:`);
+                    lines.push(`    element:`);
+                    lines.push(`      ${YamlGenerator.buildSelector(interaction.element)}`);
+                    lines.push(`    direction: RIGHT`);
+                    break;
                 case 'back':
                     lines.push(`- back`);
                     break;
@@ -117,6 +129,8 @@ export class YamlGenerator {
             case 'type': return `Type into ${target}`;
             case 'scroll': return 'Scroll';
             case 'swipe': return 'Swipe';
+            case 'scrollUntilVisible': return `Scroll to ${target}`;
+            case 'swipeUntilVisible': return `Swipe to ${target}`;
             case 'back': return 'Back';
             case 'assertVisible': return `Assert ${target} visible`;
             default: return action;
