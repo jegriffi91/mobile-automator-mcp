@@ -26,6 +26,7 @@ Session lifecycle management and SQLite persistence. Owns the recording session 
 
 - **`startPolling()` accepts `AutomationDriver`** — the driver provides a `createTreeReader()` method for the `TouchInferrer`. The caller (handlers.ts) is responsible for creating and starting the driver.
 - **No daemon management in SessionManager** — daemon lifecycle (start/stop) is managed by the driver itself. SessionManager only needs to call `driver.createTreeReader()`.
+- **`PollRecord`** — Each `pollOnce()` call accumulates a `PollRecord` (timestamp, duration, result, element count, inferred target). Accessed via `getPollRecords()` for timeline building and mid-session health checks.
 
 ## Coding Standards
 
@@ -37,6 +38,6 @@ Session lifecycle management and SQLite persistence. Owns the recording session 
 ## Testing
 
 - **Testable:** Both `database.ts` and `manager.ts` contain pure logic (sql.js is in-process, no external I/O).
-- **`touch-inferrer.test.ts`** — Comprehensive test suite (37 tests), including polling status, notifier, suppress, rate tracking, and diagnostic counters.
+- **`touch-inferrer.test.ts`** — Comprehensive test suite (38 tests), including polling status, notifier, suppress, rate tracking, and diagnostic counters.
 - See [Testing Strategy](../../docs/testing-strategy.md) for patterns and commands.
 - Run tests: `npm test`

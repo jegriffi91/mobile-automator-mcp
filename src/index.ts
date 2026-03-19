@@ -30,6 +30,8 @@ import {
     RunTestOutputSchema,
     ListDevicesInputSchema,
     ListDevicesOutputSchema,
+    GetSessionTimelineInputSchema,
+    GetSessionTimelineOutputSchema,
     TOOL_NAMES,
 } from './schemas.js';
 
@@ -43,6 +45,7 @@ import {
     handleRegisterSegment,
     handleRunTest,
     handleListDevices,
+    handleGetSessionTimeline,
     setMcpServer,
 } from './handlers.js';
 
@@ -287,6 +290,32 @@ server.registerTool(
     },
     async (args) => {
         const result = await handleListDevices(args);
+        return {
+            content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
+            structuredContent: result,
+        };
+    }
+);
+
+// ── 10. get_session_timeline ──
+server.registerTool(
+    TOOL_NAMES.GET_SESSION_TIMELINE,
+    {
+        title: 'Get Session Timeline',
+        description:
+            'Get a lightweight mid-session health check showing polling stats, interaction counts, and gap analysis. Use during an active recording to verify the poller is keeping up and interactions are being captured. Only available while session status is "recording".',
+        inputSchema: GetSessionTimelineInputSchema,
+        outputSchema: GetSessionTimelineOutputSchema,
+        annotations: {
+            title: 'Get Session Timeline',
+            readOnlyHint: true,
+            destructiveHint: false,
+            idempotentHint: true,
+            openWorldHint: false,
+        },
+    },
+    async (args) => {
+        const result = await handleGetSessionTimeline(args);
         return {
             content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
             structuredContent: result,

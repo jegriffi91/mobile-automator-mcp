@@ -368,6 +368,10 @@ export const StopAndCompileOutputSchema = z.object({
         })
         .optional()
         .describe('Health diagnostics from the passive capture polling loop'),
+    timelinePath: z
+        .string()
+        .optional()
+        .describe('Path to the session timeline JSON file for post-hoc debugging'),
 });
 
 export const RegisterSegmentOutputSchema = z.object({
@@ -472,6 +476,41 @@ export const VerifySDUIPayloadOutputSchema = z.object({
         .describe('List of field paths that did not match expectations'),
 });
 
+// ── get_session_timeline input/output schemas ──
+
+export const GetSessionTimelineInputSchema = z.object({
+    sessionId: z.string().describe('Active session ID to get timeline for'),
+});
+
+export const GetSessionTimelineOutputSchema = z.object({
+    sessionId: z.string().describe('The session this timeline belongs to'),
+    status: z.string().describe('Current session status'),
+    elapsedMs: z.number().optional().describe('Milliseconds since recording started'),
+    pollSummary: z.object({
+        totalPolls: z.number().describe('Total polling attempts'),
+        byResult: z.record(z.string(), z.number()).describe('Poll count by result type'),
+        starvationPeriods: z.number().describe('Gaps exceeding 2× configured interval'),
+        configuredIntervalMs: z.number().describe('Configured polling interval'),
+        actualAverageMs: z.number().optional().describe('Average actual interval'),
+    }).describe('Aggregate polling statistics'),
+    interactionSummary: z.object({
+        total: z.number().describe('Total interactions logged'),
+        bySource: z.record(z.string(), z.number()).describe('Count by source type'),
+    }).describe('Interaction capture statistics'),
+    gaps: z.array(z.object({
+        from: z.string().describe('Start of the gap'),
+        to: z.string().describe('End of the gap'),
+        durationMs: z.number().describe('Gap duration in milliseconds'),
+        reason: z.string().describe('Cause of the gap'),
+    })).describe('Polling gaps where interactions may have been missed'),
+    recentPolls: z.array(z.object({
+        timestamp: z.string(),
+        durationMs: z.number(),
+        result: z.string(),
+        inferredTarget: z.string().optional(),
+    })).describe('Most recent 10 poll records for quick inspection'),
+});
+
 // ──────────────────────────────────────────────
 // Derived TypeScript types (single source of truth)
 // ──────────────────────────────────────────────
@@ -503,6 +542,9 @@ export type RunTestOutput = z.infer<typeof RunTestOutputSchema>;
 export type ListDevicesInput = z.infer<typeof ListDevicesInputSchema>;
 export type ListDevicesOutput = z.infer<typeof ListDevicesOutputSchema>;
 
+export type GetSessionTimelineInput = z.infer<typeof GetSessionTimelineInputSchema>;
+export type GetSessionTimelineOutput = z.infer<typeof GetSessionTimelineOutputSchema>;
+
 // ──────────────────────────────────────────────
 // Tool name constants
 // ──────────────────────────────────────────────
@@ -517,4 +559,5 @@ export const TOOL_NAMES = {
     REGISTER_SEGMENT: 'register_segment',
     RUN_TEST: 'run_test',
     LIST_DEVICES: 'list_devices',
+    GET_SESSION_TIMELINE: 'get_session_timeline',
 } as const;

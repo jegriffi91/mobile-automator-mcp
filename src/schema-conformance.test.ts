@@ -21,6 +21,7 @@ import {
   RegisterSegmentOutputSchema,
   RunTestOutputSchema,
   ListDevicesOutputSchema,
+  GetSessionTimelineOutputSchema,
 } from './schemas.js';
 
 describe('Schema Conformance', () => {
@@ -83,6 +84,7 @@ describe('Schema Conformance', () => {
           diffButNullInferenceCount: 2,
           baselineElementCount: 15,
         },
+        timelinePath: '/tmp/session-abc123/timeline.json',
       };
       const result = StopAndCompileOutputSchema.safeParse(output);
       expect(result.success).toBe(true);
@@ -272,6 +274,36 @@ describe('Schema Conformance', () => {
         total: 1,
       };
       const result = ListDevicesOutputSchema.safeParse(output);
+      expect(result.success).toBe(true);
+    });
+  });
+
+  describe('GetSessionTimelineOutputSchema', () => {
+    it('should accept valid timeline output', () => {
+      const output = {
+        sessionId: 'session-abc123',
+        status: 'recording',
+        elapsedMs: 15000,
+        pollSummary: {
+          totalPolls: 30,
+          byResult: { baseline: 1, equal: 20, inferred: 5, error: 4 },
+          starvationPeriods: 2,
+          configuredIntervalMs: 500,
+          actualAverageMs: 510,
+        },
+        interactionSummary: {
+          total: 5,
+          bySource: { inferred: 3, dispatched: 2 },
+        },
+        gaps: [
+          { from: '2024-01-01T00:00:01Z', to: '2024-01-01T00:00:04Z', durationMs: 3000, reason: 'poll_starvation' },
+        ],
+        recentPolls: [
+          { timestamp: '2024-01-01T00:00:14Z', durationMs: 120, result: 'equal' },
+          { timestamp: '2024-01-01T00:00:15Z', durationMs: 130, result: 'inferred', inferredTarget: 'btn' },
+        ],
+      };
+      const result = GetSessionTimelineOutputSchema.safeParse(output);
       expect(result.success).toBe(true);
     });
   });

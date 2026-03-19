@@ -13,7 +13,7 @@
 import type { Session, SessionStatus, UIInteraction, NetworkEvent, MobilePlatform, HierarchySnapshot, CaptureMode } from '../types.js';
 import { SessionDatabase } from './database.js';
 import { TouchInferrer } from './touch-inferrer.js';
-import type { PollingStatus, PollingNotifier } from './touch-inferrer.js';
+import type { PollingStatus, PollingNotifier, PollRecord } from './touch-inferrer.js';
 import type { AutomationDriver } from '../maestro/driver.js';
 
 const VALID_TRANSITIONS: Record<SessionStatus, SessionStatus[]> = {
@@ -230,6 +230,15 @@ export class SessionManager {
         if (inferrer) {
             inferrer.suppress();
         }
+    }
+
+    /**
+     * Get per-poll timeline records for a session.
+     * Returns empty array if no active poller exists.
+     */
+    getPollRecords(sessionId: string): PollRecord[] {
+        const inferrer = this.activePollers.get(sessionId);
+        return inferrer ? inferrer.getPollRecords() : [];
     }
 
     /**

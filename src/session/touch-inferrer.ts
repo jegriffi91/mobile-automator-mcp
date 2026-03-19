@@ -38,6 +38,19 @@ export interface PollingStatus {
   diffButNullInferenceCount?: number;
   /** Number of identifiable elements in the baseline hierarchy snapshot */
   baselineElementCount?: number;
+  /** Per-poll records for timeline building (only present when explicitly requested) */
+  pollRecords?: PollRecord[];
+}
+
+/** Record of a single polling attempt — used to build the session timeline */
+export interface PollRecord {
+  timestamp: string;
+  durationMs: number;
+  result: 'baseline' | 'equal' | 'inferred' | 'inferred-transition'
+        | 'threshold_exceeded' | 'suppressed' | 'debounced' | 'error';
+  elementCount?: number;
+  inferredTarget?: string;
+  error?: string;
 }
 
 /** Callback to send real-time polling log messages to the MCP client */
@@ -229,6 +242,7 @@ export class TouchInferrer {
   private thresholdExceededCount = 0;
   private diffButNullInferenceCount = 0;
   private baselineElementCount = 0;
+  private pollRecords: PollRecord[] = [];
 
   constructor(
     logger: InteractionLogger,
@@ -330,15 +344,25 @@ export class TouchInferrer {
   }
 
   /**
+   * Get the per-poll timeline records.
+   * Returns a copy to prevent external mutation.
+   */
+  getPollRecords(): PollRecord[] {
+    return [...this.pollRecords];
+  }
+
+  /**
    * Single poll iteration: snapshot → diff → infer → log.
    * Exported for testing but normally called by the timer.
    */
   async pollOnce(sessionId: string): Promise<UIInteraction | null> {
     this.polling = true;
     this.pollCount++;
+    const pollStart = Date.now();
     try {
       const currentHierarchy = await this.hierarchyReader();
       this.successCount++;
+      const readDuration = Date.now() - pollStart;
 
       // Periodic debug notification (throttled)
       if (this.pollCount % DEBUG_NOTIFY_EVERY === 0) {
@@ -357,12 +381,23 @@ export class TouchInferrer {
         this.baselineElementCount = flattenToElements(currentHierarchy).length;
         console.error(`[TouchInferrer] pollOnce: captured initial baseline snapshot (${this.baselineElementCount} identifiable elements)`);
         this.notify('info', { event: 'baseline_captured', pollCount: this.pollCount, identifiableElements: this.baselineElementCount });
+        this.pollRecords.push({
+          timestamp: new Date(pollStart).toISOString(),
+          durationMs: readDuration,
+          result: 'baseline',
+          elementCount: this.baselineElementCount,
+        });
         return null;
       }
 
       // Quick equality check using tree comparison
       if (HierarchyDiffer.areEqualTrees(this.previousHierarchy, currentHierarchy)) {
         this.equalTreeCount++;
+        this.pollRecords.push({
+          timestamp: new Date(pollStart).toISOString(),
+          durationMs: readDuration,
+          result: 'equal',
+        });
         return null;
       }
 
@@ -376,12 +411,22 @@ export class TouchInferrer {
       if (this.suppressed) {
         this.suppressed = false;
         console.error('[TouchInferrer] pollOnce: diff detected but suppressed (AI-led action)');
+        this.pollRecords.push({
+          timestamp: new Date(pollStart).toISOString(),
+          durationMs: readDuration,
+          result: 'suppressed',
+        });
         return null;
       }
 
       // Debounce: skip if we just inferred an interaction
       const now = Date.now();
       if (now - this.lastInferredAt < this.config.debounceMs) {
+        this.pollRecords.push({
+          timestamp: new Date(pollStart).toISOString(),
+          durationMs: readDuration,
+          result: 'debounced',
+        });
         return null;
       }
 
@@ -435,10 +480,44 @@ export class TouchInferrer {
         });
       }
 
+      // Record the poll result
+      if (interaction) {
+        const target =
+          interaction.element.id ||
+          interaction.element.accessibilityLabel ||
+          interaction.element.text ||
+          'unknown';
+        this.pollRecords.push({
+          timestamp: new Date(pollStart).toISOString(),
+          durationMs: readDuration,
+          result: interaction.source === 'inferred-transition' ? 'inferred-transition' : 'inferred',
+          inferredTarget: target,
+        });
+      } else if (totalChanges > this.config.maxChangesThreshold) {
+        this.pollRecords.push({
+          timestamp: new Date(pollStart).toISOString(),
+          durationMs: readDuration,
+          result: 'threshold_exceeded',
+        });
+      } else {
+        // Diff had changes but no interaction could be inferred
+        this.pollRecords.push({
+          timestamp: new Date(pollStart).toISOString(),
+          durationMs: readDuration,
+          result: 'equal', // no actionable diff — treat like no-change
+        });
+      }
+
       return interaction;
     } catch (err) {
       this.errorCount++;
       this.lastError = err instanceof Error ? err.message : String(err);
+      this.pollRecords.push({
+        timestamp: new Date(pollStart).toISOString(),
+        durationMs: Date.now() - pollStart,
+        result: 'error',
+        error: this.lastError,
+      });
       this.notify('warning', {
         event: 'poll_error',
         errorCount: this.errorCount,

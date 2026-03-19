@@ -19,6 +19,7 @@ import { DriverFactory, type AutomationDriver } from './maestro/driver.js';
 import { HierarchyParser } from './maestro/index.js';
 import { proxymanWrapper, PayloadValidator } from './proxyman/index.js';
 import { Correlator, YamlGenerator, StubWriter } from './synthesis/index.js';
+import { TimelineBuilder } from './synthesis/timeline-builder.js';
 import { SegmentFingerprint, SegmentRegistry } from './segments/index.js';
 import { StubServer } from './wiremock/index.js';
 import { extractTrackEvents } from './session/track-event-extractor.js';
@@ -46,6 +47,8 @@ import type {
     RunTestOutput,
     ListDevicesInput,
     ListDevicesOutput,
+    GetSessionTimelineInput,
+    GetSessionTimelineOutput,
 } from './schemas.js';
 
 const execFileAsync = promisify(execFile);
@@ -181,6 +184,7 @@ export async function handleStopAndCompile(
     let segmentFingerprint: string | undefined;
     let matchedSegments: Array<{ name: string; fingerprint: string; similarity: number; yamlPath: string }> | undefined;
     let pollingDiagnostics: ReturnType<typeof sessionManager.getPollingStatus> | undefined;
+    let timelinePath: string | undefined;
 
     try {
         // ── Step 1: Export scoped Proxyman HAR ──
@@ -329,6 +333,38 @@ export async function handleStopAndCompile(
             );
         }
 
+        // ── Step 7b: Build and write session timeline ──
+        try {
+            const pollRecords = sessionManager.getPollRecords(input.sessionId);
+            const timelineBuilder = new TimelineBuilder();
+            const timeline = timelineBuilder.build({
+                session,
+                readiness: {
+                    driverReady: true, // If we reached compile, the driver started
+                    baselineCaptured: session.proxymanBaseline != null,
+                    pollerStarted: (pollingDiagnostics?.pollCount ?? 0) > 0,
+                },
+                interactions: allInteractions,
+                networkEvents: allNetworkEvents,
+                correlatedSteps: steps,
+                pollRecords,
+                pollingDiagnostics: pollingDiagnostics ?? undefined,
+                correlationWindowMs: 3000,
+            });
+
+            const sessionDir = path.dirname(outputPath);
+            const timelineDir = path.join(sessionDir, `session-${input.sessionId}`);
+            await fs.mkdir(timelineDir, { recursive: true });
+            timelinePath = path.join(timelineDir, 'timeline.json');
+            await fs.writeFile(timelinePath, JSON.stringify(timeline, null, 2), 'utf-8');
+
+            console.error(
+                `[MCP] stop_and_compile_test: wrote timeline (${timeline.entries.length} entries, ${timeline.coverage.gaps.length} gaps) to ${timelinePath}`
+            );
+        } catch (error) {
+            console.error('[MCP] stop_and_compile_test: timeline generation failed (non-fatal)', error);
+        }
+
         if (allInteractions.length === 0 && pollingDiagnostics) {
             if (pollingDiagnostics.errorCount > 0) {
                 console.error(
@@ -396,6 +432,7 @@ export async function handleStopAndCompile(
         segmentFingerprint,
         matchedSegments,
         pollingDiagnostics,
+        timelinePath,
     };
 }
 
@@ -918,4 +955,100 @@ export async function handleListDevices(
 
     console.error(`[MCP] list_devices: found ${devices.length} device(s)`);
     return { devices, total: devices.length };
+}
+
+// ---- get_session_timeline ----
+export async function handleGetSessionTimeline(
+    input: GetSessionTimelineInput
+): Promise<GetSessionTimelineOutput> {
+    console.error(`[MCP] get_session_timeline: checking timeline for session ${input.sessionId}`);
+
+    const session = await sessionManager.getSession(input.sessionId);
+    if (!session) {
+        throw new Error(`Session not found: ${input.sessionId}`);
+    }
+
+    // Get poll records from the active inferrer
+    const pollRecords = sessionManager.getPollRecords(input.sessionId);
+
+    // Get interactions from the DB
+    const interactions = await sessionManager.getInteractions(input.sessionId);
+
+    // Compute poll summary
+    const byResult: Record<string, number> = {};
+    for (const r of pollRecords) {
+        byResult[r.result] = (byResult[r.result] ?? 0) + 1;
+    }
+
+    // Compute interaction summary
+    const bySource: Record<string, number> = {};
+    for (const i of interactions) {
+        const src = i.source ?? 'dispatched';
+        bySource[src] = (bySource[src] ?? 0) + 1;
+    }
+
+    // Detect gaps (same logic as TimelineBuilder)
+    const configuredIntervalMs = session.pollingIntervalMs ?? 500;
+    const threshold = configuredIntervalMs * 2;
+    const gaps: GetSessionTimelineOutput['gaps'] = [];
+    let starvationPeriods = 0;
+
+    for (let i = 1; i < pollRecords.length; i++) {
+        const prevTime = new Date(pollRecords[i - 1].timestamp).getTime();
+        const currTime = new Date(pollRecords[i].timestamp).getTime();
+        const delta = currTime - prevTime;
+
+        if (delta > threshold) {
+            starvationPeriods++;
+            const prevRecord = pollRecords[i - 1];
+            let reason = 'poll_starvation';
+            if (prevRecord.result === 'error') reason = 'poll_errors';
+            else if (prevRecord.durationMs <= configuredIntervalMs) reason = 'no_polls';
+
+            gaps.push({
+                from: pollRecords[i - 1].timestamp,
+                to: pollRecords[i].timestamp,
+                durationMs: delta,
+                reason,
+            });
+        }
+    }
+
+    // Compute actual average
+    let actualAverageMs: number | undefined;
+    if (pollRecords.length >= 2) {
+        const first = new Date(pollRecords[0].timestamp).getTime();
+        const last = new Date(pollRecords[pollRecords.length - 1].timestamp).getTime();
+        actualAverageMs = Math.round((last - first) / (pollRecords.length - 1));
+    }
+
+    // Elapsed time
+    const elapsedMs = Date.now() - new Date(session.startedAt).getTime();
+
+    // Recent polls (last 10)
+    const recentPolls = pollRecords.slice(-10).map((r) => ({
+        timestamp: r.timestamp,
+        durationMs: r.durationMs,
+        result: r.result,
+        inferredTarget: r.inferredTarget,
+    }));
+
+    return {
+        sessionId: input.sessionId,
+        status: session.status,
+        elapsedMs,
+        pollSummary: {
+            totalPolls: pollRecords.length,
+            byResult,
+            starvationPeriods,
+            configuredIntervalMs,
+            actualAverageMs,
+        },
+        interactionSummary: {
+            total: interactions.length,
+            bySource,
+        },
+        gaps,
+        recentPolls,
+    };
 }
