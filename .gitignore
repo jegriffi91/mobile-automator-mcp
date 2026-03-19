@@ -7,3 +7,8 @@ dist/
 .env
 .DS_Store
 coverage/
+
+# Smoke test artifacts (local-only, app-specific)
+tests/smoke/*-smoke.yaml
+tests/smoke/fixtures/
+tests/smoke/smoke-results.json
