@@ -24,6 +24,7 @@ interface StubMapping {
     response: {
         status?: number;
         body?: string;
+        jsonBody?: unknown;
         bodyFileName?: string;
         proxyBaseUrl?: string;
         headers?: Record<string, string>;
@@ -37,6 +38,14 @@ export class StubServer {
     private fixtureCache: Map<string, string> = new Map();
 
     /**
+     * Clear all loaded mappings and cached fixtures to isolate tests.
+     */
+    clearStubs(): void {
+        this.mappings = [];
+        this.fixtureCache.clear();
+    }
+
+    /**
      * Load WireMock-compatible mappings and __files from a stubs directory.
      *
      * Expected structure:
@@ -44,7 +53,7 @@ export class StubServer {
      *     mappings/*.json
      *     __files/*_response.json
      */
-    async loadStubs(stubsDir: string): Promise<number> {
+    async loadStubs(stubsDir: string, append = false): Promise<number> {
         // Normalize: if caller passed the mappings/ subdirectory directly, go up one level
         const normalizedDir = path.basename(stubsDir) === 'mappings'
             ? path.dirname(stubsDir)
@@ -63,13 +72,19 @@ export class StubServer {
                     return JSON.parse(raw) as StubMapping;
                 })
             );
-            this.mappings = rawMappings;
+            if (append) {
+                this.mappings.unshift(...rawMappings);
+            } else {
+                this.mappings = rawMappings;
+            }
 
             // Sort by priority (lower = higher priority)
             this.mappings.sort((a, b) => (a.priority ?? 99) - (b.priority ?? 99));
 
             // Pre-load all fixture files into memory to eliminate per-request I/O
-            this.fixtureCache.clear();
+            if (!append) {
+                this.fixtureCache.clear();
+            }
             try {
                 const fixtureFiles = await fs.readdir(this.filesDir);
                 const fixtureContents = await Promise.all(
@@ -81,12 +96,12 @@ export class StubServer {
                 for (const { name, content } of fixtureContents) {
                     this.fixtureCache.set(name, content);
                 }
-                console.error(`[StubServer] pre-loaded ${this.fixtureCache.size} fixture(s) into memory`);
+                console.error(`[StubServer] pre-loaded ${fixtureContents.length} new fixture(s) into memory (total: ${this.fixtureCache.size})`);
             } catch {
                 // __files dir may not exist if no fixtures — that's fine
             }
 
-            console.error(`[StubServer] loaded ${this.mappings.length} mappings from ${mappingsDir}`);
+            console.error(`[StubServer] loaded ${rawMappings.length} mappings from ${mappingsDir} (total: ${this.mappings.length})`);
             return this.mappings.length;
         } catch (error: any) {
             throw new Error(`Failed to load stubs from ${stubsDir}: ${error.message}`);
@@ -226,10 +241,17 @@ export class StubServer {
             return;
         }
 
-        // If inline body
+        // If inline body string
         if (mapping.response.body) {
             res.writeHead(status, headers);
             res.end(mapping.response.body);
+            return;
+        }
+
+        // If inline json object
+        if (mapping.response.jsonBody !== undefined) {
+            res.writeHead(status, { ...headers, 'Content-Type': 'application/json' });
+            res.end(JSON.stringify(mapping.response.jsonBody));
             return;
         }
 

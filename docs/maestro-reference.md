@@ -18,7 +18,10 @@ The YAML generator (`synthesis/generator.ts`) emits these Maestro commands:
 | Back | `- back` | `back` action |
 | Assert visible | `- assertVisible:` + selector | `assertVisible` action |
 
----
+> [!CAUTION]
+> **Syntax Warnings (Hallucination Prevention)**
+> - The `scroll` command does NOT accept `from:` or `to:`. It either takes no arguments (`- scroll`) or specific IDs.
+> - The `swipe` command ONLY accepts `start`, `end`, `direction`, and `duration`. Do NOT use `from:` or `to:`.
 
 ## Selector Priority
 

@@ -27,6 +27,8 @@
 - Bypass Zod validation by casting or using raw `JSON.parse` without schema parsing.
 - Import across submodule boundaries incorrectly (see [Architecture](./docs/architecture.md)).
 - Create throwaway scripts in the project root.
+- **Hallucinate properties on Maestro commands.** The `scroll` command does NOT accept `from:` or `to:` (it takes no arguments). The `swipe` command ONLY accepts `start`, `end`, `direction`, and `duration`.
+- Avoid executing or editing code without auto-allow if it's outside the `tests/` directory (the `tests/` directory is whitelisted for safe autonomous changes).
 
 ⚠️ **Ask first:**
 - Before adding new npm dependencies.

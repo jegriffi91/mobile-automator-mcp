@@ -24,6 +24,7 @@ import * as path from 'path';
 import * as fs from 'fs/promises';
 import { fileURLToPath } from 'url';
 import { getExecEnv, resolveMaestroBin as resolveMaestroBinCore } from '../../src/maestro/env.js';
+import { StubServer } from '../../src/wiremock/runner.js';
 
 const execFileAsync = promisify(execFile);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -138,12 +139,45 @@ async function runSmokeTest(
   config: SmokeTestConfig,
   maestroBin: string,
   deviceId?: string,
+  stubServer?: StubServer,
 ): Promise<SmokeTestResult> {
-  const name = path.basename(yamlPath, '.yaml');
+  const name = path.basename(yamlPath, '.yaml').replace(/-smoke$/, '');
   const start = Date.now();
 
   try {
+    // 1. Locate stubs for this test (shared + specific)
+    const smokeDir = path.dirname(yamlPath);
+    const specificStubs = path.join(smokeDir, 'fixtures', name, 'wiremock');
+    const sharedStubs = path.join(smokeDir, 'fixtures', 'shared', 'wiremock');
+    
+    let hasShared = false;
+    let hasSpecific = false;
+
+    try {
+      await fs.access(path.join(sharedStubs, 'mappings'));
+      hasShared = true;
+    } catch {}
+
+    try {
+      await fs.access(path.join(specificStubs, 'mappings'));
+      hasSpecific = true;
+    } catch {}
+
+    if (stubServer) {
+      stubServer.clearStubs();
+      if (hasShared) {
+        await stubServer.loadStubs(sharedStubs, false);
+      }
+      if (hasSpecific) {
+        await stubServer.loadStubs(specificStubs, hasShared);
+      }
+    }
+
+    // 2. Run Maestro
     const args = ['test', yamlPath, '-e', `APP_ID=${config.appId}`];
+    if (stubServer) {
+      args.push('-e', `STUB_PORT=3030`);
+    }
     if (deviceId) {
       args.unshift('--udid', deviceId);
     }
@@ -244,16 +278,25 @@ async function main(): Promise<void> {
     process.exit(2);
   }
 
-  console.log(`\n🧪 Running ${yamlFiles.length} smoke test(s)...\n`);
+  console.log(`\n🧪 Running ${yamlFiles.length} smoke test(s)....\n`);
 
   // Run tests sequentially (simulators don't support parallel Maestro runs)
   const results: SmokeTestResult[] = [];
-  for (const yamlPath of yamlFiles) {
-    const name = path.basename(yamlPath, '.yaml');
-    console.log(`  ▶ ${name}...`);
-    const result = await runSmokeTest(yamlPath, config, maestroBin, sim.deviceId);
-    results.push(result);
-    console.log(`  ${result.passed ? '✅' : '❌'} ${name} (${(result.durationMs / 1000).toFixed(1)}s)`);
+  
+  // Start the stub server ONCE for all tests to avoid EADDRINUSE / TIME_WAIT
+  const stubServer = new StubServer();
+  await stubServer.start(3030);
+  
+  try {
+    for (const yamlPath of yamlFiles) {
+      const name = path.basename(yamlPath, '.yaml').replace(/-smoke$/, '');
+      console.log(`  ▶ ${name}...`);
+      const result = await runSmokeTest(yamlPath, config, maestroBin, sim.deviceId, stubServer);
+      results.push(result);
+      console.log(`  ${result.passed ? '✅' : '❌'} ${name} (${(result.durationMs / 1000).toFixed(1)}s)`);
+    }
+  } finally {
+    await stubServer.stop();
   }
 
   // Print summary
