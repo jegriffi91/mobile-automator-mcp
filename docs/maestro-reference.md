@@ -163,6 +163,61 @@ run_test(yamlPath: "flow.yaml", env: { "USERNAME": "test@example.com" })
 
 ---
 
+## Improving Recording Fidelity with `trackEventPaths`
+
+Passive polling mode infers UI interactions from hierarchy diffs, but it can miss fast interactions (especially during login flows). For critical flows, **app-side event tracking** via `trackEventPaths` provides a much more reliable signal.
+
+### How It Works
+
+When `trackEventPaths` is set on `start_recording_session`, the compile step scans captured network events for POST requests to matching URL paths. The request bodies are parsed as interaction events and merged with hierarchy-inferred interactions.
+
+### Configuration
+
+```
+start_recording_session(
+  appBundleId: "com.example.app",
+  platform: "ios",
+  trackEventPaths: ["/__track", "/api/analytics/events"]
+)
+```
+
+### Expected POST Body Format
+
+The app should POST JSON to the tracked endpoint(s) with this structure:
+
+```json
+{
+  "event": "tap",
+  "target": { "id": "login_button", "label": "Sign In" },
+  "timestamp": "2025-01-15T10:30:00.000Z"
+}
+```
+
+### When to Use
+
+> [!TIP]
+> Use `trackEventPaths` for flows where passive hierarchy polling is unreliable:
+> - **Login flows** — rapid field focus changes and text input
+> - **Multi-step wizards** — fast navigation between screens
+> - **Gesture-heavy flows** — swipes and scrolls that hierarchy diffing might miss
+
+### Domain Filtering
+
+For best results, also set `filterDomains` to scope network capture to your app's API hosts:
+
+```
+start_recording_session(
+  appBundleId: "com.example.app",
+  platform: "ios",
+  filterDomains: ["api.example.com", "localhost.proxyman.io:3031"],
+  trackEventPaths: ["/__track"]
+)
+```
+
+This reduces noise from unrelated traffic (OS analytics, third-party SDKs, etc.) and improves both recording reliability and debugging clarity.
+
+---
+
 ## Troubleshooting Generated Flows
 
 | Symptom | Likely Cause | Fix |

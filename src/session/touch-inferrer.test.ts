@@ -31,12 +31,23 @@ describe('inferInteraction', () => {
     expect(inferInteraction(sessionId, change)).toBeNull();
   });
 
-  it('should return null for a noisy diff (> threshold)', () => {
+  it('should return null for a noisy diff (> threshold) when no high-quality selectors exist', () => {
+    const manyElements = Array.from({ length: 60 }, (_, i) =>
+      makeElement({ text: `text-${i}`, role: 'staticText' }),
+    );
+    const change = makeStateChange({ elementsAdded: manyElements });
+    expect(inferInteraction(sessionId, change, { maxChangesThreshold: 50 })).toBeNull();
+  });
+
+  it('should return inferred-transition for a noisy diff when identifiable elements exist', () => {
     const manyElements = Array.from({ length: 60 }, (_, i) =>
       makeElement({ id: `el-${i}`, role: 'staticText' }),
     );
     const change = makeStateChange({ elementsAdded: manyElements });
-    expect(inferInteraction(sessionId, change, { maxChangesThreshold: 50 })).toBeNull();
+    const result = inferInteraction(sessionId, change, { maxChangesThreshold: 50 });
+    expect(result).not.toBeNull();
+    expect(result!.source).toBe('inferred-transition');
+    expect(result!.actionType).toBe('tap');
   });
 
   it('should infer a tap when elements are removed and added (navigation)', () => {
@@ -124,12 +135,15 @@ describe('inferInteraction', () => {
     );
     const change = makeStateChange({ elementsAdded: elements });
 
-    // Threshold = 3 → too many changes
-    expect(inferInteraction(sessionId, change, { maxChangesThreshold: 3 })).toBeNull();
+    // Threshold = 3 → too many changes, but best-effort finds a button with id
+    const bestEffort = inferInteraction(sessionId, change, { maxChangesThreshold: 3 });
+    expect(bestEffort).not.toBeNull();
+    expect(bestEffort!.source).toBe('inferred-transition');
 
-    // Threshold = 10 → fine
+    // Threshold = 10 → fine, normal inference
     const result = inferInteraction(sessionId, change, { maxChangesThreshold: 10 });
     expect(result).not.toBeNull();
+    expect(result!.source).toBe('inferred');
   });
 
   it('should infer a type action when elementsChanged includes a text change', () => {
@@ -525,7 +539,8 @@ describe('TouchInferrer.diagnosticCounters', () => {
 
     const status = inferrer.getStatus();
     expect(status.thresholdExceededCount).toBe(1);
-    expect(status.inferredCount).toBe(0);
+    // Best-effort inference finds an element with id, so inferredCount is 1
+    expect(status.inferredCount).toBe(1);
   });
 
   it('should track diffButNullInferenceCount when diff has changes but inference fails', async () => {

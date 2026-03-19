@@ -110,26 +110,45 @@ export async function handleStartRecording(
         input.trackEventPaths,
     );
 
-    // Snapshot Proxyman baseline so we can scope the HAR export later
-    try {
-        const baseline = await proxymanWrapper.snapshotBaseline(input.filterDomains);
-        await sessionManager.updateBaseline(sessionId, baseline);
-    } catch (error) {
-        console.error('[MCP] start_recording_session: Proxyman baseline snapshot failed (Proxyman may not be running)', error);
-        // Non-fatal: we'll still capture all traffic at compile time
-    }
+    // Start driver and Proxyman baseline concurrently — baseline is non-critical
+    // and should not block Maestro startup even if Proxyman resolution is slow
+    let baselineCaptured = false;
+    const baselinePromise = proxymanWrapper.snapshotBaseline(input.filterDomains)
+        .then(async (baseline) => {
+            await sessionManager.updateBaseline(sessionId, baseline);
+            baselineCaptured = true;
+            return baseline;
+        })
+        .catch((error) => {
+            console.error('[MCP] start_recording_session: Proxyman baseline snapshot failed (Proxyman may not be running)', error);
+            return null; // Non-fatal: we'll still capture all traffic at compile time
+        });
 
-    // Start the driver (initializes daemon if using MaestroDaemonDriver)
     await driver.start(validation.deviceId);
+    const driverReady = true;
+
+    // Await baseline result (likely already settled while driver was starting)
+    await baselinePromise;
+
     activeDrivers.set(sessionId, driver);
 
     // Start polling — driver provides the hierarchy reader
     const notifier = createPollingNotifier();
     await sessionManager.startPolling(sessionId, input.platform, input.appBundleId, driver, notifier);
+    const pollerStarted = true;
+
+    const readinessMsg = baselineCaptured
+        ? 'All systems ready'
+        : 'Ready (Proxyman baseline not available — network correlation may be less precise)';
 
     return {
         sessionId,
-        message: `Recording session ${sessionId} started for ${input.appBundleId}. Device ID: ${validation.deviceId ?? 'unknown'}. Use this session ID for subsequent tool calls.`,
+        message: `Recording session ${sessionId} started for ${input.appBundleId}. Device ID: ${validation.deviceId ?? 'unknown'}. ${readinessMsg}. Use this session ID for subsequent tool calls.`,
+        readiness: {
+            driverReady,
+            baselineCaptured,
+            pollerStarted,
+        },
     };
 }
 
@@ -564,6 +583,12 @@ export async function handleGetNetworkLogs(
         domains
     );
 
+    // Time-scope Proxyman results to this session's lifetime
+    const sessionStart = session?.startedAt ? new Date(session.startedAt).getTime() : 0;
+    const scopedProxymanEvents = sessionStart
+        ? proxymanEvents.filter((e) => new Date(e.timestamp).getTime() >= sessionStart)
+        : proxymanEvents;
+
     // Also get any events already logged in the session DB
     let dbEvents = await sessionManager.getNetworkEvents(input.sessionId);
 
@@ -575,7 +600,7 @@ export async function handleGetNetworkLogs(
     const seen = new Set<string>();
     const merged: NetworkEvent[] = [];
 
-    for (const event of [...dbEvents, ...proxymanEvents]) {
+    for (const event of [...dbEvents, ...scopedProxymanEvents]) {
         const key = `${event.url}|${event.timestamp}`;
         if (!seen.has(key)) {
             seen.add(key);
@@ -584,7 +609,7 @@ export async function handleGetNetworkLogs(
     }
 
     // Also persist Proxyman events to the session DB for future correlation
-    await sessionManager.batchLogNetworkEvents(proxymanEvents);
+    await sessionManager.batchLogNetworkEvents(scopedProxymanEvents);
 
     const limit = input.limit ?? 50;
     const limited = merged.slice(0, limit);

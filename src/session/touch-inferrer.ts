@@ -82,9 +82,21 @@ export function inferInteraction(
   const { elementsAdded, elementsRemoved, elementsChanged = [] } = stateChange;
   const totalChanges = elementsAdded.length + elementsRemoved.length + elementsChanged.length;
 
-  // Skip empty diffs (no user action) or noisy diffs (full screen transition)
   if (totalChanges === 0) return null;
-  if (totalChanges > config.maxChangesThreshold) return null;
+  if (totalChanges > config.maxChangesThreshold) {
+    // Best-effort: try to find one high-quality interactive element from the transition.
+    // This preserves screen-transition navigation (e.g., login → dashboard) that would
+    // otherwise be silently discarded.
+    const transitionTarget = findBestTapTarget(elementsRemoved)
+      ?? findBestTapTarget(elementsAdded);
+    if (transitionTarget && (transitionTarget.id || transitionTarget.accessibilityLabel)) {
+      return {
+        ...buildInteraction(sessionId, 'tap', transitionTarget, stateChange.timestamp),
+        source: 'inferred-transition' as const,
+      };
+    }
+    return null;
+  }
 
   // ── Priority 0: Text value changes → infer as 'type' action ──
   // When a text field's value changes (same element id, different text),
@@ -244,6 +256,13 @@ export class TouchInferrer {
       event: 'polling_started',
       sessionId,
       pollingIntervalMs: this.config.pollingIntervalMs,
+    });
+
+    // Capture baseline immediately — don't wait for first interval tick.
+    // This eliminates the time-zero blind spot where user interactions are
+    // invisible because no prior hierarchy exists to diff against.
+    this.pollOnce(sessionId).catch((err) => {
+      console.error('[TouchInferrer] immediate baseline poll failed (non-fatal):', err);
     });
 
     this.timer = setInterval(() => {

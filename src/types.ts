@@ -56,7 +56,7 @@ export interface UIInteraction {
     element: UIElement;
     textInput?: string;
     /** How this interaction was captured: 'dispatched' (via execute_ui_action), 'inferred' (passive touch capture), or 'tracked' (app-side event tracking) */
-    source?: 'dispatched' | 'inferred' | 'tracked';
+    source?: 'dispatched' | 'inferred' | 'inferred-transition' | 'tracked';
 }
 
 export interface UIHierarchyNode {

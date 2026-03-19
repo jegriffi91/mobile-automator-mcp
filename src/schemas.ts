@@ -309,6 +309,11 @@ export const RunTestInputSchema = z.object({
 export const StartRecordingOutputSchema = z.object({
     sessionId: z.string().describe('Unique ID for the recording session'),
     message: z.string().describe('Human-readable status message'),
+    readiness: z.object({
+        driverReady: z.boolean().describe('Whether the Maestro automation driver started successfully'),
+        baselineCaptured: z.boolean().describe('Whether the Proxyman network baseline was captured (false if Proxyman unavailable)'),
+        pollerStarted: z.boolean().describe('Whether the passive hierarchy poller started (captures UI changes)'),
+    }).optional().describe('Readiness checkpoint — indicates whether the session is fully armed for recording. Wait for all fields to be true before interacting with the app for best results.'),
 });
 
 export const StopAndCompileOutputSchema = z.object({

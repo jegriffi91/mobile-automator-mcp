@@ -27,8 +27,16 @@ const CANONICAL_CLI_PATH = '/Applications/Proxyman.app/Contents/MacOS/proxyman-c
 
 // ── CLI Resolution ──
 
-/** Cached resolved path — computed once, reused for the process lifetime */
-let resolvedCliPath: string | undefined;
+/**
+ * Cached resolved path:
+ *   undefined = not yet resolved
+ *   string = resolved successfully
+ *   null = resolution failed (negative cache — all candidates exhausted)
+ */
+let resolvedCliPath: string | null | undefined;
+
+/** Cached error message from failed resolution (used with negative cache) */
+let resolvedCliError: string | undefined;
 
 /**
  * Check whether a file exists and is executable.
@@ -72,6 +80,9 @@ async function whichBinary(name: string): Promise<string | undefined> {
  */
 export async function resolveCliPath(): Promise<string> {
   if (resolvedCliPath) return resolvedCliPath;
+  if (resolvedCliPath === null) {
+    throw new Error(resolvedCliError ?? 'Proxyman CLI not found (cached negative result)');
+  }
 
   const candidates: Array<{ source: string; path: string | undefined; reason?: string }> = [];
 
@@ -132,14 +143,16 @@ export async function resolveCliPath(): Promise<string> {
     reason: whichProxy ? 'found but not executable' : 'not in PATH',
   });
 
-  // All candidates exhausted
+  // All candidates exhausted — cache the negative result
   const details = candidates
     .map((c) => `  • ${c.source}: ${c.path ?? '(none)'} — ${c.reason}`)
     .join('\n');
-  throw new Error(
+  resolvedCliError =
     `Proxyman CLI not found. Tried ${candidates.length} candidate(s):\n${details}\n\n` +
-      'To fix: install Proxyman from https://proxyman.io or set PROXYMAN_CLI_PATH to the binary location.',
-  );
+    'To fix: install Proxyman from https://proxyman.io or set PROXYMAN_CLI_PATH to the binary location.';
+  resolvedCliPath = null;
+  console.error(`[ProxymanWrapper] CLI resolution failed (cached). ${resolvedCliError}`);
+  throw new Error(resolvedCliError);
 }
 
 /**
@@ -148,6 +161,7 @@ export async function resolveCliPath(): Promise<string> {
  */
 export function _resetResolvedCliPath(): void {
   resolvedCliPath = undefined;
+  resolvedCliError = undefined;
 }
 
 // ── Minimal HAR type definitions ──
@@ -415,3 +429,8 @@ export class ProxymanWrapper {
     }
   }
 }
+
+// ── Eager resolution at module load ──
+// Fire-and-forget: pre-cache the CLI path so the first real call is instant.
+// Errors are swallowed because the resolution result (positive or negative) is cached.
+resolveCliPath().catch(() => {});

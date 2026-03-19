@@ -24,7 +24,7 @@ Test script generation from recorded session data. Correlates UI interactions wi
 
 ## Coding Standards
 
-- **Correlator:** The time window is configurable. Default is 5000ms. A network event is attached to the most recent preceding UI action if `event.timestamp - action.timestamp <= windowMs`.
+- **Correlator:** The time window is configurable. Default is 3000ms. A network event is attached to the most recent preceding UI action if `event.timestamp - action.timestamp <= windowMs`.
 - **Generator:** Output must be valid Maestro YAML. Use string concatenation, not a YAML library, to maintain full control over formatting and comments.
 - **StubWriter:** WireMock stub filenames are derived from `METHOD_path.json` (e.g. `post_api_login.json`). Response fixtures go in `__files/`. For `include`/`exclude` mocking modes, a `_proxy_fallback.json` stub is generated.
 - All three files export a single class with a clear public API. Keep internal helpers as private methods.
