@@ -1,0 +1,19 @@
+# A3: Login Server Error (Stubbed API — 500)
+# Verifies: WireMock stub → POST /api/login returns 500 → network error toast appears
+appId: io.appcision.project-doombot
+---
+- clearState
+- launchApp
+- tapOn:
+    id: "login_username_field"
+- inputText: "testuser"
+- tapOn:
+    id: "login_submit_button"
+- extendedWaitUntil:
+    visible:
+      id: "login_error_toast"
+    timeout: 10000
+- assertVisible:
+    id: "login_error_toast"
+- assertVisible:
+    id: "login_submit_button"

@@ -1,0 +1,37 @@
+# D1: Settings Sheet Open/Close
+# Verifies: Settings gear opens sheet, swipe or Done dismisses it
+appId: io.appcision.project-doombot
+---
+- clearState
+- launchApp
+- tapOn:
+    id: "login_username_field"
+- inputText: "admin"
+- tapOn:
+    id: "login_submit_button"
+- extendedWaitUntil:
+    visible:
+      id: "tab_doom"
+    timeout: 15000
+# Tap settings gear
+- tapOn:
+    id: "settings_button"
+- extendedWaitUntil:
+    visible:
+      id: "settings_version_label"
+    timeout: 5000
+- assertVisible:
+    id: "settings_version_label"
+- assertVisible:
+    id: "settings_env_label"
+- assertVisible:
+    id: "settings_latency_label"
+# Dismiss by tapping Done
+- tapOn:
+    id: "settings_done_button"
+- extendedWaitUntil:
+    visible:
+      id: "tab_doom"
+    timeout: 5000
+- assertVisible:
+    id: "tab_doom"

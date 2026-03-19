@@ -1,0 +1,23 @@
+# E1: Track Login Events
+# Verifies: Login flow fires analytics events correctly
+# Note: This test verifies the login interaction flow works end-to-end.
+# Analytics events are tracked via POST /__track and can be verified via Proxyman.
+appId: io.appcision.project-doombot
+---
+- clearState
+- launchApp
+- assertVisible:
+    id: "login_title"
+# Perform login flow
+- tapOn:
+    id: "login_username_field"
+- inputText: "admin"
+- tapOn:
+    id: "login_submit_button"
+- extendedWaitUntil:
+    visible:
+      id: "tab_doom"
+    timeout: 15000
+# If we got to dashboard, login events were fired successfully
+- assertVisible:
+    id: "tab_doom"

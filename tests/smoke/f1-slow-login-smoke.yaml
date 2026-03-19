@@ -1,0 +1,20 @@
+# F1: Slow Login (3s Stubbed Delay)
+# Verifies: Maestro waits for slow API response instead of timing out.
+# WireMock stub adds 3000ms fixedDelayMilliseconds to login response.
+# The YAML uses extendedWaitUntil with 15s timeout to handle the delay gracefully.
+appId: io.appcision.project-doombot
+---
+- clearState
+- launchApp
+- tapOn:
+    id: "login_username_field"
+- inputText: "admin"
+- tapOn:
+    id: "login_submit_button"
+# Must wait up to 15s because the stub adds 3s server delay + app delay
+- extendedWaitUntil:
+    visible:
+      id: "tab_doom"
+    timeout: 15000
+- assertVisible:
+    id: "tab_doom"

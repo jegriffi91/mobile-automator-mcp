@@ -1,0 +1,32 @@
+# C1: Swipe to Delete Topic
+# Verifies: Swipe left on a row reveals delete action, tapping removes it
+appId: io.appcision.project-doombot
+---
+- clearState
+- launchApp
+- tapOn:
+    id: "login_username_field"
+- inputText: "admin"
+- tapOn:
+    id: "login_submit_button"
+- extendedWaitUntil:
+    visible:
+      id: "doom_topic_list"
+    timeout: 15000
+- assertVisible:
+    id: "doom_topic_row_the_metal_face"
+# Swipe left on the first row
+- swipe:
+    from:
+      id: "doom_topic_row_the_metal_face"
+    direction: "LEFT"
+# Tap the destructive delete button
+- tapOn:
+    text: "Remove"
+# Row should be gone, undo banner should appear
+- extendedWaitUntil:
+    visible:
+      id: "undo_banner"
+    timeout: 5000
+- assertVisible:
+    id: "undo_banner"

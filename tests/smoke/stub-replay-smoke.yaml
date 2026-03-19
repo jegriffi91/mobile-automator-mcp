@@ -1,0 +1,10 @@
+# Smoke test: Verify the WireMock stub server replay path works.
+# This test launches the app and just verifies the login screen is reachable.
+# The real validation is that run_test successfully starts/stops the stub server.
+# Run via: npx tsx tests/smoke/run-smoke.ts (uses fixtures/wiremock/ stubs)
+appId: ${APP_ID}
+---
+- clearState
+- launchApp
+- assertVisible:
+    id: "login_submit_button"

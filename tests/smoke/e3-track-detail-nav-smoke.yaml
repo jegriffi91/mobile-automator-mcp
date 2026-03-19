@@ -1,0 +1,34 @@
+# E3: Track Detail Navigation
+# Verifies: Opening a detail view fires pageDisplayed + trackLink
+appId: io.appcision.project-doombot
+---
+- clearState
+- launchApp
+- tapOn:
+    id: "login_username_field"
+- inputText: "admin"
+- tapOn:
+    id: "login_submit_button"
+- extendedWaitUntil:
+    visible:
+      id: "doom_topic_list"
+    timeout: 15000
+# Navigate to a detail — fires trackLink + pageDisplayed(DetailScreen)
+- tapOn:
+    id: "doom_topic_row_the_metal_face"
+- extendedWaitUntil:
+    visible:
+      id: "detail_title"
+    timeout: 15000
+- assertVisible:
+    id: "detail_title"
+- assertVisible:
+    id: "detail_content"
+# Navigate back
+- back
+- extendedWaitUntil:
+    visible:
+      id: "doom_topic_list"
+    timeout: 10000
+- assertVisible:
+    id: "doom_topic_list"

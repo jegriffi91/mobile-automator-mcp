@@ -1,0 +1,28 @@
+# Smoke test: Login screen assertions + input interaction (no network required).
+# Validates the app launches, the login UI elements are present and interactive,
+# and text input works correctly. Does NOT attempt login (requires API backend).
+appId: ${APP_ID}
+---
+- clearState
+- launchApp
+
+# ── Assert login screen elements ──
+- assertVisible:
+    id: "login_title"
+- assertVisible:
+    id: "login_subtitle"
+- assertVisible:
+    id: "login_submit_button"
+- assertVisible:
+    id: "login_username_field"
+
+# ── Verify text input works ──
+- tapOn:
+    id: "login_username_field"
+- inputText: "MF DOOM"
+- assertVisible:
+    text: "MF DOOM"
+
+# ── Verify submit button is tappable (tap but don't assert post-login) ──
+- tapOn:
+    id: "login_submit_button"

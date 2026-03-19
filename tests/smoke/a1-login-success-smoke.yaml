@@ -1,0 +1,17 @@
+# A1: Login Success (Stubbed API)
+# Verifies: WireMock stub → POST /api/login returns success → app transitions to Dashboard
+appId: io.appcision.project-doombot
+---
+- clearState
+- launchApp
+- tapOn:
+    id: "login_username_field"
+- inputText: "admin"
+- tapOn:
+    id: "login_submit_button"
+- extendedWaitUntil:
+    visible:
+      id: "tab_doom"
+    timeout: 15000
+- assertVisible:
+    id: "tab_doom"

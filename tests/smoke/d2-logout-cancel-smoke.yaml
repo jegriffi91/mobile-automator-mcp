@@ -1,0 +1,32 @@
+# D2: Logout Confirmation — Cancel
+# Verifies: Logout alert appears, Cancel keeps user on settings
+appId: io.appcision.project-doombot
+---
+- clearState
+- launchApp
+- tapOn:
+    id: "login_username_field"
+- inputText: "admin"
+- tapOn:
+    id: "login_submit_button"
+- extendedWaitUntil:
+    visible:
+      id: "tab_doom"
+    timeout: 15000
+- tapOn:
+    id: "settings_button"
+- extendedWaitUntil:
+    visible:
+      id: "settings_logout_button"
+    timeout: 5000
+- tapOn:
+    id: "settings_logout_button"
+# Alert should appear
+- assertVisible:
+    text: "Are you sure you want to leave the lair?"
+# Tap Cancel
+- tapOn:
+    text: "Cancel"
+# Should still be on settings
+- assertVisible:
+    id: "settings_version_label"

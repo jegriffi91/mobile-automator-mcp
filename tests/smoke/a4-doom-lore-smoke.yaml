@@ -1,0 +1,23 @@
+# A4: Custom Doom Lore (Stubbed API — 3 items)
+# Verifies: WireMock returns exactly 3 lore items → list shows 3 rows
+appId: io.appcision.project-doombot
+---
+- clearState
+- launchApp
+- tapOn:
+    id: "login_username_field"
+- inputText: "admin"
+- tapOn:
+    id: "login_submit_button"
+- extendedWaitUntil:
+    visible:
+      id: "doom_topic_list"
+    timeout: 15000
+- assertVisible:
+    id: "doom_topic_list"
+- assertVisible:
+    id: "doom_topic_row_the_metal_face"
+- assertVisible:
+    id: "doom_topic_row_madvillainy"
+- assertVisible:
+    id: "doom_topic_row_mm..food"

@@ -1,0 +1,16 @@
+# B1: Login with Empty Username
+# Verifies: Tapping submit with no input → error toast or validation
+appId: io.appcision.project-doombot
+---
+- clearState
+- launchApp
+- assertVisible:
+    id: "login_username_field"
+- tapOn:
+    id: "login_submit_button"
+- extendedWaitUntil:
+    visible:
+      id: "login_error_toast"
+    timeout: 10000
+- assertVisible:
+    id: "login_error_toast"

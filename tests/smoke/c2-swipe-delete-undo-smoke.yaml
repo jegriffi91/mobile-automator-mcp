@@ -1,0 +1,37 @@
+# C2: Swipe Delete Undo
+# Verifies: After deleting, undo banner appears, tapping undo restores the row
+appId: io.appcision.project-doombot
+---
+- clearState
+- launchApp
+- tapOn:
+    id: "login_username_field"
+- inputText: "admin"
+- tapOn:
+    id: "login_submit_button"
+- extendedWaitUntil:
+    visible:
+      id: "doom_topic_list"
+    timeout: 15000
+- assertVisible:
+    id: "doom_topic_row_the_metal_face"
+- swipe:
+    from:
+      id: "doom_topic_row_the_metal_face"
+    direction: "LEFT"
+- tapOn:
+    text: "Remove"
+- extendedWaitUntil:
+    visible:
+      id: "doom_undo_button"
+    timeout: 5000
+# Tap undo
+- tapOn:
+    id: "doom_undo_button"
+# Row should reappear
+- extendedWaitUntil:
+    visible:
+      id: "doom_topic_row_the_metal_face"
+    timeout: 5000
+- assertVisible:
+    id: "doom_topic_row_the_metal_face"
