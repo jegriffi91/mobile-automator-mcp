@@ -87,7 +87,7 @@ function parseCsvRow(line: string): CsvRow | null {
 /**
  * Convert a parsed CSV row into a UIHierarchyNode (without children — those are assembled later).
  */
-function rowToNode(row: CsvRow): UIHierarchyNode & { _elementNum: number; _parentNum: number } {
+function rowToNode(row: CsvRow): UIHierarchyNode {
   const attrs = row.attributes;
 
   const id = attrs['resource-id'] || undefined;
@@ -101,8 +101,6 @@ function rowToNode(row: CsvRow): UIHierarchyNode & { _elementNum: number; _paren
     text,
     role,
     children: [],
-    _elementNum: row.elementNum,
-    _parentNum: row.parentNum,
   };
 }
 
@@ -110,7 +108,8 @@ function rowToNode(row: CsvRow): UIHierarchyNode & { _elementNum: number; _paren
  * Parse the full CSV output from `inspect_view_hierarchy` into a UIHierarchyNode tree.
  *
  * The first line is the header row and is skipped.
- * Nodes are assembled into a tree using parent_num references.
+ * Nodes are assembled into a tree using the depth level, because element_num and parent_num
+ * are known to be duplicated/reused in Maestro's iOS 18 (XCUITest) hierarchy dumps.
  */
 export function parseCsvHierarchy(csv: string): UIHierarchyNode {
   const lines = csv.split('\n').filter((l) => l.trim() !== '');
@@ -130,31 +129,29 @@ export function parseCsvHierarchy(csv: string): UIHierarchyNode {
     return { role: 'Application', children: [] };
   }
 
-  // Convert rows to nodes, indexed by element_num
-  const nodeMap = new Map<number, UIHierarchyNode & { _elementNum: number; _parentNum: number }>();
-  for (const row of rows) {
-    nodeMap.set(row.elementNum, rowToNode(row));
-  }
-
-  // Build tree by linking children to parents
+  // Use a stack-based parser to track nesting by depth, completely ignoring
+  // element_num and parent_num, which are buggy and not unique on iOS.
+  const stack: UIHierarchyNode[] = [];
   let root: UIHierarchyNode | null = null;
 
-  for (const [, node] of nodeMap) {
-    const parent = nodeMap.get(node._parentNum);
-    if (parent) {
-      parent.children.push(node);
-    } else {
-      // No parent found — this is a root node (or top-level)
+  for (const row of rows) {
+    const node = rowToNode(row);
+    const depth = row.depth;
+
+    if (depth === 0) {
       if (!root) {
         root = node;
       }
+      stack[0] = node;
+    } else {
+      // Find the parent node at depth - 1
+      const parent = stack[depth - 1];
+      if (parent) {
+        parent.children.push(node);
+      }
+      // Update the stack at current depth with this node
+      stack[depth] = node;
     }
-  }
-
-  // Clean up internal fields before returning
-  for (const [, node] of nodeMap) {
-    delete (node as unknown as Record<string, unknown>)['_elementNum'];
-    delete (node as unknown as Record<string, unknown>)['_parentNum'];
   }
 
   const result = root || { role: 'Application', children: [] };
