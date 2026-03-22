@@ -41,7 +41,7 @@ export interface AutomationDriver {
     ): Promise<{ success: boolean; error?: string }>;
 
     // ── Test execution ──
-    runTest(yamlPath: string, env?: Record<string, string>): Promise<{ passed: boolean; output: string; durationMs: number }>;
+    runTest(yamlPath: string, env?: Record<string, string>, debugOutput?: string): Promise<{ passed: boolean; output: string; durationMs: number }>;
 
     // ── Setup & teardown ──
     validateSetup(): Promise<void>;

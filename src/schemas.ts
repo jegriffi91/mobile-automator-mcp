@@ -257,6 +257,10 @@ export const RegisterSegmentInputSchema = z.object({
 
 export const RunTestInputSchema = z.object({
     yamlPath: z.string().describe('Path to the Maestro YAML test file'),
+    debugOutput: z
+        .string()
+        .optional()
+        .describe('Path to a directory or filename where Maestro should dump debug output (screenshots, hierarchies, logs)'),
     stubsDir: z
         .string()
         .optional()

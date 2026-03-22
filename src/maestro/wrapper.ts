@@ -342,13 +342,19 @@ export class MaestroWrapper {
      * @param yamlPath - Path to the Maestro YAML test file
      * @returns Test result with pass/fail, output, and duration
      */
-    async runTest(yamlPath: string, env?: Record<string, string>): Promise<{ passed: boolean; output: string; durationMs: number }> {
+    async runTest(yamlPath: string, env?: Record<string, string>, debugOutput?: string): Promise<{ passed: boolean; output: string; durationMs: number }> {
         const start = Date.now();
         const envArgs = Object.entries(env ?? {}).flatMap(([k, v]) => ['-e', `${k}=${v}`]);
+        const runArgs = ['test', ...envArgs];
+        if (debugOutput) {
+            runArgs.push('--debug-output', debugOutput);
+        }
+        runArgs.push(yamlPath);
+        
         try {
             const { stdout, stderr } = await execFileAsync(
                 this.maestroBin,
-                this.buildArgs(['test', ...envArgs, yamlPath]),
+                this.buildArgs(runArgs),
                 {
                     env: getExecEnv(),
                     maxBuffer: 10 * 1024 * 1024, // 10MB buffer for verbose output

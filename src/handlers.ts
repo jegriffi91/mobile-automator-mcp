@@ -823,7 +823,7 @@ export async function handleRunTest(
         }
 
         // Step 3: Run Maestro test
-        const result = await driver.runTest(input.yamlPath, input.env);
+        const result = await driver.runTest(input.yamlPath, input.env, input.debugOutput);
 
         // Step 4: Stop profiling and collect metrics (non-fatal on failure)
         if (profiler?.isActive) {
