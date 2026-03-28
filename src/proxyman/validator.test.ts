@@ -75,6 +75,41 @@ describe('PayloadValidator', () => {
         expect(result.matched).toBe(true);
     });
 
+    it('should pass when expected is undefined', () => {
+        const result = PayloadValidator.validate(
+            { name: 'Alice' },
+            { name: undefined as unknown as string }
+        );
+        expect(result.matched).toBe(true);
+    });
+
+    it('should report mismatch when actual is null', () => {
+        const result = PayloadValidator.validate(
+            { name: null as unknown as string },
+            { name: 'Alice' }
+        );
+        expect(result.matched).toBe(false);
+        expect(result.mismatches[0]).toContain('name: expected value but got null');
+    });
+
+    it('should report mismatch when actual is undefined', () => {
+        const result = PayloadValidator.validate(
+            { name: undefined as unknown as string },
+            { name: 'Alice' }
+        );
+        expect(result.matched).toBe(false);
+        expect(result.mismatches[0]).toContain('name: expected value but got undefined');
+    });
+
+    it('should report mismatch when actual is null at root', () => {
+        const result = PayloadValidator.validate(
+            null as unknown as Record<string, unknown>,
+            { name: 'Alice' }
+        );
+        expect(result.matched).toBe(false);
+        expect(result.mismatches[0]).toContain('<root>: expected value but got null');
+    });
+
     it('should report type mismatches (object vs primitive)', () => {
         const result = PayloadValidator.validate(
             { data: 'hello' },
