@@ -21,6 +21,18 @@ import { proxymanWrapper, PayloadValidator } from './proxyman/index.js';
 import { Correlator, YamlGenerator, StubWriter } from './synthesis/index.js';
 import { TimelineBuilder } from './synthesis/timeline-builder.js';
 import { SegmentFingerprint, SegmentRegistry } from './segments/index.js';
+import { FlowRegistry } from './flows/index.js';
+import {
+    buildIosApp,
+    installIosApp,
+    uninstallIosApp,
+    bootIosSimulator,
+    buildAndroidApp,
+    installAndroidApp,
+    uninstallAndroidApp,
+} from './build/index.js';
+import { takeIosScreenshot, takeAndroidScreenshot } from './screenshot/index.js';
+import { runIosUnitTests, runAndroidUnitTests } from './testing/index.js';
 import { StubServer } from './wiremock/index.js';
 import { extractTrackEvents } from './session/track-event-extractor.js';
 import type { MockingConfig } from './synthesis/index.js';
@@ -49,6 +61,22 @@ import type {
     ListDevicesOutput,
     GetSessionTimelineInput,
     GetSessionTimelineOutput,
+    ListFlowsInput,
+    ListFlowsOutput,
+    RunFlowInput,
+    RunFlowOutput,
+    BuildAppInput,
+    BuildAppOutput,
+    InstallAppInput,
+    InstallAppOutput,
+    UninstallAppInput,
+    UninstallAppOutput,
+    BootSimulatorInput,
+    BootSimulatorOutput,
+    TakeScreenshotInput,
+    TakeScreenshotOutput,
+    RunUnitTestsInput,
+    RunUnitTestsOutput,
 } from './schemas.js';
 
 const execFileAsync = promisify(execFile);
@@ -1063,5 +1091,302 @@ export async function handleGetSessionTimeline(
         },
         gaps,
         recentPolls,
+    };
+}
+
+// ---- list_flows & run_flow ----
+
+function resolveFlowsDir(flowsDir: string | undefined): string {
+    return flowsDir ?? path.join(process.cwd(), 'flows');
+}
+
+export async function handleListFlows(input: ListFlowsInput): Promise<ListFlowsOutput> {
+    const flowsDir = resolveFlowsDir(input.flowsDir);
+    console.error(`[MCP] list_flows: scanning ${flowsDir}`);
+
+    try {
+        const flows = await FlowRegistry.list(flowsDir);
+        console.error(`[MCP] list_flows: found ${flows.length} flow(s)`);
+        return { flows, flowsDir, total: flows.length };
+    } catch (err) {
+        if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') {
+            throw new Error(
+                `Flows directory not found: ${flowsDir}. ` +
+                `Create it and add <name>.yaml files, or pass a different flowsDir.`,
+            );
+        }
+        throw err;
+    }
+}
+
+export async function handleRunFlow(input: RunFlowInput): Promise<RunFlowOutput> {
+    const flowsDir = resolveFlowsDir(input.flowsDir);
+    console.error(`[MCP] run_flow: resolving "${input.name}" in ${flowsDir}`);
+
+    const flow = await FlowRegistry.resolve(flowsDir, input.name);
+    const appliedParams = FlowRegistry.applyParams(flow, input.params);
+
+    console.error(
+        `[MCP] run_flow: executing ${flow.path} with ${Object.keys(appliedParams).length} param(s)`,
+    );
+
+    const result = await handleRunTest({
+        yamlPath: flow.path,
+        env: appliedParams,
+        debugOutput: input.debugOutput,
+        stubsDir: input.stubsDir,
+        stubServerPort: input.stubServerPort,
+        platform: input.platform,
+    });
+
+    return {
+        passed: result.passed,
+        flowName: flow.name,
+        flowPath: flow.path,
+        appliedParams,
+        output: result.output,
+        stubServerPort: result.stubServerPort,
+        durationMs: result.durationMs,
+    };
+}
+
+// ---- build_app ----
+export async function handleBuildApp(input: BuildAppInput): Promise<BuildAppOutput> {
+    console.error(`[MCP] build_app: platform=${input.platform}`);
+
+    if (input.platform === 'ios') {
+        if (!input.scheme) {
+            throw new Error('iOS build requires "scheme"');
+        }
+        if (!input.workspacePath && !input.projectPath) {
+            throw new Error('iOS build requires "workspacePath" or "projectPath"');
+        }
+        const result = await buildIosApp({
+            workspacePath: input.workspacePath,
+            projectPath: input.projectPath,
+            scheme: input.scheme,
+            configuration: input.configuration,
+            destination: input.destination,
+            derivedDataPath: input.derivedDataPath,
+            timeoutMs: input.timeoutMs,
+        });
+        return {
+            passed: result.passed,
+            platform: 'ios',
+            appPath: result.appPath,
+            bundleId: result.bundleId,
+            derivedDataPath: result.derivedDataPath,
+            durationMs: result.durationMs,
+            output: result.output,
+        };
+    }
+
+    if (!input.projectPath) {
+        throw new Error('Android build requires "projectPath" (Gradle project root)');
+    }
+    const result = await buildAndroidApp({
+        projectPath: input.projectPath,
+        module: input.module,
+        variant: input.variant,
+        timeoutMs: input.timeoutMs,
+    });
+    return {
+        passed: result.passed,
+        platform: 'android',
+        appPath: result.apkPath,
+        module: result.module,
+        variant: result.variant,
+        durationMs: result.durationMs,
+        output: result.output,
+    };
+}
+
+// ---- install_app ----
+export async function handleInstallApp(input: InstallAppInput): Promise<InstallAppOutput> {
+    console.error(
+        `[MCP] install_app: platform=${input.platform}, device=${input.deviceUdid}, app=${input.appPath}`,
+    );
+
+    if (input.platform === 'ios') {
+        const result = await installIosApp({
+            deviceUdid: input.deviceUdid,
+            appPath: input.appPath,
+        });
+        return {
+            passed: result.passed,
+            platform: 'ios',
+            deviceUdid: input.deviceUdid,
+            bundleId: result.bundleId,
+            durationMs: result.durationMs,
+            output: result.output,
+        };
+    }
+
+    const result = await installAndroidApp({
+        deviceUdid: input.deviceUdid,
+        apkPath: input.appPath,
+    });
+    return {
+        passed: result.passed,
+        platform: 'android',
+        deviceUdid: input.deviceUdid,
+        durationMs: result.durationMs,
+        output: result.output,
+    };
+}
+
+// ---- uninstall_app ----
+export async function handleUninstallApp(
+    input: UninstallAppInput,
+): Promise<UninstallAppOutput> {
+    console.error(
+        `[MCP] uninstall_app: platform=${input.platform}, device=${input.deviceUdid}, bundleId=${input.bundleId}`,
+    );
+
+    if (input.platform === 'ios') {
+        const result = await uninstallIosApp({
+            deviceUdid: input.deviceUdid,
+            bundleId: input.bundleId,
+        });
+        return {
+            passed: result.passed,
+            platform: 'ios',
+            deviceUdid: input.deviceUdid,
+            bundleId: input.bundleId,
+            durationMs: result.durationMs,
+            output: result.output,
+        };
+    }
+
+    const result = await uninstallAndroidApp({
+        deviceUdid: input.deviceUdid,
+        packageName: input.bundleId,
+    });
+    return {
+        passed: result.passed,
+        platform: 'android',
+        deviceUdid: input.deviceUdid,
+        bundleId: input.bundleId,
+        durationMs: result.durationMs,
+        output: result.output,
+    };
+}
+
+// ---- boot_simulator ----
+export async function handleBootSimulator(
+    input: BootSimulatorInput,
+): Promise<BootSimulatorOutput> {
+    console.error(
+        `[MCP] boot_simulator: platform=${input.platform}, device=${input.deviceUdid}`,
+    );
+
+    if (input.platform === 'android') {
+        throw new Error(
+            'Android emulator booting is not yet supported. ' +
+            'Start your emulator manually (e.g., `emulator -avd <name>`), then continue.',
+        );
+    }
+
+    const result = await bootIosSimulator({
+        deviceUdid: input.deviceUdid,
+        openSimulatorApp: input.openSimulatorApp,
+        timeoutMs: input.timeoutMs,
+    });
+    return {
+        passed: result.passed,
+        platform: 'ios',
+        deviceUdid: result.deviceUdid,
+        state: result.state,
+        alreadyBooted: result.alreadyBooted,
+        durationMs: result.durationMs,
+        output: result.output,
+    };
+}
+
+// ---- take_screenshot ----
+export async function handleTakeScreenshot(
+    input: TakeScreenshotInput,
+): Promise<TakeScreenshotOutput> {
+    console.error(
+        `[MCP] take_screenshot: platform=${input.platform}, device=${input.deviceUdid}`,
+    );
+
+    const capture = input.platform === 'ios' ? takeIosScreenshot : takeAndroidScreenshot;
+    const result = await capture({
+        deviceUdid: input.deviceUdid,
+        outputPath: input.outputPath,
+        timeoutMs: input.timeoutMs,
+    });
+
+    return {
+        passed: result.passed,
+        platform: input.platform,
+        deviceUdid: input.deviceUdid,
+        imagePath: result.imagePath,
+        sizeBytes: result.sizeBytes,
+        durationMs: result.durationMs,
+        output: result.output,
+    };
+}
+
+// ---- run_unit_tests ----
+export async function handleRunUnitTests(
+    input: RunUnitTestsInput,
+): Promise<RunUnitTestsOutput> {
+    console.error(`[MCP] run_unit_tests: platform=${input.platform}`);
+
+    if (input.platform === 'ios') {
+        if (!input.scheme) {
+            throw new Error('iOS unit tests require "scheme"');
+        }
+        if (!input.workspacePath && !input.projectPath) {
+            throw new Error('iOS unit tests require "workspacePath" or "projectPath"');
+        }
+        const result = await runIosUnitTests({
+            workspacePath: input.workspacePath,
+            projectPath: input.projectPath,
+            scheme: input.scheme,
+            destination: input.destination,
+            configuration: input.configuration,
+            testPlan: input.testPlan,
+            onlyTesting: input.onlyTesting,
+            timeoutMs: input.timeoutMs,
+        });
+        return {
+            passed: result.passed,
+            platform: 'ios',
+            totalTests: result.totalTests,
+            passedTests: result.passedTests,
+            failedTests: result.failedTests,
+            skippedTests: result.skippedTests,
+            failures: result.failures,
+            durationMs: result.durationMs,
+            resultBundlePath: result.resultBundlePath,
+            output: result.output,
+        };
+    }
+
+    if (!input.projectPath) {
+        throw new Error('Android unit tests require "projectPath" (Gradle project root)');
+    }
+    const result = await runAndroidUnitTests({
+        projectPath: input.projectPath,
+        module: input.module,
+        variant: input.variant,
+        gradleTask: input.gradleTask,
+        testFilter: input.testFilter,
+        timeoutMs: input.timeoutMs,
+    });
+    return {
+        passed: result.passed,
+        platform: 'android',
+        totalTests: result.totalTests,
+        passedTests: result.passedTests,
+        failedTests: result.failedTests,
+        skippedTests: result.skippedTests,
+        failures: result.failures,
+        durationMs: result.durationMs,
+        reportDir: result.reportDir,
+        output: result.output,
     };
 }

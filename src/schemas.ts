@@ -255,6 +255,218 @@ export const RegisterSegmentInputSchema = z.object({
         .describe('Path to registry.json (defaults to ./segments/registry.json)'),
 });
 
+export const BuildAppInputSchema = z.object({
+    platform: z.enum(['ios', 'android']).describe('Target mobile platform'),
+    workspacePath: z
+        .string()
+        .optional()
+        .describe(
+            'iOS only: Absolute path to a .xcworkspace. Takes precedence over projectPath.',
+        ),
+    projectPath: z
+        .string()
+        .optional()
+        .describe(
+            'Absolute path to the project. iOS: .xcodeproj (required if workspacePath omitted). ' +
+            'Android: Gradle project root containing ./gradlew (required).',
+        ),
+    scheme: z
+        .string()
+        .optional()
+        .describe('iOS only: Xcode scheme name. Required for iOS builds.'),
+    configuration: z
+        .string()
+        .optional()
+        .describe('iOS only: Build configuration (e.g., "Debug", "Release"). Default: "Debug".'),
+    destination: z
+        .string()
+        .optional()
+        .describe(
+            'iOS only: xcodebuild -destination value. Default: "generic/platform=iOS Simulator".',
+        ),
+    derivedDataPath: z
+        .string()
+        .optional()
+        .describe(
+            'iOS only: Path for Xcode build artifacts. Default: tmpdir/mobile-automator-build.',
+        ),
+    module: z
+        .string()
+        .optional()
+        .describe('Android only: Gradle module name. Default: "app".'),
+    variant: z
+        .string()
+        .optional()
+        .describe('Android only: Build variant (e.g., "debug", "release"). Default: "debug".'),
+    timeoutMs: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe('Maximum build duration in ms. Default: 900000 (15 minutes).'),
+});
+
+export const InstallAppInputSchema = z.object({
+    platform: z.enum(['ios', 'android']).describe('Target mobile platform'),
+    deviceUdid: z.string().describe('Target device UDID (from list_devices)'),
+    appPath: z
+        .string()
+        .describe('Absolute path to the .app bundle (iOS) or .apk file (Android) to install'),
+});
+
+export const UninstallAppInputSchema = z.object({
+    platform: z.enum(['ios', 'android']).describe('Target mobile platform'),
+    deviceUdid: z.string().describe('Target device UDID (from list_devices)'),
+    bundleId: z
+        .string()
+        .describe('iOS bundle identifier or Android package name of the app to remove'),
+});
+
+export const BootSimulatorInputSchema = z.object({
+    platform: z.enum(['ios', 'android']).describe('Target mobile platform (Android booting is not yet supported)'),
+    deviceUdid: z.string().describe('Simulator UDID to boot (from list_devices)'),
+    openSimulatorApp: z
+        .boolean()
+        .optional()
+        .describe('iOS only: open Simulator.app to surface the UI. Default: true.'),
+    timeoutMs: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe('Max wait in ms for the device to reach Booted state. Default: 120000.'),
+});
+
+export const TakeScreenshotInputSchema = z.object({
+    platform: z.enum(['ios', 'android']).describe('Target mobile platform'),
+    deviceUdid: z.string().describe('UDID of the booted simulator or emulator (from list_devices)'),
+    outputPath: z
+        .string()
+        .optional()
+        .describe(
+            'Absolute path where the PNG should be written. If omitted, a timestamped file is created under ' +
+            'tmpdir/mobile-automator-screenshots/.',
+        ),
+    timeoutMs: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe('Max wait in ms for the capture to complete. Default: 30000.'),
+});
+
+export const RunUnitTestsInputSchema = z.object({
+    platform: z.enum(['ios', 'android']).describe('Target mobile platform'),
+    workspacePath: z
+        .string()
+        .optional()
+        .describe('iOS only: Absolute path to a .xcworkspace. Takes precedence over projectPath.'),
+    projectPath: z
+        .string()
+        .optional()
+        .describe(
+            'Absolute path to the project. iOS: .xcodeproj (required if workspacePath omitted). ' +
+            'Android: Gradle project root containing ./gradlew (required).',
+        ),
+    scheme: z
+        .string()
+        .optional()
+        .describe('iOS only: Xcode scheme name. Required for iOS.'),
+    destination: z
+        .string()
+        .optional()
+        .describe(
+            'iOS only: xcodebuild -destination value. Defaults to the iOS Simulator for the first matching runtime.',
+        ),
+    configuration: z
+        .string()
+        .optional()
+        .describe('iOS only: Build configuration (e.g., "Debug", "Release"). Default: "Debug".'),
+    testPlan: z
+        .string()
+        .optional()
+        .describe('iOS only: Optional xcodebuild -testPlan name to run a specific test plan.'),
+    onlyTesting: z
+        .array(z.string())
+        .optional()
+        .describe(
+            'iOS only: Array of test identifiers to restrict the run. Each entry maps to xcodebuild ' +
+            '-only-testing:<Target>/<Class>[/<Method>].',
+        ),
+    module: z
+        .string()
+        .optional()
+        .describe('Android only: Gradle module name. Default: "app".'),
+    variant: z
+        .string()
+        .optional()
+        .describe('Android only: Build variant (e.g., "debug", "release"). Default: "debug".'),
+    gradleTask: z
+        .string()
+        .optional()
+        .describe(
+            'Android only: Explicit Gradle task (e.g., "test", "connectedCheck"). Default: ' +
+            'test<Variant>UnitTest (derived from variant).',
+        ),
+    testFilter: z
+        .string()
+        .optional()
+        .describe(
+            'Android only: Value forwarded to `--tests` (e.g., "com.example.MyTest" or "com.example.*"). ' +
+            'Omit to run all tests.',
+        ),
+    timeoutMs: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe('Max test-run duration in ms. Default: 1800000 (30 minutes).'),
+});
+
+export const ListFlowsInputSchema = z.object({
+    flowsDir: z
+        .string()
+        .optional()
+        .describe(
+            'Directory containing flow .yaml files (default: ./flows relative to the MCP server\'s working directory). ' +
+            'Optional _manifest.json in this directory adds descriptions, tags, and param specs.',
+        ),
+});
+
+export const RunFlowInputSchema = z.object({
+    name: z.string().describe('Flow name (the filename without the .yaml suffix)'),
+    flowsDir: z
+        .string()
+        .optional()
+        .describe('Directory containing flow .yaml files (default: ./flows)'),
+    params: z
+        .record(z.string())
+        .optional()
+        .describe(
+            'Parameters forwarded to Maestro as environment variables (-e KEY=VALUE). ' +
+            'Referenced inside the flow YAML as ${KEY}. Manifest-declared params with ' +
+            'defaults are applied automatically when omitted.',
+        ),
+    platform: z
+        .enum(['ios', 'android'])
+        .optional()
+        .describe('Target platform (default: ios)'),
+    debugOutput: z
+        .string()
+        .optional()
+        .describe('Path where Maestro should dump debug output (screenshots, hierarchies, logs)'),
+    stubsDir: z
+        .string()
+        .optional()
+        .describe(
+            'Optional WireMock stubs root directory. If provided, a stub server is started for the flow run.',
+        ),
+    stubServerPort: z
+        .number()
+        .optional()
+        .describe('Port for the optional stub server (default: auto-select)'),
+});
+
 export const RunTestInputSchema = z.object({
     yamlPath: z.string().describe('Path to the Maestro YAML test file'),
     debugOutput: z
@@ -376,6 +588,142 @@ export const StopAndCompileOutputSchema = z.object({
         .string()
         .optional()
         .describe('Path to the session timeline JSON file for post-hoc debugging'),
+});
+
+export const BuildAppOutputSchema = z.object({
+    passed: z.boolean().describe('Whether the build succeeded'),
+    platform: z.enum(['ios', 'android']),
+    appPath: z
+        .string()
+        .optional()
+        .describe('Absolute path to the built .app (iOS) or .apk (Android). Undefined on failure.'),
+    bundleId: z
+        .string()
+        .optional()
+        .describe('iOS bundle identifier extracted from the built .app (best-effort).'),
+    derivedDataPath: z
+        .string()
+        .optional()
+        .describe('iOS only: Derived data path used for the build (may be auto-generated).'),
+    module: z.string().optional().describe('Android only: Module that was built.'),
+    variant: z.string().optional().describe('Android only: Variant that was built.'),
+    durationMs: z.number().describe('Total build duration in ms'),
+    output: z.string().describe('Truncated stdout/stderr from the build tool'),
+});
+
+export const InstallAppOutputSchema = z.object({
+    passed: z.boolean().describe('Whether install succeeded'),
+    platform: z.enum(['ios', 'android']),
+    deviceUdid: z.string(),
+    bundleId: z
+        .string()
+        .optional()
+        .describe('iOS only: bundle identifier extracted from the .app (best-effort).'),
+    durationMs: z.number(),
+    output: z.string(),
+});
+
+export const UninstallAppOutputSchema = z.object({
+    passed: z.boolean().describe('Whether uninstall succeeded'),
+    platform: z.enum(['ios', 'android']),
+    deviceUdid: z.string(),
+    bundleId: z.string().describe('iOS bundle identifier or Android package name that was removed'),
+    durationMs: z.number(),
+    output: z.string(),
+});
+
+export const BootSimulatorOutputSchema = z.object({
+    passed: z.boolean().describe('Whether the device reached Booted state'),
+    platform: z.enum(['ios', 'android']),
+    deviceUdid: z.string(),
+    state: z.string().describe('Device state after the boot attempt'),
+    alreadyBooted: z.boolean().describe('True if the device was already Booted before the call'),
+    durationMs: z.number(),
+    output: z.string(),
+});
+
+export const TakeScreenshotOutputSchema = z.object({
+    passed: z.boolean().describe('Whether the screenshot was captured and saved'),
+    platform: z.enum(['ios', 'android']),
+    deviceUdid: z.string(),
+    imagePath: z.string().describe('Absolute path of the written PNG'),
+    sizeBytes: z
+        .number()
+        .int()
+        .nonnegative()
+        .optional()
+        .describe('Size of the saved PNG in bytes'),
+    durationMs: z.number(),
+    output: z.string().describe('Truncated stdout/stderr from the capture tool'),
+});
+
+const UnitTestFailureSchema = z.object({
+    name: z.string().describe('Fully-qualified test identifier (e.g., MyTests/testLoginFlow)'),
+    message: z
+        .string()
+        .optional()
+        .describe('First-line failure message extracted from the tool output'),
+    file: z.string().optional().describe('Source file that reported the failure, if known'),
+    line: z.number().int().nonnegative().optional().describe('Source line of the failure, if known'),
+});
+
+export const RunUnitTestsOutputSchema = z.object({
+    passed: z.boolean().describe('True when the run finished cleanly with zero failing tests'),
+    platform: z.enum(['ios', 'android']),
+    totalTests: z.number().int().nonnegative().describe('Total tests executed'),
+    passedTests: z.number().int().nonnegative().describe('Tests that passed'),
+    failedTests: z.number().int().nonnegative().describe('Tests that failed'),
+    skippedTests: z
+        .number()
+        .int()
+        .nonnegative()
+        .optional()
+        .describe('Tests reported as skipped, if the tool emits that information'),
+    failures: z
+        .array(UnitTestFailureSchema)
+        .describe('Failing tests with first-line messages (may be empty)'),
+    durationMs: z.number().describe('Total test-run wall clock time in ms'),
+    resultBundlePath: z
+        .string()
+        .optional()
+        .describe('iOS only: path to the .xcresult bundle written by xcodebuild'),
+    reportDir: z
+        .string()
+        .optional()
+        .describe('Android only: directory containing the JUnit XML reports that were parsed'),
+    output: z.string().describe('Truncated stdout/stderr from the test run'),
+});
+
+const FlowParamSpecSchema = z.object({
+    required: z.boolean().optional().describe('Whether the caller must provide this parameter'),
+    default: z.string().optional().describe('Default value applied when the caller omits this parameter'),
+    description: z.string().optional().describe('Human-readable description of the parameter'),
+});
+
+const FlowSummarySchema = z.object({
+    name: z.string().describe('Flow name (derived from the filename)'),
+    path: z.string().describe('Absolute path to the flow YAML'),
+    description: z.string().optional().describe('Description from the manifest, if any'),
+    tags: z.array(z.string()).optional().describe('Free-form tags from the manifest'),
+    params: z.record(FlowParamSpecSchema).optional().describe('Declared parameter specs from the manifest'),
+});
+
+export const ListFlowsOutputSchema = z.object({
+    flows: z.array(FlowSummarySchema).describe('Discovered flows, sorted by name'),
+    flowsDir: z.string().describe('Absolute path to the directory that was scanned'),
+    total: z.number().describe('Number of flows returned'),
+});
+
+export const RunFlowOutputSchema = z.object({
+    passed: z.boolean().describe('Whether the flow executed successfully'),
+    flowName: z.string().describe('Name of the flow that ran'),
+    flowPath: z.string().describe('Absolute path of the executed YAML'),
+    appliedParams: z
+        .record(z.string())
+        .describe('Final parameters passed to Maestro (after manifest defaults + caller overrides)'),
+    output: z.string().describe('Maestro CLI stdout/stderr output'),
+    stubServerPort: z.number().optional().describe('Port the stub server ran on, if stubs were used'),
+    durationMs: z.number().describe('Total flow execution time in milliseconds'),
 });
 
 export const RegisterSegmentOutputSchema = z.object({
@@ -555,6 +903,30 @@ export type ListDevicesOutput = z.infer<typeof ListDevicesOutputSchema>;
 export type GetSessionTimelineInput = z.infer<typeof GetSessionTimelineInputSchema>;
 export type GetSessionTimelineOutput = z.infer<typeof GetSessionTimelineOutputSchema>;
 
+export type ListFlowsInput = z.infer<typeof ListFlowsInputSchema>;
+export type ListFlowsOutput = z.infer<typeof ListFlowsOutputSchema>;
+
+export type RunFlowInput = z.infer<typeof RunFlowInputSchema>;
+export type RunFlowOutput = z.infer<typeof RunFlowOutputSchema>;
+
+export type BuildAppInput = z.infer<typeof BuildAppInputSchema>;
+export type BuildAppOutput = z.infer<typeof BuildAppOutputSchema>;
+
+export type InstallAppInput = z.infer<typeof InstallAppInputSchema>;
+export type InstallAppOutput = z.infer<typeof InstallAppOutputSchema>;
+
+export type UninstallAppInput = z.infer<typeof UninstallAppInputSchema>;
+export type UninstallAppOutput = z.infer<typeof UninstallAppOutputSchema>;
+
+export type BootSimulatorInput = z.infer<typeof BootSimulatorInputSchema>;
+export type BootSimulatorOutput = z.infer<typeof BootSimulatorOutputSchema>;
+
+export type TakeScreenshotInput = z.infer<typeof TakeScreenshotInputSchema>;
+export type TakeScreenshotOutput = z.infer<typeof TakeScreenshotOutputSchema>;
+
+export type RunUnitTestsInput = z.infer<typeof RunUnitTestsInputSchema>;
+export type RunUnitTestsOutput = z.infer<typeof RunUnitTestsOutputSchema>;
+
 // ──────────────────────────────────────────────
 // Tool name constants
 // ──────────────────────────────────────────────
@@ -570,4 +942,12 @@ export const TOOL_NAMES = {
     RUN_TEST: 'run_test',
     LIST_DEVICES: 'list_devices',
     GET_SESSION_TIMELINE: 'get_session_timeline',
+    LIST_FLOWS: 'list_flows',
+    RUN_FLOW: 'run_flow',
+    BUILD_APP: 'build_app',
+    INSTALL_APP: 'install_app',
+    UNINSTALL_APP: 'uninstall_app',
+    BOOT_SIMULATOR: 'boot_simulator',
+    TAKE_SCREENSHOT: 'take_screenshot',
+    RUN_UNIT_TESTS: 'run_unit_tests',
 } as const;
