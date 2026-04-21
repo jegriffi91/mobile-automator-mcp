@@ -2,7 +2,9 @@ import { TOOL_NAMES } from '../../../src/schemas.js';
 
 const MCP_URL = process.env.MCP_URL || 'http://localhost:3000/message';
 
-// Default mock parameters for generating valid JSON-RPC payloads
+// Default mock parameters for generating valid JSON-RPC payloads.
+// Replace placeholder values (sessionId, deviceUdid, paths, bundle ids) with
+// real ones from your environment before sending the commands.
 const toolDefaults: Record<string, any> = {
     [TOOL_NAMES.START_RECORDING]: {
         appBundleId: 'com.example.MyApp',
@@ -46,6 +48,46 @@ const toolDefaults: Record<string, any> = {
     [TOOL_NAMES.GET_SESSION_TIMELINE]: {
         sessionId: 'session_123abc',
     },
+    [TOOL_NAMES.LIST_FLOWS]: {
+        flowsDir: './flows',
+    },
+    [TOOL_NAMES.RUN_FLOW]: {
+        name: 'login',
+        flowsDir: './flows',
+        platform: 'ios',
+        params: { USERNAME: 'demo@example.com' },
+    },
+    [TOOL_NAMES.BUILD_APP]: {
+        platform: 'ios',
+        workspacePath: '/absolute/path/to/MyApp.xcworkspace',
+        scheme: 'MyApp',
+        configuration: 'Debug',
+    },
+    [TOOL_NAMES.INSTALL_APP]: {
+        platform: 'ios',
+        deviceUdid: 'REPLACE_WITH_UDID',
+        appPath: '/absolute/path/to/MyApp.app',
+    },
+    [TOOL_NAMES.UNINSTALL_APP]: {
+        platform: 'ios',
+        deviceUdid: 'REPLACE_WITH_UDID',
+        bundleId: 'com.example.MyApp',
+    },
+    [TOOL_NAMES.BOOT_SIMULATOR]: {
+        platform: 'ios',
+        deviceUdid: 'REPLACE_WITH_UDID',
+        openSimulatorApp: true,
+    },
+    [TOOL_NAMES.TAKE_SCREENSHOT]: {
+        platform: 'ios',
+        deviceUdid: 'REPLACE_WITH_UDID',
+        outputPath: '/tmp/screen.png',
+    },
+    [TOOL_NAMES.RUN_UNIT_TESTS]: {
+        platform: 'ios',
+        workspacePath: '/absolute/path/to/MyApp.xcworkspace',
+        scheme: 'MyAppTests',
+    },
 };
 
 const generateCurl = (method: string, params: any): string => {
@@ -67,6 +109,7 @@ const generateCurl = (method: string, params: any): string => {
 console.log(`\n======================================================`);
 console.log(`📡 MCP Mobile Automator cURL Generator `);
 console.log(`URL: ${MCP_URL}`);
+console.log(`Tools: ${Object.keys(toolDefaults).length}`);
 console.log(`======================================================\n`);
 
 for (const [toolName, defaultParams] of Object.entries(toolDefaults)) {

@@ -563,6 +563,12 @@ async function main() {
     await sessionManager.initialize();
     console.error('[mobile-automator-mcp] Session Database initialized');
 
+    if (process.env.MCP_TRANSPORT === 'http') {
+        const { startHttpBridge } = await import('./httpBridge.js');
+        await startHttpBridge();
+        return;
+    }
+
     const transport = new StdioServerTransport();
     await server.connect(transport);
     console.error('[mobile-automator-mcp] Server running on stdio transport');
