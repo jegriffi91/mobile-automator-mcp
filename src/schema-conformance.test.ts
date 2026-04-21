@@ -22,6 +22,14 @@ import {
   RunTestOutputSchema,
   ListDevicesOutputSchema,
   GetSessionTimelineOutputSchema,
+  ListFlowsOutputSchema,
+  RunFlowOutputSchema,
+  BuildAppOutputSchema,
+  InstallAppOutputSchema,
+  UninstallAppOutputSchema,
+  BootSimulatorOutputSchema,
+  TakeScreenshotOutputSchema,
+  RunUnitTestsOutputSchema,
 } from './schemas.js';
 
 describe('Schema Conformance', () => {
@@ -275,6 +283,270 @@ describe('Schema Conformance', () => {
       };
       const result = ListDevicesOutputSchema.safeParse(output);
       expect(result.success).toBe(true);
+    });
+  });
+
+  describe('ListFlowsOutputSchema', () => {
+    it('should accept empty list', () => {
+      const output = { flows: [], flowsDir: '/foo/flows', total: 0 };
+      const result = ListFlowsOutputSchema.safeParse(output);
+      expect(result.success).toBe(true);
+    });
+
+    it('should accept entries with full metadata', () => {
+      const output = {
+        flows: [
+          {
+            name: 'login',
+            path: '/foo/flows/login.yaml',
+            description: 'Login flow',
+            tags: ['auth', 'setup'],
+            params: {
+              username: { required: true, default: 'admin', description: 'Username' },
+              password: { required: true, default: 'admin' },
+            },
+          },
+          { name: 'navigate-to-settings', path: '/foo/flows/navigate-to-settings.yaml' },
+        ],
+        flowsDir: '/foo/flows',
+        total: 2,
+      };
+      const result = ListFlowsOutputSchema.safeParse(output);
+      expect(result.success).toBe(true);
+    });
+  });
+
+  describe('RunFlowOutputSchema', () => {
+    it('should accept minimal output', () => {
+      const output = {
+        passed: true,
+        flowName: 'login',
+        flowPath: '/foo/flows/login.yaml',
+        appliedParams: {},
+        output: 'Flow completed',
+        durationMs: 1234,
+      };
+      const result = RunFlowOutputSchema.safeParse(output);
+      expect(result.success).toBe(true);
+    });
+
+    it('should accept output with applied params and stub port', () => {
+      const output = {
+        passed: false,
+        flowName: 'login',
+        flowPath: '/foo/flows/login.yaml',
+        appliedParams: { USERNAME: 'admin', PASSWORD: 'admin' },
+        output: 'Element not found',
+        stubServerPort: 3030,
+        durationMs: 5678,
+      };
+      const result = RunFlowOutputSchema.safeParse(output);
+      expect(result.success).toBe(true);
+    });
+  });
+
+  describe('BuildAppOutputSchema', () => {
+    it('should accept iOS success output', () => {
+      const output = {
+        passed: true,
+        platform: 'ios' as const,
+        appPath: '/tmp/build/Build/Products/Debug-iphonesimulator/MyApp.app',
+        bundleId: 'com.example.MyApp',
+        derivedDataPath: '/tmp/build',
+        durationMs: 120000,
+        output: 'Build succeeded',
+      };
+      expect(BuildAppOutputSchema.safeParse(output).success).toBe(true);
+    });
+
+    it('should accept Android success output', () => {
+      const output = {
+        passed: true,
+        platform: 'android' as const,
+        appPath: '/project/app/build/outputs/apk/debug/app-debug.apk',
+        module: 'app',
+        variant: 'debug',
+        durationMs: 60000,
+        output: 'BUILD SUCCESSFUL',
+      };
+      expect(BuildAppOutputSchema.safeParse(output).success).toBe(true);
+    });
+
+    it('should accept failure output without appPath', () => {
+      const output = {
+        passed: false,
+        platform: 'ios' as const,
+        durationMs: 5000,
+        output: 'error: no such scheme',
+      };
+      expect(BuildAppOutputSchema.safeParse(output).success).toBe(true);
+    });
+  });
+
+  describe('InstallAppOutputSchema', () => {
+    it('should accept iOS install output with bundleId', () => {
+      const output = {
+        passed: true,
+        platform: 'ios' as const,
+        deviceUdid: 'ABCD-1234',
+        bundleId: 'com.example.MyApp',
+        durationMs: 3000,
+        output: '',
+      };
+      expect(InstallAppOutputSchema.safeParse(output).success).toBe(true);
+    });
+
+    it('should accept Android install output without bundleId', () => {
+      const output = {
+        passed: true,
+        platform: 'android' as const,
+        deviceUdid: 'emulator-5554',
+        durationMs: 4000,
+        output: 'Success',
+      };
+      expect(InstallAppOutputSchema.safeParse(output).success).toBe(true);
+    });
+  });
+
+  describe('UninstallAppOutputSchema', () => {
+    it('should accept valid output', () => {
+      const output = {
+        passed: true,
+        platform: 'ios' as const,
+        deviceUdid: 'ABCD-1234',
+        bundleId: 'com.example.MyApp',
+        durationMs: 500,
+        output: '',
+      };
+      expect(UninstallAppOutputSchema.safeParse(output).success).toBe(true);
+    });
+  });
+
+  describe('BootSimulatorOutputSchema', () => {
+    it('should accept booted result', () => {
+      const output = {
+        passed: true,
+        platform: 'ios' as const,
+        deviceUdid: 'ABCD-1234',
+        state: 'Booted',
+        alreadyBooted: false,
+        durationMs: 15000,
+        output: '',
+      };
+      expect(BootSimulatorOutputSchema.safeParse(output).success).toBe(true);
+    });
+
+    it('should accept alreadyBooted result', () => {
+      const output = {
+        passed: true,
+        platform: 'ios' as const,
+        deviceUdid: 'ABCD-1234',
+        state: 'Booted',
+        alreadyBooted: true,
+        durationMs: 150,
+        output: '',
+      };
+      expect(BootSimulatorOutputSchema.safeParse(output).success).toBe(true);
+    });
+  });
+
+  describe('TakeScreenshotOutputSchema', () => {
+    it('should accept a successful capture', () => {
+      const output = {
+        passed: true,
+        platform: 'ios' as const,
+        deviceUdid: 'ABCD-1234',
+        imagePath: '/tmp/mobile-automator-screenshots/screenshot-1.png',
+        sizeBytes: 204800,
+        durationMs: 350,
+        output: '',
+      };
+      expect(TakeScreenshotOutputSchema.safeParse(output).success).toBe(true);
+    });
+
+    it('should accept a failed capture without sizeBytes', () => {
+      const output = {
+        passed: false,
+        platform: 'android' as const,
+        deviceUdid: 'emulator-5554',
+        imagePath: '/tmp/mobile-automator-screenshots/screenshot-2.png',
+        durationMs: 12,
+        output: 'error: device offline',
+      };
+      expect(TakeScreenshotOutputSchema.safeParse(output).success).toBe(true);
+    });
+
+    it('should reject negative sizeBytes', () => {
+      const output = {
+        passed: true,
+        platform: 'ios' as const,
+        deviceUdid: 'ABCD-1234',
+        imagePath: '/tmp/s.png',
+        sizeBytes: -1,
+        durationMs: 100,
+        output: '',
+      };
+      expect(TakeScreenshotOutputSchema.safeParse(output).success).toBe(false);
+    });
+  });
+
+  describe('RunUnitTestsOutputSchema', () => {
+    it('should accept a passing iOS run', () => {
+      const output = {
+        passed: true,
+        platform: 'ios' as const,
+        totalTests: 10,
+        passedTests: 10,
+        failedTests: 0,
+        skippedTests: 0,
+        failures: [],
+        durationMs: 42000,
+        resultBundlePath: '/tmp/mobile-automator-tests/run.xcresult',
+        output: 'Test Suite passed',
+      };
+      expect(RunUnitTestsOutputSchema.safeParse(output).success).toBe(true);
+    });
+
+    it('should accept a failing Android run with failure details', () => {
+      const output = {
+        passed: false,
+        platform: 'android' as const,
+        totalTests: 5,
+        passedTests: 3,
+        failedTests: 2,
+        skippedTests: 0,
+        failures: [
+          {
+            name: 'com.example.MyTest.testA',
+            message: 'expected:<a> but was:<b>',
+          },
+          {
+            name: 'com.example.MyTest.testB',
+            message: 'NPE',
+            file: 'MyTest.java',
+            line: 42,
+          },
+        ],
+        durationMs: 15000,
+        reportDir: '/app/build/test-results/testDebugUnitTest',
+        output: 'BUILD FAILED',
+      };
+      expect(RunUnitTestsOutputSchema.safeParse(output).success).toBe(true);
+    });
+
+    it('should reject negative test counts', () => {
+      const output = {
+        passed: true,
+        platform: 'ios' as const,
+        totalTests: -1,
+        passedTests: 0,
+        failedTests: 0,
+        skippedTests: 0,
+        failures: [],
+        durationMs: 1,
+        output: '',
+      };
+      expect(RunUnitTestsOutputSchema.safeParse(output).success).toBe(false);
     });
   });
 

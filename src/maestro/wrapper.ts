@@ -17,6 +17,7 @@ import { randomUUID } from 'crypto';
 import type { UIActionType, UIElement, MobilePlatform, TimeoutConfig } from '../types.js';
 import { DEFAULT_TIMEOUTS } from '../types.js';
 import { resolveMaestroBin, getExecEnv } from './env.js';
+import { withRetry, isTransientMaestroError } from './retry.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -184,10 +185,25 @@ export class MaestroWrapper {
 
         try {
             const args = this.buildArgs(['hierarchy']);
-            const { stdout } = await execFileAsync(this.maestroBin, args, {
-                env: getExecEnv(),
-                timeout: this.timeouts.hierarchyDumpMs,
-            });
+            // Retry only transient failures (broken pipe, timeout, stream closed).
+            // Caller-surfaced errors like "simulator not booted" are left untouched.
+            const { stdout } = await withRetry(
+                () => execFileAsync(this.maestroBin, args, {
+                    env: getExecEnv(),
+                    timeout: this.timeouts.hierarchyDumpMs,
+                }),
+                {
+                    maxAttempts: 3,
+                    baseDelayMs: 250,
+                    maxDelayMs: 1500,
+                    isRetryable: isTransientMaestroError,
+                    onRetry: (err, attempt, delayMs) => {
+                        console.error(
+                            `[MaestroWrapper] dumpHierarchy retry ${attempt} after ${delayMs}ms: ${(err as Error).message}`,
+                        );
+                    },
+                },
+            );
             return MaestroWrapper.stripHierarchyPrefix(stdout);
         } catch (error: any) {
             console.error('[MaestroWrapper] dumpHierarchy failed:', error);

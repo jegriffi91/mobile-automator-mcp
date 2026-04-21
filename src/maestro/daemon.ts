@@ -77,11 +77,15 @@ export class MaestroDaemon {
 
     this.process.on('exit', (code, signal) => {
       console.error(`[MaestroDaemon] process exited (code: ${code}, signal: ${signal})`);
+      this.rejectAllPending(
+        new Error(`MaestroDaemon process exited (code: ${code}, signal: ${signal})`),
+      );
       this.cleanup();
     });
 
     this.process.on('error', (err) => {
       console.error(`[MaestroDaemon] process error:`, err);
+      this.rejectAllPending(err instanceof Error ? err : new Error(String(err)));
       this.cleanup();
     });
 
@@ -284,6 +288,17 @@ export class MaestroDaemon {
         console.error(`[MaestroDaemon] non-JSON stdout: ${trimmed.slice(0, 200)}`);
       }
     }
+  }
+
+  private rejectAllPending(reason: Error): void {
+    if (this.pendingRequests.size === 0) return;
+    console.error(
+      `[MaestroDaemon] rejecting ${this.pendingRequests.size} pending request(s): ${reason.message}`,
+    );
+    for (const [, pending] of this.pendingRequests) {
+      pending.reject(reason);
+    }
+    this.pendingRequests.clear();
   }
 
   private cleanup(): void {

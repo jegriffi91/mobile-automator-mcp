@@ -32,6 +32,22 @@ import {
     ListDevicesOutputSchema,
     GetSessionTimelineInputSchema,
     GetSessionTimelineOutputSchema,
+    ListFlowsInputSchema,
+    ListFlowsOutputSchema,
+    RunFlowInputSchema,
+    RunFlowOutputSchema,
+    BuildAppInputSchema,
+    BuildAppOutputSchema,
+    InstallAppInputSchema,
+    InstallAppOutputSchema,
+    UninstallAppInputSchema,
+    UninstallAppOutputSchema,
+    BootSimulatorInputSchema,
+    BootSimulatorOutputSchema,
+    TakeScreenshotInputSchema,
+    TakeScreenshotOutputSchema,
+    RunUnitTestsInputSchema,
+    RunUnitTestsOutputSchema,
     TOOL_NAMES,
 } from './schemas.js';
 
@@ -46,6 +62,14 @@ import {
     handleRunTest,
     handleListDevices,
     handleGetSessionTimeline,
+    handleListFlows,
+    handleRunFlow,
+    handleBuildApp,
+    handleInstallApp,
+    handleUninstallApp,
+    handleBootSimulator,
+    handleTakeScreenshot,
+    handleRunUnitTests,
     setMcpServer,
 } from './handlers.js';
 
@@ -316,6 +340,214 @@ server.registerTool(
     },
     async (args) => {
         const result = await handleGetSessionTimeline(args);
+        return {
+            content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
+            structuredContent: result,
+        };
+    }
+);
+
+// ── 11. list_flows ──
+server.registerTool(
+    TOOL_NAMES.LIST_FLOWS,
+    {
+        title: 'List Flows',
+        description:
+            'Discover named Maestro flows in a flows directory (default: ./flows). Each flow is a .yaml file; an optional _manifest.json adds descriptions, tags, and parameter specs. Use run_flow to execute one by name.',
+        inputSchema: ListFlowsInputSchema,
+        outputSchema: ListFlowsOutputSchema,
+        annotations: {
+            title: 'List Flows',
+            readOnlyHint: true,
+            destructiveHint: false,
+            idempotentHint: true,
+            openWorldHint: false,
+        },
+    },
+    async (args) => {
+        const result = await handleListFlows(args);
+        return {
+            content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
+            structuredContent: result,
+        };
+    }
+);
+
+// ── 12. run_flow ──
+server.registerTool(
+    TOOL_NAMES.RUN_FLOW,
+    {
+        title: 'Run Flow',
+        description:
+            'Execute a named Maestro flow by name. Resolves <flowsDir>/<name>.yaml, merges manifest param defaults with caller-supplied params, and runs the flow against a booted simulator. Use this to navigate to the area of an incremental change before verifying it.',
+        inputSchema: RunFlowInputSchema,
+        outputSchema: RunFlowOutputSchema,
+        annotations: {
+            title: 'Run Flow',
+            readOnlyHint: false,
+            destructiveHint: false,
+            idempotentHint: false,
+            openWorldHint: true,
+        },
+    },
+    async (args) => {
+        const result = await handleRunFlow(args);
+        return {
+            content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
+            structuredContent: result,
+        };
+    }
+);
+
+// ── 13. build_app ──
+server.registerTool(
+    TOOL_NAMES.BUILD_APP,
+    {
+        title: 'Build App',
+        description:
+            'Compile an iOS or Android app from source. iOS: shells xcodebuild and returns the built .app path + bundle id. Android: shells ./gradlew assemble<Variant> and returns the APK path. Long-running — default timeout is 15 minutes.',
+        inputSchema: BuildAppInputSchema,
+        outputSchema: BuildAppOutputSchema,
+        annotations: {
+            title: 'Build App',
+            readOnlyHint: false,
+            destructiveHint: false,
+            idempotentHint: true,
+            openWorldHint: true,
+        },
+    },
+    async (args) => {
+        const result = await handleBuildApp(args);
+        return {
+            content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
+            structuredContent: result,
+        };
+    }
+);
+
+// ── 14. install_app ──
+server.registerTool(
+    TOOL_NAMES.INSTALL_APP,
+    {
+        title: 'Install App',
+        description:
+            'Install a built app onto a booted simulator/emulator. iOS uses xcrun simctl install; Android uses adb install -r. Returns the resolved bundle id (iOS) when available.',
+        inputSchema: InstallAppInputSchema,
+        outputSchema: InstallAppOutputSchema,
+        annotations: {
+            title: 'Install App',
+            readOnlyHint: false,
+            destructiveHint: false,
+            idempotentHint: true,
+            openWorldHint: true,
+        },
+    },
+    async (args) => {
+        const result = await handleInstallApp(args);
+        return {
+            content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
+            structuredContent: result,
+        };
+    }
+);
+
+// ── 15. uninstall_app ──
+server.registerTool(
+    TOOL_NAMES.UNINSTALL_APP,
+    {
+        title: 'Uninstall App',
+        description:
+            'Remove an installed app from a booted simulator/emulator, wiping its storage. Use before install_app to guarantee a clean-state launch. iOS: xcrun simctl uninstall; Android: adb uninstall.',
+        inputSchema: UninstallAppInputSchema,
+        outputSchema: UninstallAppOutputSchema,
+        annotations: {
+            title: 'Uninstall App',
+            readOnlyHint: false,
+            destructiveHint: true,
+            idempotentHint: true,
+            openWorldHint: true,
+        },
+    },
+    async (args) => {
+        const result = await handleUninstallApp(args);
+        return {
+            content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
+            structuredContent: result,
+        };
+    }
+);
+
+// ── 16. boot_simulator ──
+server.registerTool(
+    TOOL_NAMES.BOOT_SIMULATOR,
+    {
+        title: 'Boot Simulator',
+        description:
+            'Boot an iOS simulator by UDID and wait for it to be fully ready. Idempotent — returns alreadyBooted=true if the device was already running. Also opens Simulator.app by default. Android emulator booting is not yet supported (start it manually).',
+        inputSchema: BootSimulatorInputSchema,
+        outputSchema: BootSimulatorOutputSchema,
+        annotations: {
+            title: 'Boot Simulator',
+            readOnlyHint: false,
+            destructiveHint: false,
+            idempotentHint: true,
+            openWorldHint: true,
+        },
+    },
+    async (args) => {
+        const result = await handleBootSimulator(args);
+        return {
+            content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
+            structuredContent: result,
+        };
+    }
+);
+
+// ── 17. take_screenshot ──
+server.registerTool(
+    TOOL_NAMES.TAKE_SCREENSHOT,
+    {
+        title: 'Take Screenshot',
+        description:
+            'Capture a PNG of the current simulator/emulator screen. iOS uses `xcrun simctl io <udid> screenshot`; Android uses `adb exec-out screencap -p`. Returns the absolute path of the written PNG, which Claude can read back directly.',
+        inputSchema: TakeScreenshotInputSchema,
+        outputSchema: TakeScreenshotOutputSchema,
+        annotations: {
+            title: 'Take Screenshot',
+            readOnlyHint: true,
+            destructiveHint: false,
+            idempotentHint: false,
+            openWorldHint: true,
+        },
+    },
+    async (args) => {
+        const result = await handleTakeScreenshot(args);
+        return {
+            content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
+            structuredContent: result,
+        };
+    }
+);
+
+// ── 18. run_unit_tests ──
+server.registerTool(
+    TOOL_NAMES.RUN_UNIT_TESTS,
+    {
+        title: 'Run Unit Tests',
+        description:
+            'Run the unit-test target for the project and return structured results (pass/fail counts, failing test names, first-line failure messages). iOS: `xcodebuild test` with a resultBundlePath; Android: `./gradlew :<module>:test<Variant>UnitTest` with JUnit XML parsing. Long-running — default timeout is 30 minutes.',
+        inputSchema: RunUnitTestsInputSchema,
+        outputSchema: RunUnitTestsOutputSchema,
+        annotations: {
+            title: 'Run Unit Tests',
+            readOnlyHint: false,
+            destructiveHint: false,
+            idempotentHint: true,
+            openWorldHint: true,
+        },
+    },
+    async (args) => {
+        const result = await handleRunUnitTests(args);
         return {
             content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
             structuredContent: result,

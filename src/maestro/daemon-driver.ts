@@ -15,20 +15,56 @@ import { MaestroDaemon } from './daemon.js';
 import { HierarchyParser } from './hierarchy.js';
 import type { UIActionType, UIElement, MobilePlatform, TimeoutConfig } from '../types.js';
 
+/**
+ * Minimum time between daemon respawn attempts. Prevents a dead-and-failing-to-start
+ * daemon from throwing fresh errors on every hierarchy call.
+ */
+const RESPAWN_COOLDOWN_MS = 30_000;
+
 export class MaestroDaemonDriver implements AutomationDriver {
     private wrapper: MaestroWrapper;
     private daemon: MaestroDaemon;
     private daemonStarted = false;
+    private deviceIdForRespawn?: string;
+    private lastRespawnAt = 0;
 
     constructor(timeouts: TimeoutConfig) {
         this.wrapper = new MaestroWrapper(undefined, timeouts);
         this.daemon = new MaestroDaemon(undefined, timeouts);
     }
 
+    /**
+     * Check whether the daemon is alive. If it has died but is still marked as
+     * "started" by the driver, attempt to respawn it — but only once per
+     * `RESPAWN_COOLDOWN_MS` window so a persistently-broken daemon doesn't
+     * thrash on every hierarchy call. Returns true when the daemon is usable
+     * after this call.
+     */
+    private async ensureDaemonAliveOrFalse(): Promise<boolean> {
+        if (!this.daemonStarted) return false;
+        if (this.daemon.isRunning) return true;
+
+        const now = Date.now();
+        if (now - this.lastRespawnAt < RESPAWN_COOLDOWN_MS) {
+            return false;
+        }
+        this.lastRespawnAt = now;
+
+        console.error('[MaestroDaemonDriver] daemon is not running — attempting respawn');
+        try {
+            await this.daemon.start(this.deviceIdForRespawn);
+            console.error('[MaestroDaemonDriver] respawn succeeded');
+            return true;
+        } catch (err) {
+            console.error('[MaestroDaemonDriver] respawn failed, staying on CLI:', err);
+            return false;
+        }
+    }
+
     // ── Hierarchy (daemon fast path with CLI fallback) ──
 
     async dumpHierarchy(): Promise<string> {
-        if (this.daemonStarted) {
+        if (await this.ensureDaemonAliveOrFalse()) {
             try {
                 return await this.daemon.getHierarchyRaw();
             } catch (err) {
@@ -42,7 +78,7 @@ export class MaestroDaemonDriver implements AutomationDriver {
     }
 
     async dumpHierarchyLite(): Promise<string> {
-        if (this.daemonStarted) {
+        if (await this.ensureDaemonAliveOrFalse()) {
             try {
                 return await this.daemon.getHierarchyRaw();
             } catch (err) {
@@ -105,9 +141,9 @@ export class MaestroDaemonDriver implements AutomationDriver {
     createTreeReader(): TreeHierarchyReader {
         // Evaluate daemon health at CALL time, not creation time.
         // If the daemon crashes after the reader is created, the reader
-        // falls back to CLI instead of throwing.
+        // attempts a cooldown-guarded respawn before falling back to CLI.
         return async () => {
-            if (this.daemonStarted) {
+            if (await this.ensureDaemonAliveOrFalse()) {
                 try {
                     return await this.daemon.getHierarchy();
                 } catch (err) {
@@ -125,9 +161,11 @@ export class MaestroDaemonDriver implements AutomationDriver {
     // ── Lifecycle ──
 
     async start(deviceId?: string): Promise<void> {
+        this.deviceIdForRespawn = deviceId;
         try {
             await this.daemon.start(deviceId);
             this.daemonStarted = true;
+            this.lastRespawnAt = Date.now();
             console.error('[MaestroDaemonDriver] daemon started successfully');
         } catch (err) {
             console.error(
