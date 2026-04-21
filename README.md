@@ -61,7 +61,31 @@ npm install
 npm run build
 ```
 
-### Register with an MCP Client
+### Option A — HTTP Bridge (use this if the MCP client is blocked at your org)
+
+```bash
+npm run dev:http
+```
+
+Verify it's running:
+
+```bash
+curl http://localhost:3000/health
+# {"ok":true,"tools":18}
+```
+
+Then call any tool via JSON-RPC:
+
+```bash
+curl -X POST http://localhost:3000/message \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_devices","arguments":{"platform":"ios"}}}'
+```
+
+For a full tool reference, session lifecycle patterns, and common workflows see [`.github/skills/generate_mcp_curls/SKILL.md`](.github/skills/generate_mcp_curls/SKILL.md).  
+To regenerate boilerplate curl commands for all 18 tools: `npx tsx .github/skills/generate_mcp_curls/generate.ts`
+
+### Option B — Register with an MCP Client (once org-approved)
 
 Add to your MCP client config (e.g., Claude Desktop, Gemini Code Assist):
 
