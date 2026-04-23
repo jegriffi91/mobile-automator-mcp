@@ -119,6 +119,24 @@ describe('parseCsvHierarchy', () => {
     expect(root.children[0].children[0].children[0].text).toBe('Leaf');
   });
 
+  it('should parse root node with empty parent_num (real Maestro 2.4.0+ output)', () => {
+    // Maestro's CLI emits an empty parent_num for depth-0 rows, e.g.:
+    //   0,0,"[0,0][0,0]","",
+    // Previously the isNaN(parentNum) guard rejected this row and the whole
+    // tree came back empty.
+    const rootlessParentCsv = [
+      'element_num,depth,bounds,attributes,parent_num',
+      '0,0,"[0,0][0,0]","",',
+      '1,1,"[0,0][402,874]","accessibilityText=Experian Dev; enabled=true",0',
+      '2,2,"[55,492][346,551]","resource-id=sign_in.button; class=Button",1',
+    ].join('\n');
+
+    const root = parseCsvHierarchy(rootlessParentCsv);
+    expect(root.children).toHaveLength(1);
+    expect(root.children[0].accessibilityLabel).toBe('Experian Dev');
+    expect(root.children[0].children[0].id).toBe('sign_in.button');
+  });
+
   it('should handle multiple children at the same depth', () => {
     const siblingsCsv = [
       'element_num,depth,bounds,attributes,parent_num',

@@ -71,9 +71,12 @@ function parseCsvRow(line: string): CsvRow | null {
 
   const elementNum = parseInt(fields[0], 10);
   const depth = parseInt(fields[1], 10);
-  const parentNum = parseInt(fields[4], 10);
+  // Root nodes (depth 0) have no parent — parent_num is empty → NaN. Default to -1
+  // so the row still parses; the tree is assembled from depth, not parent_num.
+  const parsedParent = parseInt(fields[4], 10);
+  const parentNum = isNaN(parsedParent) ? -1 : parsedParent;
 
-  if (isNaN(elementNum) || isNaN(depth) || isNaN(parentNum)) return null;
+  if (isNaN(elementNum) || isNaN(depth)) return null;
 
   return {
     elementNum,
