@@ -18,11 +18,21 @@ const BoundsSchema = z.object({
     height: z.number(),
 });
 
+const PointSchema = z.object({
+    x: z.number(),
+    y: z.number(),
+});
+
 const UIElementSchema = z.object({
     id: z.string().optional().describe('Accessibility ID / testID (highest priority selector)'),
     accessibilityLabel: z.string().optional().describe('Accessibility label (mid-priority selector)'),
     text: z.string().optional().describe('Visible text (lowest priority selector)'),
     bounds: BoundsSchema.optional().describe('Bounding box coordinates as a fallback'),
+    point: PointSchema
+        .optional()
+        .describe(
+            'Absolute {x,y} point selector — required for custom controls (e.g. Bureau tabs) that ignore accessibility-based taps. Takes precedence over all other selectors.',
+        ),
 });
 
 const NetworkEventSchema = z.object({
