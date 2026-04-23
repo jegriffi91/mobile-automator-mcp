@@ -23,16 +23,24 @@ const execFileAsync = promisify(execFile);
 
 export class MaestroWrapper {
     /**
-     * Strip the "None: \n" prefix that Maestro CLI prepends to hierarchy JSON output.
-     * Without this, JSON.parse() fails downstream in HierarchyParser and HierarchyDiffer.
+     * Strip the "None: \n" prefix that Maestro CLI prepends to hierarchy output.
+     * Without this, downstream parsers fail.
+     *
+     * Handles both legacy JSON ("None: \n{...}") and the CSV format returned by
+     * Maestro 2.4.0+ ("element_num,depth,...").
      */
     private static stripHierarchyPrefix(raw: string): string {
-        // Maestro outputs "None: \n{...}" — strip everything before the first '{'
-        const idx = raw.indexOf('{');
-        if (idx > 0) {
-            return raw.slice(idx);
+        const trimmed = raw.trimStart();
+        // Already clean — preserve original (leading whitespace inside is harmless).
+        if (trimmed.startsWith('{') || trimmed.startsWith('element_num')) {
+            return trimmed;
         }
-        return raw;
+        // Prefixed output — strip to the first JSON/CSV marker, whichever comes first.
+        const jsonIdx = raw.indexOf('{');
+        const csvIdx = raw.indexOf('element_num');
+        const candidates = [jsonIdx, csvIdx].filter((i) => i > 0);
+        if (candidates.length === 0) return raw;
+        return raw.slice(Math.min(...candidates));
     }
     private maestroBin: string;
     private activeDeviceId?: string;

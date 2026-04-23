@@ -9,12 +9,27 @@
 
 import type { UIHierarchyNode } from '../types.js';
 import { computeStructuralHash } from './structural-hash.js';
+import { parseCsvHierarchy } from './csv-hierarchy-parser.js';
 
 export class HierarchyParser {
     /**
      * Parse raw output from `maestro hierarchy` into a normalized UIHierarchyNode tree.
+     *
+     * Auto-detects JSON vs CSV: Maestro CLI ≤ 2.3 returned JSON, but 2.4.0+ and
+     * the `maestro mcp` daemon return a CSV table (element_num,depth,bounds,...).
      */
     static parse(rawOutput: string): UIHierarchyNode {
+        const trimmed = rawOutput.trimStart();
+
+        // Maestro 2.4.0+ CLI and daemon return CSV, not JSON.
+        if (trimmed.startsWith('element_num')) {
+            const root = parseCsvHierarchy(rawOutput);
+            if (!root.structuralHash) {
+                root.structuralHash = computeStructuralHash(root);
+            }
+            return root;
+        }
+
         try {
             const parsed = JSON.parse(rawOutput);
             const root = HierarchyParser.normalizeNode(parsed);

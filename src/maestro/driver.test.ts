@@ -5,7 +5,7 @@ import { DEFAULT_TIMEOUTS } from '../types.js';
 
 describe('DEFAULT_TIMEOUTS', () => {
     it('should have all expected timeout fields', () => {
-        expect(DEFAULT_TIMEOUTS.hierarchyDumpMs).toBe(15_000);
+        expect(DEFAULT_TIMEOUTS.hierarchyDumpMs).toBe(30_000);
         expect(DEFAULT_TIMEOUTS.hierarchyLiteMs).toBe(10_000);
         expect(DEFAULT_TIMEOUTS.actionMs).toBe(15_000);
         expect(DEFAULT_TIMEOUTS.testRunMs).toBe(120_000);
@@ -23,7 +23,7 @@ describe('TimeoutConfig merge behavior', () => {
         expect(merged.testRunMs).toBe(300_000);
         expect(merged.actionMs).toBe(30_000);
         // Unchanged values should keep defaults
-        expect(merged.hierarchyDumpMs).toBe(15_000);
+        expect(merged.hierarchyDumpMs).toBe(30_000);
         expect(merged.daemonRequestMs).toBe(15_000);
     });
 
