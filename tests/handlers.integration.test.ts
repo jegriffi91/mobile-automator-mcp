@@ -90,6 +90,7 @@ const {
   handleExecuteUIAction,
   handleRunTest,
   handleGetSessionTimeline,
+  handleGetNetworkLogs,
 } = await import('../src/handlers.js');
 
 // ── Test suites ──
@@ -280,6 +281,61 @@ describe('Handler Integration Tests', () => {
       ).rejects.toThrow('Failed to execute action');
 
       // Clean up
+      await handleStopAndCompile({ sessionId: startResult.sessionId });
+    });
+  });
+
+  describe('get_network_logs', () => {
+    it('time-scopes before applying limit (regression: Bug #4)', async () => {
+      // Start a session — sessionStart is "now".
+      const startResult = await handleStartRecording({
+        appBundleId: 'com.test.app',
+        platform: 'ios',
+      });
+
+      const now = Date.now();
+      const beforeSession = new Date(now - 60_000).toISOString(); // 1 min before
+      const afterSession = new Date(now + 60_000).toISOString();  // 1 min after (simulated)
+
+      // Proxyman returns 60 old pre-session events followed by the single
+      // in-session event we actually care about. The old default limit (50)
+      // would have sliced off the in-session event before time-scoping.
+      const oldEvents = Array.from({ length: 60 }, (_, i) => ({
+        sessionId: startResult.sessionId,
+        timestamp: beforeSession,
+        method: 'GET',
+        url: `https://api.example.com/noise/${i}`,
+        statusCode: 200,
+      }));
+      const inSessionEvent = {
+        sessionId: startResult.sessionId,
+        timestamp: afterSession,
+        method: 'POST',
+        url: 'https://api.example.com/equifax/tap',
+        statusCode: 200,
+      };
+      mockProxymanWrapper.getTransactions.mockResolvedValueOnce([
+        ...oldEvents,
+        inSessionEvent,
+      ]);
+
+      const result = await handleGetNetworkLogs({
+        sessionId: startResult.sessionId,
+        limit: 50,
+      });
+
+      // The in-session event must survive: limit was applied *after* time-scope,
+      // not before. The wrapper is called with `undefined` so it returns all.
+      expect(mockProxymanWrapper.getTransactions).toHaveBeenCalledWith(
+        startResult.sessionId,
+        undefined,
+        undefined,
+        undefined,
+      );
+      expect(result.events.map((e) => e.url)).toContain(
+        'https://api.example.com/equifax/tap',
+      );
+
       await handleStopAndCompile({ sessionId: startResult.sessionId });
     });
   });

@@ -676,10 +676,13 @@ export async function handleGetNetworkLogs(
     // Fall back to session-level filterDomains if not provided in the request
     const session = await sessionManager.getSession(input.sessionId);
     const domains = input.filterDomains ?? session?.filterDomains;
+    // Don't pass the caller's limit here — slicing the OLDEST N entries before
+    // time-scoping drops the entire session window. Limit is applied after the
+    // merge below (line further down).
     const proxymanEvents = await proxymanWrapper.getTransactions(
         input.sessionId,
         input.filterPath,
-        input.limit ?? 50,
+        undefined,
         domains
     );
 

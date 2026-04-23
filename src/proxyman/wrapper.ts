@@ -356,13 +356,16 @@ export class ProxymanWrapper {
    *
    * @param sessionId - The session ID to tag events with
    * @param filterPath - Optional URL substring to post-filter results (e.g., "/api/sdui")
-   * @param limit - Max entries to return (default 50)
+   * @param limit - Max entries to return. Omit (or pass `undefined`) to return all
+   *   matching events — callers that need to time-scope must do so before applying
+   *   a limit, otherwise limiting the OLDEST N entries here can discard everything
+   *   in the session window.
    * @param domains - Optional domain list passed to proxyman-cli for pre-filtering
    */
   async getTransactions(
     sessionId: string,
     filterPath?: string,
-    limit = 50,
+    limit?: number,
     domains?: string[],
   ): Promise<NetworkEvent[]> {
     const tmpFile = path.join(os.tmpdir(), `proxyman-har-${randomUUID()}.har`);
@@ -388,7 +391,7 @@ export class ProxymanWrapper {
         events = events.filter((e) => e.url.includes(filterPath));
       }
 
-      return events.slice(0, limit);
+      return limit === undefined ? events : events.slice(0, limit);
     } catch (error: unknown) {
       // exportHar already classifies CLI errors — re-throw as-is
       console.error('[ProxymanWrapper] getTransactions failed:', error);
