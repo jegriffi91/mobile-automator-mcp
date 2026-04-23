@@ -170,6 +170,21 @@ export class MaestroWrapper {
     }
 
     /**
+     * Uninstall the Maestro driver and wait for the simulator's XCTest runner
+     * to release port 7001 before the next `maestro test` tries to bind it.
+     * iOS-only cooldown; Android's driver uses a different connection model.
+     */
+    async ensureCleanDriverState(platform: MobilePlatform, deviceId?: string): Promise<void> {
+        await this.uninstallDriver(platform, deviceId);
+        if (platform === 'ios' && this.timeouts.driverCooldownMs > 0) {
+            console.error(
+                `[MaestroWrapper] ensureCleanDriverState: iOS cooldown ${this.timeouts.driverCooldownMs}ms (port 7001 TIME_WAIT drain)`,
+            );
+            await new Promise((r) => setTimeout(r, this.timeouts.driverCooldownMs));
+        }
+    }
+
+    /**
      * Kill any orphaned `maestro hierarchy` Java processes from previous timed-out calls.
      */
     private async killStaleMaestroProcesses(): Promise<void> {

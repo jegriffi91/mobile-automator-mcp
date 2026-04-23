@@ -12,6 +12,7 @@ describe('DEFAULT_TIMEOUTS', () => {
         expect(DEFAULT_TIMEOUTS.setupValidationMs).toBe(5_000);
         expect(DEFAULT_TIMEOUTS.daemonRequestMs).toBe(15_000);
         expect(DEFAULT_TIMEOUTS.daemonShutdownMs).toBe(3_000);
+        expect(DEFAULT_TIMEOUTS.driverCooldownMs).toBe(3_000);
     });
 });
 
@@ -47,6 +48,7 @@ describe('AutomationDriver interface', () => {
             validateSetup: vi.fn().mockResolvedValue(undefined),
             validateSimulator: vi.fn().mockResolvedValue({ booted: true, deviceId: 'test-123' }),
             uninstallDriver: vi.fn().mockResolvedValue(undefined),
+            ensureCleanDriverState: vi.fn().mockResolvedValue(undefined),
             createTreeReader: vi.fn().mockReturnValue(async () => ({
                 role: 'view',
                 id: 'root',
@@ -88,6 +90,7 @@ describe('AutomationDriver interface', () => {
             validateSetup: vi.fn().mockRejectedValue(new Error('Java not found')),
             validateSimulator: vi.fn().mockResolvedValue({ booted: false }),
             uninstallDriver: vi.fn().mockResolvedValue(undefined),
+            ensureCleanDriverState: vi.fn().mockResolvedValue(undefined),
             createTreeReader: vi.fn().mockReturnValue(async () => {
                 throw new Error('hierarchy unavailable');
             }),
