@@ -131,8 +131,10 @@ export async function handleStartRecording(
     // Fast-fail if Java or Maestro isn't available
     await driver.validateSetup();
 
-    // Uninstall stale Maestro driver — next `maestro` command will reinstall a fresh copy
-    await driver.uninstallDriver(input.platform, validation.deviceId);
+    // Uninstall the stale Maestro driver AND wait for the simulator to release
+    // port 7001 — otherwise the first `maestro` command in this session can hit
+    // ConnectException because the previous run's XCTRunner is still draining.
+    await driver.ensureCleanDriverState(input.platform, validation.deviceId);
 
     await sessionManager.create(
         sessionId,
@@ -827,7 +829,7 @@ export async function handleRunTest(
     if (!validation.booted) {
         throw new Error(`No booted ${platform} simulator found. Please boot a device first.`);
     }
-    await driver.uninstallDriver(platform, validation.deviceId);
+    await driver.ensureCleanDriverState(platform, validation.deviceId);
 
     let stubServer: StubServer | undefined;
     let stubServerPort: number | undefined;

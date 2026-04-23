@@ -136,6 +136,10 @@ export class MaestroDaemonDriver implements AutomationDriver {
         return this.wrapper.uninstallDriver(platform, deviceId);
     }
 
+    async ensureCleanDriverState(platform: MobilePlatform, deviceId?: string): Promise<void> {
+        return this.wrapper.ensureCleanDriverState(platform, deviceId);
+    }
+
     // ── Hierarchy tree reader (runtime daemon check with CLI fallback) ──
 
     createTreeReader(): TreeHierarchyReader {

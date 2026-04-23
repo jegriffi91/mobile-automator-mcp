@@ -50,6 +50,7 @@ const mockDriverFns = {
   validateSetup: vi.fn().mockResolvedValue(undefined),
   validateSimulator: mockValidateSimulator,
   uninstallDriver: vi.fn().mockResolvedValue(undefined),
+  ensureCleanDriverState: vi.fn().mockResolvedValue(undefined),
   createTreeReader: vi.fn().mockReturnValue(async () => ({
     role: 'Application',
     children: [],
@@ -142,6 +143,26 @@ describe('Handler Integration Tests', () => {
       expect(result.readiness?.driverReady).toBe(true);
 
       // Clean up
+      await handleStopAndCompile({ sessionId: result.sessionId });
+    });
+
+    it('cleans the XCTest driver with a cooldown before reinstalling (regression: Bug #5)', async () => {
+      // Bug: back-to-back `maestro test` invocations failed with
+      // `ConnectException: Failed to connect to /127.0.0.1:7001` because the
+      // simulator hadn't released the port before the next run tried to bind.
+      // Fix: the handler must call ensureCleanDriverState (uninstall + cooldown),
+      // not the bare uninstallDriver.
+      const result = await handleStartRecording({
+        appBundleId: 'com.test.app',
+        platform: 'ios',
+      });
+
+      expect(mockDriverFns.ensureCleanDriverState).toHaveBeenCalledWith(
+        'ios',
+        'FAKE-UUID-1234',
+      );
+      expect(mockDriverFns.uninstallDriver).not.toHaveBeenCalled();
+
       await handleStopAndCompile({ sessionId: result.sessionId });
     });
 

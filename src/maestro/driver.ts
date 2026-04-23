@@ -49,6 +49,14 @@ export interface AutomationDriver {
         platform: MobilePlatform,
     ): Promise<{ booted: boolean; deviceId?: string }>;
     uninstallDriver(platform: MobilePlatform, deviceId?: string): Promise<void>;
+    /**
+     * Uninstall the Maestro UI driver and wait for OS-level cleanup to complete.
+     * On iOS, this pauses after uninstall to let port 7001 drain from TIME_WAIT
+     * before the next `maestro` invocation tries to bind it — otherwise back-to-
+     * back runs fail with `ConnectException`. On Android, this is equivalent to
+     * `uninstallDriver` (no cooldown needed).
+     */
+    ensureCleanDriverState(platform: MobilePlatform, deviceId?: string): Promise<void>;
 
     // ── Hierarchy tree reader (for TouchInferrer polling) ──
     createTreeReader(): TreeHierarchyReader;

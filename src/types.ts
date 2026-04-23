@@ -154,6 +154,18 @@ export interface TimeoutConfig {
     daemonRequestMs: number;
     /** Timeout for daemon graceful shutdown (ms). Default: 3000 */
     daemonShutdownMs: number;
+    /**
+     * Pause after uninstalling the iOS XCTest driver before the next `maestro`
+     * invocation (ms). Default: 3000.
+     *
+     * Gives the simulator time to fully terminate the XCTRunner process and
+     * release port 7001 from TIME_WAIT. Without this, back-to-back
+     * `maestro test` runs can fail with `ConnectException: Failed to connect
+     * to /127.0.0.1:7001` on the first command.
+     *
+     * iOS-only; Android's UiAutomator driver uses a different connection model.
+     */
+    driverCooldownMs: number;
 }
 
 export const DEFAULT_TIMEOUTS: TimeoutConfig = {
@@ -164,5 +176,6 @@ export const DEFAULT_TIMEOUTS: TimeoutConfig = {
     setupValidationMs: 5_000,
     daemonRequestMs: 15_000,
     daemonShutdownMs: 3_000,
+    driverCooldownMs: 3_000,
 };
 
