@@ -578,7 +578,11 @@ export async function handleExecuteUIAction(
     input: ExecuteUIActionInput
 ): Promise<ExecuteUIActionOutput> {
     const targetDesc =
-        input.element.id ?? input.element.accessibilityLabel ?? input.element.text ?? 'unknown element';
+        input.element.id
+        ?? input.element.accessibilityLabel
+        ?? input.element.text
+        ?? (input.element.point ? `point(${input.element.point.x},${input.element.point.y})` : undefined)
+        ?? 'unknown element';
     console.error(`[MCP] execute_ui_action: ${input.action} on "${targetDesc}"`);
 
     // Get the driver for this session

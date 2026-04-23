@@ -44,6 +44,12 @@ export interface UIElement {
     text?: string;
     role?: string;
     bounds?: { x: number; y: number; width: number; height: number };
+    /**
+     * Absolute point coordinates for a tap. Use for custom controls (e.g. Bureau
+     * tabs) that don't respond to accessibility-based selectors even when the
+     * element is present in the hierarchy.
+     */
+    point?: { x: number; y: number };
     /** True when the element is a secure text field (password input). Used to emit env-var placeholders instead of literal credentials. */
     isSecure?: boolean;
 }

@@ -163,7 +163,7 @@ Capture the current UI element tree. Auto-targets the sole booted device if `ses
 - **Optional:** `sessionId`, `interactiveOnly`, `compact`, `includeRawOutput`, `artifactPath`
 
 #### `execute_ui_action`
-Dispatch a tap / type / scroll / swipe. Selector priority: `id > accessibilityLabel > text`.
+Dispatch a tap / type / scroll / swipe. Selector priority: `point > id > accessibilityLabel > text > bounds`.
 - **Required:** `sessionId`, `action`, `element`
 - **Optional:** `textInput` (required when `action: "type"`)
 
@@ -172,6 +172,18 @@ curl -X POST http://localhost:3000/message -H "Content-Type: application/json" -
   "jsonrpc":"2.0","id":1,"method":"tools/call",
   "params":{"name":"execute_ui_action","arguments":{
     "sessionId":"<SID>","action":"tap","element":{"accessibilityLabel":"LoginButton"}
+  }}
+}'
+```
+
+Use `point` as an escape hatch for custom controls (e.g. Bureau tabs) that
+ignore accessibility-based taps even when present in the hierarchy:
+
+```bash
+curl -X POST http://localhost:3000/message -H "Content-Type: application/json" -d '{
+  "jsonrpc":"2.0","id":1,"method":"tools/call",
+  "params":{"name":"execute_ui_action","arguments":{
+    "sessionId":"<SID>","action":"tap","element":{"point":{"x":201,"y":186}}
   }}
 }'
 ```

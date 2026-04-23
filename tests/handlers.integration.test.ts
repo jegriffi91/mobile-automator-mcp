@@ -237,6 +237,29 @@ describe('Handler Integration Tests', () => {
       await handleStopAndCompile({ sessionId: startResult.sessionId });
     });
 
+    it('should dispatch a point-based tap for custom controls', async () => {
+      const startResult = await handleStartRecording({
+        appBundleId: 'com.test.app',
+        platform: 'ios',
+      });
+
+      const actionResult = await handleExecuteUIAction({
+        sessionId: startResult.sessionId,
+        action: 'tap',
+        element: { point: { x: 201, y: 186 } },
+      });
+
+      expect(actionResult.success).toBe(true);
+      expect(actionResult.message).toContain('point(201,186)');
+      expect(mockDriverFns.executeAction).toHaveBeenCalledWith(
+        'tap',
+        expect.objectContaining({ point: { x: 201, y: 186 } }),
+        undefined,
+      );
+
+      await handleStopAndCompile({ sessionId: startResult.sessionId });
+    });
+
     it('should fail gracefully when driver returns error', async () => {
       mockDriverFns.executeAction.mockResolvedValue({
         success: false,

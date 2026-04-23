@@ -299,11 +299,14 @@ export class MaestroWrapper {
             let commandStr = '';
             const selector = element.id || element.accessibilityLabel || element.text;
 
-            if (!selector && !element.bounds) {
-                return { success: false, error: 'No valid selector (id, label, text, bounds) provided for element.' };
+            if (!selector && !element.bounds && !element.point) {
+                return { success: false, error: 'No valid selector (id, label, text, bounds, point) provided for element.' };
             }
 
+            // Point takes precedence — it's the explicit escape hatch for custom
+            // controls (e.g. Bureau tabs) that don't respond to accessibility selectors.
             const getSelectorMap = () => {
+                if (element.point) return `point: ${element.point.x},${element.point.y}`;
                 if (element.id) return `id: "${element.id}"`;
                 if (element.accessibilityLabel) return `label: "${element.accessibilityLabel}"`;
                 if (element.text) return `text: "${element.text}"`;
