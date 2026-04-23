@@ -107,6 +107,10 @@ function createPollingNotifier(): PollingNotifier | undefined {
 // ── Per-session driver instances ──
 const activeDrivers: Map<string, AutomationDriver> = new Map();
 
+// ── Persistent standalone driver (reused across sessionless get_ui_hierarchy calls) ──
+// Daemon-backed so the JVM stays warm after the first call.
+let standaloneDriver: AutomationDriver | null = null;
+
 // ---- start_recording_session ----
 export async function handleStartRecording(
     input: StartRecordingInput
@@ -484,22 +488,36 @@ export async function handleGetUIHierarchy(
         driver = sessionDriver;
         console.error(`[MCP] get_ui_hierarchy: using session driver for ${input.sessionId}`);
     } else {
-        // No session — create a temporary CLI driver and auto-target
-        driver = await DriverFactory.createCliOnly();
-        const iosSim = await driver.validateSimulator('ios');
-        if (!iosSim.booted) {
-            const androidSim = await driver.validateSimulator('android');
-            if (!androidSim.booted) {
-                throw new Error(
-                    'No booted iOS or Android simulator found. ' +
-                        'Boot a device or pass a sessionId from an active recording.'
-                );
+        // No session — use (or lazily create) a persistent daemon driver.
+        // Keeps the JVM warm so repeated standalone calls skip the ~5s cold-start.
+        if (!standaloneDriver) {
+            standaloneDriver = await DriverFactory.create();
+        }
+        driver = standaloneDriver;
+
+        // Only probe for a device when the daemon isn't running yet.
+        // Once started, the daemon remembers its target and we skip the probe.
+        if (!driver.isRunning) {
+            const iosSim = await driver.validateSimulator('ios');
+            if (iosSim.booted) {
+                await driver.start(iosSim.deviceId);
+                console.error(`[MCP] get_ui_hierarchy: auto-targeted iOS device ${iosSim.deviceId}`);
+            } else {
+                const androidSim = await driver.validateSimulator('android');
+                if (androidSim.booted) {
+                    await driver.start(androidSim.deviceId);
+                    console.error(
+                        `[MCP] get_ui_hierarchy: auto-targeted Android device ${androidSim.deviceId}`
+                    );
+                } else {
+                    throw new Error(
+                        'No booted iOS or Android simulator found. ' +
+                            'Boot a device or pass a sessionId from an active recording.'
+                    );
+                }
             }
-            console.error(
-                `[MCP] get_ui_hierarchy: auto-targeted Android device ${androidSim.deviceId}`
-            );
         } else {
-            console.error(`[MCP] get_ui_hierarchy: auto-targeted iOS device ${iosSim.deviceId}`);
+            console.error('[MCP] get_ui_hierarchy: reusing warm standalone driver');
         }
     }
 

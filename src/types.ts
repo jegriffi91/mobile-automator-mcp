@@ -134,7 +134,7 @@ export interface NetworkEvent {
 
 /** Centralized timeout configuration for Maestro CLI and daemon operations. */
 export interface TimeoutConfig {
-    /** Timeout for hierarchy dump calls (ms). Default: 15000 */
+    /** Timeout for hierarchy dump calls (ms). Default: 30000 */
     hierarchyDumpMs: number;
     /** Timeout for lightweight/polling hierarchy calls (ms). Default: 10000 */
     hierarchyLiteMs: number;
@@ -151,7 +151,7 @@ export interface TimeoutConfig {
 }
 
 export const DEFAULT_TIMEOUTS: TimeoutConfig = {
-    hierarchyDumpMs: 15_000,
+    hierarchyDumpMs: 30_000,
     hierarchyLiteMs: 10_000,
     actionMs: 15_000,
     testRunMs: 120_000,
