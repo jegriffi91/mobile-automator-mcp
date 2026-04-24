@@ -69,8 +69,12 @@ export class MaestroCliDriver implements AutomationDriver {
         return this.wrapper.uninstallDriver(platform, deviceId);
     }
 
-    async ensureCleanDriverState(platform: MobilePlatform, deviceId?: string): Promise<void> {
-        return this.wrapper.ensureCleanDriverState(platform, deviceId);
+    async ensureCleanDriverState(
+        platform: MobilePlatform,
+        deviceId?: string,
+        options?: { force?: boolean; probeTimeoutMs?: number },
+    ): Promise<void> {
+        return this.wrapper.ensureCleanDriverState(platform, deviceId, options);
     }
 
     // ── Hierarchy tree reader ──

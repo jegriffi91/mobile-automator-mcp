@@ -1428,8 +1428,13 @@ export async function handleRunTest(
     // Fail fast if a recording session owns the XCTest driver on port 7001.
     assertNoActiveSessions(activeDrivers, 'run_test');
 
-    // Create a CLI-only driver for test execution (no daemon needed)
-    const driver = await DriverFactory.createCliOnly();
+    // Create a CLI-only driver for test execution (no daemon needed). Forward
+    // driverCooldownMs so callers can tune the port-7001 TIME_WAIT drain when
+    // the health probe misses and we fall back to uninstall.
+    const driverTimeouts = input.driverCooldownMs !== undefined
+        ? { driverCooldownMs: input.driverCooldownMs }
+        : undefined;
+    const driver = await DriverFactory.createCliOnly(driverTimeouts);
 
     // Validate simulator + clean stale driver
     const platform = input.platform ?? 'ios';
@@ -1775,6 +1780,7 @@ export async function handleRunFlow(input: RunFlowInput): Promise<RunFlowOutput>
         stubsDir: input.stubsDir,
         stubServerPort: input.stubServerPort,
         platform: input.platform,
+        driverCooldownMs: input.driverCooldownMs,
     });
 
     return {

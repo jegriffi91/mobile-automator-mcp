@@ -13,11 +13,30 @@ import { promisify } from 'util';
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import * as os from 'os';
+import { Socket } from 'net';
 import { randomUUID } from 'crypto';
 import type { UIActionType, UIElement, MobilePlatform, TimeoutConfig } from '../types.js';
 import { DEFAULT_TIMEOUTS } from '../types.js';
 import { resolveMaestroBin, getExecEnv } from './env.js';
 import { withRetry, isTransientMaestroError } from './retry.js';
+
+/**
+ * Port the iOS XCTest driver (XCUITest / WebDriverAgent) listens on. This is
+ * fixed by Maestro and isn't configurable per-run, so we can probe it without
+ * plumbing a setting through every call site.
+ */
+const XCTEST_DRIVER_PORT = 7001;
+
+/** Options controlling ensureCleanDriverState's behavior. */
+export interface EnsureCleanDriverOptions {
+    /**
+     * If true, always uninstall + cooldown, skipping the health probe.
+     * Use when you know the driver is wedged and MUST be replaced. Default: false.
+     */
+    force?: boolean;
+    /** Timeout for the TCP health probe. Default: 500ms — the probe is best-effort. */
+    probeTimeoutMs?: number;
+}
 
 const execFileAsync = promisify(execFile);
 
@@ -170,15 +189,76 @@ export class MaestroWrapper {
     }
 
     /**
-     * Uninstall the Maestro driver and wait for the simulator's XCTest runner
-     * to release port 7001 before the next `maestro test` tries to bind it.
-     * iOS-only cooldown; Android's driver uses a different connection model.
+     * Probe whether a Maestro driver is currently listening on port 7001.
+     *
+     * Uses a plain TCP connect with a short timeout. A healthy driver accepts
+     * the connection; a dead or missing driver rejects (ECONNREFUSED) or times
+     * out. We deliberately do not send any bytes — this is purely a liveness
+     * check, not a protocol-level handshake.
+     *
+     * iOS-only. Android's UiAutomator uses a different transport.
      */
-    async ensureCleanDriverState(platform: MobilePlatform, deviceId?: string): Promise<void> {
+    async probeDriverHealth(
+        timeoutMs: number = 500,
+        port: number = XCTEST_DRIVER_PORT,
+    ): Promise<boolean> {
+        return new Promise<boolean>((resolve) => {
+            const socket = new Socket();
+            let settled = false;
+            const finish = (healthy: boolean) => {
+                if (settled) return;
+                settled = true;
+                socket.destroy();
+                resolve(healthy);
+            };
+            socket.setTimeout(timeoutMs);
+            socket.once('connect', () => finish(true));
+            socket.once('timeout', () => finish(false));
+            socket.once('error', () => finish(false));
+            socket.connect(port, '127.0.0.1');
+        });
+    }
+
+    /**
+     * Ensure the XCTest driver is in a usable state before the next `maestro` call.
+     *
+     * On iOS: probe port 7001 first. If a driver is already listening, we leave
+     * it alone — the prior approach of unconditionally uninstalling + reinstalling
+     * turned out to destabilize heavy UI transitions (secure text input + login →
+     * dashboard) even with a cooldown, because the freshly-installed XCTRunner
+     * was flaky under load (Bug #9). If the probe fails, we fall back to the
+     * original uninstall + cooldown path, which is still required to handle the
+     * port-7001 TIME_WAIT drain on actual back-to-back runs (Bug #5, commit
+     * 02e3819).
+     *
+     * On Android: uninstall unconditionally — the UiAutomator driver doesn't
+     * exhibit the same stability issue and there's no port to probe.
+     *
+     * Pass `{ force: true }` to skip the probe (e.g., when you already know the
+     * driver is wedged and must be replaced).
+     */
+    async ensureCleanDriverState(
+        platform: MobilePlatform,
+        deviceId?: string,
+        options: EnsureCleanDriverOptions = {},
+    ): Promise<void> {
+        if (platform === 'ios' && !options.force) {
+            const healthy = await this.probeDriverHealth(options.probeTimeoutMs);
+            if (healthy) {
+                console.error(
+                    `[MaestroWrapper] ensureCleanDriverState: driver healthy on port ${XCTEST_DRIVER_PORT} — reusing (skipping uninstall)`,
+                );
+                return;
+            }
+            console.error(
+                `[MaestroWrapper] ensureCleanDriverState: no driver on port ${XCTEST_DRIVER_PORT} — proceeding with uninstall + cooldown`,
+            );
+        }
+
         await this.uninstallDriver(platform, deviceId);
         if (platform === 'ios' && this.timeouts.driverCooldownMs > 0) {
             console.error(
-                `[MaestroWrapper] ensureCleanDriverState: iOS cooldown ${this.timeouts.driverCooldownMs}ms (port 7001 TIME_WAIT drain)`,
+                `[MaestroWrapper] ensureCleanDriverState: iOS cooldown ${this.timeouts.driverCooldownMs}ms (port ${XCTEST_DRIVER_PORT} TIME_WAIT drain)`,
             );
             await new Promise((r) => setTimeout(r, this.timeouts.driverCooldownMs));
         }

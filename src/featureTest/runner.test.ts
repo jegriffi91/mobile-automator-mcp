@@ -167,6 +167,34 @@ describe('runFeatureTest — happy path', () => {
         expect(calls).toEqual(['action', 'settle', 'assert']);
     });
 
+    it('threads driverCooldownMs into every runFlow call AND startRecording.timeouts', async () => {
+        const deps = makeDeps();
+        await runFeatureTest(
+            {
+                spec: {
+                    ...MINIMAL_SPEC,
+                    setup: [{ flow: 'login' }],
+                    actions: [{ tap: { id: 'x' } }],
+                    teardown: [{ flow: 'sign-out' }],
+                },
+                driverCooldownMs: 7500,
+            },
+            deps,
+        );
+        // Both setup and teardown flows receive the cooldown
+        const runFlowCalls = vi.mocked(deps.runFlow).mock.calls;
+        expect(runFlowCalls).toHaveLength(2);
+        for (const [arg] of runFlowCalls) {
+            expect(arg.driverCooldownMs).toBe(7500);
+        }
+        // start_recording_session's nested timeouts field picks it up too
+        expect(deps.startRecording).toHaveBeenCalledWith(
+            expect.objectContaining({
+                timeouts: expect.objectContaining({ driverCooldownMs: 7500 }),
+            }),
+        );
+    });
+
     it('merges top-level env with per-flow params (per-flow wins)', async () => {
         const deps = makeDeps();
         await runFeatureTest(
