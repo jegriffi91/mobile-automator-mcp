@@ -35,6 +35,21 @@ import { takeIosScreenshot, takeAndroidScreenshot } from './screenshot/index.js'
 import { runIosUnitTests, runAndroidUnitTests } from './testing/index.js';
 import { StubServer } from './wiremock/index.js';
 import { extractTrackEvents } from './session/track-event-extractor.js';
+import {
+    getMergedEvents,
+    matchEvent,
+    filterEvents,
+    findFirstMatch,
+    extractOperationName,
+    describeMatcher,
+    resolveAfterAction,
+    eventsInWindow,
+    getByPath,
+    existsAtPath,
+    computeDurationStats,
+} from './verification/index.js';
+import type { AfterActionRef } from './verification/index.js';
+import { assertNoActiveSessions } from './testing/driver-conflict.js';
 import type { MockingConfig } from './synthesis/index.js';
 import type { NetworkEvent, StateChange } from './types.js';
 import type { PollingNotifier } from './session/touch-inferrer.js';
@@ -53,6 +68,22 @@ import type {
     GetNetworkLogsOutput,
     VerifySDUIPayloadInput,
     VerifySDUIPayloadOutput,
+    VerifyNetworkParallelismInput,
+    VerifyNetworkParallelismOutput,
+    VerifyNetworkOnScreenInput,
+    VerifyNetworkOnScreenOutput,
+    VerifyNetworkAbsentInput,
+    VerifyNetworkAbsentOutput,
+    VerifyNetworkSequenceInput,
+    VerifyNetworkSequenceOutput,
+    VerifyNetworkPerformanceInput,
+    VerifyNetworkPerformanceOutput,
+    VerifyNetworkPayloadInput,
+    VerifyNetworkPayloadOutput,
+    VerifyNetworkDeduplicationInput,
+    VerifyNetworkDeduplicationOutput,
+    VerifyNetworkErrorHandlingInput,
+    VerifyNetworkErrorHandlingOutput,
     RegisterSegmentInput,
     RegisterSegmentOutput,
     RunTestInput,
@@ -674,44 +705,10 @@ export async function handleGetNetworkLogs(
 ): Promise<GetNetworkLogsOutput> {
     console.error(`[MCP] get_network_logs: fetching logs for session ${input.sessionId}`);
 
-    // Fetch from Proxyman (live traffic) with domain pre-filtering
-    // Fall back to session-level filterDomains if not provided in the request
-    const session = await sessionManager.getSession(input.sessionId);
-    const domains = input.filterDomains ?? session?.filterDomains;
-    // Don't pass the caller's limit here — slicing the OLDEST N entries before
-    // time-scoping drops the entire session window. Limit is applied after the
-    // merge below (line further down).
-    const proxymanEvents = await proxymanWrapper.getTransactions(
-        input.sessionId,
-        input.filterPath,
-        undefined,
-        domains
-    );
-
-    // Time-scope Proxyman results to this session's lifetime
-    const sessionStart = session?.startedAt ? new Date(session.startedAt).getTime() : 0;
-    const scopedProxymanEvents = sessionStart
-        ? proxymanEvents.filter((e) => new Date(e.timestamp).getTime() >= sessionStart)
-        : proxymanEvents;
-
-    // Also get any events already logged in the session DB
-    let dbEvents = await sessionManager.getNetworkEvents(input.sessionId);
-
-    if (input.filterPath) {
-        dbEvents = dbEvents.filter((e: NetworkEvent) => e.url.includes(input.filterPath!));
-    }
-
-    // Merge and deduplicate by url + timestamp
-    const seen = new Set<string>();
-    const merged: NetworkEvent[] = [];
-
-    for (const event of [...dbEvents, ...scopedProxymanEvents]) {
-        const key = `${event.url}|${event.timestamp}`;
-        if (!seen.has(key)) {
-            seen.add(key);
-            merged.push(event);
-        }
-    }
+    const { merged, scopedProxymanEvents } = await getMergedEvents(input.sessionId, {
+        filterDomains: input.filterDomains,
+        filterPath: input.filterPath,
+    });
 
     // Also persist Proxyman events to the session DB for future correlation
     await sessionManager.batchLogNetworkEvents(scopedProxymanEvents);
@@ -764,6 +761,606 @@ export async function handleVerifySDUIPayload(
         actual,
         mismatches: result.mismatches,
     };
+}
+
+// ──────────────────────────────────────────────
+// verify_network_* handlers
+// ──────────────────────────────────────────────
+
+interface EventSummary {
+    timestamp: string;
+    method: string;
+    url: string;
+    statusCode: number;
+    durationMs?: number;
+    operationName?: string;
+}
+
+function summarize(event: NetworkEvent): EventSummary {
+    return {
+        timestamp: event.timestamp,
+        method: event.method,
+        url: event.url,
+        statusCode: event.statusCode,
+        durationMs: event.durationMs,
+        operationName: extractOperationName(event.requestBody),
+    };
+}
+
+function sortByTimestamp(events: NetworkEvent[]): NetworkEvent[] {
+    return [...events].sort(
+        (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime(),
+    );
+}
+
+async function resolveWindow(
+    sessionId: string,
+    events: NetworkEvent[],
+    afterAction: AfterActionRef | undefined,
+    withinMs: number | undefined,
+): Promise<{ windowed: NetworkEvent[]; anchorTimestamp?: string; anchorError?: string }> {
+    if (!afterAction) return { windowed: events };
+    const anchor = await resolveAfterAction(sessionId, afterAction);
+    if (!anchor) {
+        return {
+            windowed: [],
+            anchorError: `afterAction (${afterAction.kind}=${JSON.stringify(afterAction.value)}) did not match any session interaction`,
+        };
+    }
+    const anchorMs = new Date(anchor.timestamp).getTime();
+    const window = withinMs ?? 3000;
+    return {
+        windowed: eventsInWindow(events, anchorMs, window),
+        anchorTimestamp: anchor.timestamp,
+    };
+}
+
+// ---- verify_network_parallelism ----
+export async function handleVerifyNetworkParallelism(
+    input: VerifyNetworkParallelismInput,
+): Promise<VerifyNetworkParallelismOutput> {
+    console.error(`[MCP] verify_network_parallelism: session ${input.sessionId}`);
+
+    const { merged } = await getMergedEvents(input.sessionId, {
+        filterDomains: input.filterDomains,
+    });
+    const matched = sortByTimestamp(filterEvents(merged, input.matcher));
+    const count = matched.length;
+
+    if (count === 0) {
+        return {
+            passed: false,
+            verdict: `No events matched ${describeMatcher(input.matcher)}`,
+            count: 0,
+            actualSpanMs: 0,
+            avgGapMs: 0,
+            events: [],
+        };
+    }
+
+    const firstMs = new Date(matched[0].timestamp).getTime();
+    const lastMs = new Date(matched[matched.length - 1].timestamp).getTime();
+    const actualSpanMs = lastMs - firstMs;
+
+    let gapSum = 0;
+    for (let i = 1; i < matched.length; i++) {
+        gapSum += new Date(matched[i].timestamp).getTime() - new Date(matched[i - 1].timestamp).getTime();
+    }
+    const avgGapMs = matched.length > 1 ? Math.round(gapSum / (matched.length - 1)) : 0;
+
+    const passed = count >= input.minExpectedCount && actualSpanMs <= input.maxWindowMs;
+    let verdict: string;
+    if (count < input.minExpectedCount) {
+        verdict = `Expected ≥${input.minExpectedCount} matching events, got ${count}`;
+    } else if (actualSpanMs > input.maxWindowMs) {
+        verdict = `${count} events span ${actualSpanMs}ms, exceeds maxWindowMs=${input.maxWindowMs}`;
+    } else {
+        verdict = `${count} events fired within ${actualSpanMs}ms (≤${input.maxWindowMs})`;
+    }
+
+    return {
+        passed,
+        verdict,
+        count,
+        actualSpanMs,
+        avgGapMs,
+        events: matched.map(summarize),
+    };
+}
+
+// ---- verify_network_on_screen ----
+export async function handleVerifyNetworkOnScreen(
+    input: VerifyNetworkOnScreenInput,
+): Promise<VerifyNetworkOnScreenOutput> {
+    console.error(`[MCP] verify_network_on_screen: session ${input.sessionId}`);
+
+    const { merged } = await getMergedEvents(input.sessionId, {
+        filterDomains: input.filterDomains,
+    });
+    const { windowed, anchorTimestamp, anchorError } = await resolveWindow(
+        input.sessionId,
+        merged,
+        input.afterAction,
+        input.withinMs,
+    );
+    if (anchorError) {
+        return {
+            passed: false,
+            verdict: anchorError,
+            matched: [],
+            missing: input.expectedCalls.map((m, idx) => ({
+                matcher: m as Record<string, unknown>,
+                description: `expectedCalls[${idx}]: ${describeMatcher(m)}`,
+                matched: false,
+            })),
+            extras: [],
+        };
+    }
+
+    const usedIds = new Set<NetworkEvent>();
+    const matched: VerifyNetworkOnScreenOutput['matched'] = [];
+    const missing: VerifyNetworkOnScreenOutput['missing'] = [];
+
+    input.expectedCalls.forEach((m, idx) => {
+        const hit = windowed.find((e) => !usedIds.has(e) && matchEvent(e, m));
+        const entry = {
+            matcher: m as Record<string, unknown>,
+            description: `expectedCalls[${idx}]: ${describeMatcher(m)}`,
+            matched: !!hit,
+            event: hit ? summarize(hit) : undefined,
+        };
+        if (hit) {
+            usedIds.add(hit);
+            matched.push(entry);
+        } else {
+            missing.push(entry);
+        }
+    });
+
+    const extras = windowed.filter((e) => !usedIds.has(e)).map(summarize);
+    const passed = missing.length === 0;
+    const verdict = passed
+        ? `All ${input.expectedCalls.length} expected calls observed within ${input.withinMs ?? 3000}ms of anchor`
+        : `${missing.length} of ${input.expectedCalls.length} expected calls missing`;
+
+    return { passed, verdict, anchorTimestamp, matched, missing, extras };
+}
+
+// ---- verify_network_absent ----
+export async function handleVerifyNetworkAbsent(
+    input: VerifyNetworkAbsentInput,
+): Promise<VerifyNetworkAbsentOutput> {
+    console.error(`[MCP] verify_network_absent: session ${input.sessionId}`);
+
+    const { merged } = await getMergedEvents(input.sessionId, {
+        filterDomains: input.filterDomains,
+    });
+    const { windowed, anchorTimestamp, anchorError } = await resolveWindow(
+        input.sessionId,
+        merged,
+        input.afterAction,
+        input.withinMs,
+    );
+    if (anchorError) {
+        return { passed: false, verdict: anchorError, violations: [] };
+    }
+
+    const violations: VerifyNetworkAbsentOutput['violations'] = [];
+    input.forbiddenCalls.forEach((m, idx) => {
+        const hits = windowed.filter((e) => matchEvent(e, m));
+        if (hits.length > 0) {
+            violations.push({
+                matcher: m as Record<string, unknown>,
+                description: `forbiddenCalls[${idx}]: ${describeMatcher(m)}`,
+                events: hits.map(summarize),
+            });
+        }
+    });
+
+    const passed = violations.length === 0;
+    const verdict = passed
+        ? `No forbidden calls observed within ${input.withinMs ?? 3000}ms of anchor`
+        : `${violations.length} forbidden matcher(s) produced hits`;
+
+    return { passed, verdict, anchorTimestamp, violations };
+}
+
+// ---- verify_network_sequence ----
+export async function handleVerifyNetworkSequence(
+    input: VerifyNetworkSequenceInput,
+): Promise<VerifyNetworkSequenceOutput> {
+    console.error(`[MCP] verify_network_sequence: session ${input.sessionId}`);
+
+    const { merged } = await getMergedEvents(input.sessionId, {
+        filterDomains: input.filterDomains,
+    });
+    const { windowed, anchorError } = await resolveWindow(
+        input.sessionId,
+        merged,
+        input.afterAction,
+        input.withinMs,
+    );
+    if (anchorError) {
+        return {
+            passed: false,
+            verdict: anchorError,
+            actualOrder: [],
+            missing: input.expectedOrder.map((m, idx) => ({
+                expectedIndex: idx,
+                description: `expectedOrder[${idx}]: ${describeMatcher(m)}`,
+            })),
+        };
+    }
+
+    const scoped = input.matcher ? filterEvents(windowed, input.matcher) : windowed;
+    const ordered = sortByTimestamp(scoped);
+
+    const actualOrder: VerifyNetworkSequenceOutput['actualOrder'] = [];
+    let cursor = 0;
+    let firstDeviationIndex: number | undefined;
+
+    for (const event of ordered) {
+        if (cursor >= input.expectedOrder.length) break;
+
+        const current = input.expectedOrder[cursor];
+        if (matchEvent(event, current)) {
+            actualOrder.push({
+                expectedIndex: cursor,
+                description: `expectedOrder[${cursor}]: ${describeMatcher(current)}`,
+                event: summarize(event),
+            });
+            cursor++;
+            continue;
+        }
+
+        // strict: any unmatched event between advances is a deviation
+        if (input.strict && firstDeviationIndex === undefined) {
+            firstDeviationIndex = cursor;
+        }
+
+        // strict: also fail if a later matcher fires out of order
+        if (input.strict) {
+            for (let j = cursor + 1; j < input.expectedOrder.length; j++) {
+                if (matchEvent(event, input.expectedOrder[j])) {
+                    if (firstDeviationIndex === undefined) firstDeviationIndex = cursor;
+                    break;
+                }
+            }
+        }
+    }
+
+    const missing: VerifyNetworkSequenceOutput['missing'] = [];
+    for (let i = cursor; i < input.expectedOrder.length; i++) {
+        missing.push({
+            expectedIndex: i,
+            description: `expectedOrder[${i}]: ${describeMatcher(input.expectedOrder[i])}`,
+        });
+    }
+
+    const allHit = cursor === input.expectedOrder.length;
+    const passed = allHit && (!input.strict || firstDeviationIndex === undefined);
+
+    let verdict: string;
+    if (!allHit) {
+        verdict = `Expected ${input.expectedOrder.length} matchers, only ${cursor} hit in order`;
+    } else if (input.strict && firstDeviationIndex !== undefined) {
+        verdict = `All matchers hit in order, but strict mode detected out-of-order or intervening events starting at index ${firstDeviationIndex}`;
+    } else {
+        verdict = `All ${input.expectedOrder.length} matchers hit in order`;
+    }
+
+    return {
+        passed,
+        verdict,
+        actualOrder,
+        firstDeviationIndex,
+        missing: missing.length > 0 ? missing : undefined,
+    };
+}
+
+// ---- verify_network_performance ----
+export async function handleVerifyNetworkPerformance(
+    input: VerifyNetworkPerformanceInput,
+): Promise<VerifyNetworkPerformanceOutput> {
+    console.error(`[MCP] verify_network_performance: session ${input.sessionId}`);
+
+    const { merged } = await getMergedEvents(input.sessionId, {
+        filterDomains: input.filterDomains,
+    });
+    const { windowed, anchorError } = await resolveWindow(
+        input.sessionId,
+        merged,
+        input.afterAction,
+        input.withinMs,
+    );
+    if (anchorError) {
+        return {
+            passed: false,
+            verdict: anchorError,
+            count: 0,
+            unknownDurationCount: 0,
+            totalMs: 0,
+            violators: [],
+        };
+    }
+
+    const matched = sortByTimestamp(filterEvents(windowed, input.matcher));
+    const stats = computeDurationStats(matched.map((e) => e.durationMs));
+
+    let totalMs = 0;
+    if (matched.length > 0) {
+        const firstStart = new Date(matched[0].timestamp).getTime();
+        const lastEvent = matched[matched.length - 1];
+        const lastStart = new Date(lastEvent.timestamp).getTime();
+        const lastDuration = lastEvent.durationMs ?? 0;
+        totalMs = lastStart + lastDuration - firstStart;
+    }
+
+    const violators: VerifyNetworkPerformanceOutput['violators'] = [];
+    if (input.maxIndividualMs !== undefined) {
+        for (const e of matched) {
+            if (e.durationMs !== undefined && e.durationMs > input.maxIndividualMs) {
+                violators.push({
+                    event: summarize(e),
+                    reason: `durationMs=${e.durationMs} exceeds maxIndividualMs=${input.maxIndividualMs}`,
+                });
+            }
+        }
+    }
+
+    let totalExceeded = false;
+    if (input.maxTotalMs !== undefined && totalMs > input.maxTotalMs) {
+        totalExceeded = true;
+    }
+
+    const passed = matched.length > 0 && violators.length === 0 && !totalExceeded;
+    let verdict: string;
+    if (matched.length === 0) {
+        verdict = `No events matched ${describeMatcher(input.matcher)}`;
+    } else if (totalExceeded) {
+        verdict = `totalMs=${totalMs} exceeds maxTotalMs=${input.maxTotalMs}`;
+    } else if (violators.length > 0) {
+        verdict = `${violators.length} of ${matched.length} events exceeded maxIndividualMs`;
+    } else {
+        verdict = `${matched.length} events; totalMs=${totalMs}, p50=${stats.p50 ?? '—'}, p95=${stats.p95 ?? '—'}`;
+    }
+
+    return {
+        passed,
+        verdict,
+        count: stats.count + stats.unknownDurationCount,
+        unknownDurationCount: stats.unknownDurationCount,
+        totalMs,
+        slowestMs: stats.max,
+        fastestMs: stats.min,
+        p50: stats.p50,
+        p95: stats.p95,
+        violators,
+    };
+}
+
+// ---- verify_network_payload ----
+export async function handleVerifyNetworkPayload(
+    input: VerifyNetworkPayloadInput,
+): Promise<VerifyNetworkPayloadOutput> {
+    console.error(`[MCP] verify_network_payload: session ${input.sessionId}`);
+
+    if (!input.url && !input.matcher) {
+        return {
+            passed: false,
+            verdict: 'Must supply either `url` or `matcher`',
+            mismatches: ['Missing event selector'],
+        };
+    }
+
+    const { merged } = await getMergedEvents(input.sessionId, {
+        filterDomains: input.filterDomains,
+    });
+
+    let target: NetworkEvent | undefined;
+    if (input.url) {
+        target = merged.find((e) => e.url === input.url) ?? merged.find((e) => e.url.includes(input.url!));
+    } else if (input.matcher) {
+        target = findFirstMatch(merged, input.matcher);
+    }
+
+    if (!target || !target.responseBody) {
+        return {
+            passed: false,
+            verdict: target
+                ? 'Matching event has no response body'
+                : `No event found for ${input.url ?? describeMatcher(input.matcher!)}`,
+            event: target ? summarize(target) : undefined,
+            mismatches: [],
+        };
+    }
+
+    let body: unknown;
+    try {
+        body = JSON.parse(target.responseBody);
+    } catch {
+        return {
+            passed: false,
+            verdict: 'Response body is not valid JSON',
+            event: summarize(target),
+            mismatches: ['Non-JSON response body'],
+        };
+    }
+
+    const mismatches: string[] = [];
+    for (const assertion of input.responseAssertions) {
+        const value = getByPath(body, assertion.path);
+        const exists = existsAtPath(body, assertion.path);
+
+        if (assertion.exists !== undefined) {
+            if (assertion.exists && !exists) {
+                mismatches.push(`${assertion.path}: expected to exist but was missing`);
+                continue;
+            }
+            if (!assertion.exists && exists) {
+                mismatches.push(`${assertion.path}: expected to be absent but was present`);
+                continue;
+            }
+        }
+
+        // If we're only asserting existence=false and that was satisfied, skip the rest.
+        if (assertion.exists === false) continue;
+
+        if (!exists && (assertion.equals !== undefined || assertion.contains || assertion.type || assertion.minLength !== undefined)) {
+            mismatches.push(`${assertion.path}: path did not resolve`);
+            continue;
+        }
+
+        if (assertion.type) {
+            const actualType = value === null
+                ? 'null'
+                : Array.isArray(value)
+                    ? 'array'
+                    : typeof value;
+            if (actualType !== assertion.type) {
+                mismatches.push(`${assertion.path}: expected type ${assertion.type}, got ${actualType}`);
+                continue;
+            }
+        }
+
+        if (assertion.equals !== undefined) {
+            if (JSON.stringify(value) !== JSON.stringify(assertion.equals)) {
+                mismatches.push(
+                    `${assertion.path}: expected ${JSON.stringify(assertion.equals)}, got ${JSON.stringify(value)}`,
+                );
+            }
+        }
+
+        if (assertion.contains !== undefined) {
+            const s = typeof value === 'string' ? value : JSON.stringify(value ?? '');
+            if (!s.includes(assertion.contains)) {
+                mismatches.push(`${assertion.path}: does not contain "${assertion.contains}"`);
+            }
+        }
+
+        if (assertion.minLength !== undefined) {
+            const len = Array.isArray(value) || typeof value === 'string' ? value.length : -1;
+            if (len < assertion.minLength) {
+                mismatches.push(
+                    `${assertion.path}: length ${len} < minLength ${assertion.minLength}`,
+                );
+            }
+        }
+    }
+
+    const passed = mismatches.length === 0;
+    return {
+        passed,
+        verdict: passed
+            ? `All ${input.responseAssertions.length} assertion(s) passed`
+            : `${mismatches.length} of ${input.responseAssertions.length} assertion(s) failed`,
+        event: summarize(target),
+        mismatches,
+    };
+}
+
+// ---- verify_network_deduplication ----
+export async function handleVerifyNetworkDeduplication(
+    input: VerifyNetworkDeduplicationInput,
+): Promise<VerifyNetworkDeduplicationOutput> {
+    console.error(`[MCP] verify_network_deduplication: session ${input.sessionId}`);
+
+    const { merged } = await getMergedEvents(input.sessionId, {
+        filterDomains: input.filterDomains,
+    });
+    const { windowed, anchorError } = await resolveWindow(
+        input.sessionId,
+        merged,
+        input.afterAction,
+        input.withinMs,
+    );
+    if (anchorError) {
+        return { passed: false, verdict: anchorError, duplicates: [] };
+    }
+
+    const scoped = input.matcher ? filterEvents(windowed, input.matcher) : windowed;
+
+    const groups = new Map<string, string[]>();
+    for (const event of scoped) {
+        let key: string | undefined;
+        if (input.groupBy === 'operationName') {
+            key = extractOperationName(event.requestBody) ?? event.url;
+        } else {
+            key = event.url;
+        }
+        if (!key) continue;
+        const list = groups.get(key) ?? [];
+        list.push(event.timestamp);
+        groups.set(key, list);
+    }
+
+    const duplicates: VerifyNetworkDeduplicationOutput['duplicates'] = [];
+    for (const [key, timestamps] of groups) {
+        if (timestamps.length > input.maxDuplicates) {
+            duplicates.push({ key, count: timestamps.length, timestamps });
+        }
+    }
+
+    const passed = duplicates.length === 0;
+    const verdict = passed
+        ? `No duplicates beyond maxDuplicates=${input.maxDuplicates}`
+        : `${duplicates.length} key(s) exceeded maxDuplicates=${input.maxDuplicates}`;
+
+    return { passed, verdict, duplicates };
+}
+
+// ---- verify_network_error_handling ----
+export async function handleVerifyNetworkErrorHandling(
+    input: VerifyNetworkErrorHandlingInput,
+): Promise<VerifyNetworkErrorHandlingOutput> {
+    console.error(`[MCP] verify_network_error_handling: session ${input.sessionId}`);
+
+    const { merged } = await getMergedEvents(input.sessionId, {
+        filterDomains: input.filterDomains,
+    });
+    const { windowed, anchorError } = await resolveWindow(
+        input.sessionId,
+        merged,
+        input.afterAction,
+        input.withinMs,
+    );
+    if (anchorError) {
+        return {
+            passed: false,
+            verdict: anchorError,
+            errorsFound: [],
+            missingErrors: input.expectedErrors.map((m, idx) => ({
+                expectedIndex: idx,
+                description: `expectedErrors[${idx}]: ${describeMatcher(m)}`,
+            })),
+        };
+    }
+
+    const errorsFound: VerifyNetworkErrorHandlingOutput['errorsFound'] = [];
+    const missingErrors: VerifyNetworkErrorHandlingOutput['missingErrors'] = [];
+
+    input.expectedErrors.forEach((m, idx) => {
+        const hit = findFirstMatch(windowed, m);
+        if (hit) {
+            errorsFound.push({
+                expectedIndex: idx,
+                description: `expectedErrors[${idx}]: ${describeMatcher(m)}`,
+                event: summarize(hit),
+            });
+        } else {
+            missingErrors.push({
+                expectedIndex: idx,
+                description: `expectedErrors[${idx}]: ${describeMatcher(m)}`,
+            });
+        }
+    });
+
+    const passed = missingErrors.length === 0;
+    const verdict = passed
+        ? `All ${input.expectedErrors.length} expected error(s) observed`
+        : `${missingErrors.length} of ${input.expectedErrors.length} expected error(s) missing`;
+
+    return { passed, verdict, errorsFound, missingErrors };
 }
 
 // ---- register_segment ----
@@ -819,6 +1416,9 @@ export async function handleRunTest(
     input: RunTestInput
 ): Promise<RunTestOutput> {
     console.error(`[MCP] run_test: running ${input.yamlPath}`);
+
+    // Fail fast if a recording session owns the XCTest driver on port 7001.
+    assertNoActiveSessions(activeDrivers, 'run_test');
 
     // Create a CLI-only driver for test execution (no daemon needed)
     const driver = await DriverFactory.createCliOnly();
@@ -1147,6 +1747,9 @@ export async function handleListFlows(input: ListFlowsInput): Promise<ListFlowsO
 }
 
 export async function handleRunFlow(input: RunFlowInput): Promise<RunFlowOutput> {
+    // Fail fast (with the run_flow name) before delegating into run_test.
+    assertNoActiveSessions(activeDrivers, 'run_flow');
+
     const flowsDir = resolveFlowsDir(input.flowsDir);
     console.error(`[MCP] run_flow: resolving "${input.name}" in ${flowsDir}`);
 

@@ -24,6 +24,22 @@ import {
     GetNetworkLogsOutputSchema,
     VerifySDUIPayloadInputSchema,
     VerifySDUIPayloadOutputSchema,
+    VerifyNetworkParallelismInputSchema,
+    VerifyNetworkParallelismOutputSchema,
+    VerifyNetworkOnScreenInputSchema,
+    VerifyNetworkOnScreenOutputSchema,
+    VerifyNetworkAbsentInputSchema,
+    VerifyNetworkAbsentOutputSchema,
+    VerifyNetworkSequenceInputSchema,
+    VerifyNetworkSequenceOutputSchema,
+    VerifyNetworkPerformanceInputSchema,
+    VerifyNetworkPerformanceOutputSchema,
+    VerifyNetworkPayloadInputSchema,
+    VerifyNetworkPayloadOutputSchema,
+    VerifyNetworkDeduplicationInputSchema,
+    VerifyNetworkDeduplicationOutputSchema,
+    VerifyNetworkErrorHandlingInputSchema,
+    VerifyNetworkErrorHandlingOutputSchema,
     RegisterSegmentInputSchema,
     RegisterSegmentOutputSchema,
     RunTestInputSchema,
@@ -58,6 +74,14 @@ import {
     handleExecuteUIAction,
     handleGetNetworkLogs,
     handleVerifySDUIPayload,
+    handleVerifyNetworkParallelism,
+    handleVerifyNetworkOnScreen,
+    handleVerifyNetworkAbsent,
+    handleVerifyNetworkSequence,
+    handleVerifyNetworkPerformance,
+    handleVerifyNetworkPayload,
+    handleVerifyNetworkDeduplication,
+    handleVerifyNetworkErrorHandling,
     handleRegisterSegment,
     handleRunTest,
     handleListDevices,
@@ -236,6 +260,214 @@ server.registerTool(
     },
     async (args) => {
         const result = await handleVerifySDUIPayload(args);
+        return {
+            content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
+            structuredContent: result,
+        };
+    }
+);
+
+// ── 6a. verify_network_parallelism ──
+server.registerTool(
+    TOOL_NAMES.VERIFY_NETWORK_PARALLELISM,
+    {
+        title: 'Verify Network Parallelism',
+        description:
+            'Assert that a set of matching network requests all start within a given time window (e.g., SDUI queries firing in parallel). Fails if fewer than minExpectedCount match or the total span exceeds maxWindowMs.',
+        inputSchema: VerifyNetworkParallelismInputSchema,
+        outputSchema: VerifyNetworkParallelismOutputSchema,
+        annotations: {
+            title: 'Verify Network Parallelism',
+            readOnlyHint: true,
+            destructiveHint: false,
+            idempotentHint: true,
+            openWorldHint: true,
+        },
+    },
+    async (args) => {
+        const result = await handleVerifyNetworkParallelism(args);
+        return {
+            content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
+            structuredContent: result,
+        };
+    }
+);
+
+// ── 6b. verify_network_on_screen ──
+server.registerTool(
+    TOOL_NAMES.VERIFY_NETWORK_ON_SCREEN,
+    {
+        title: 'Verify Network On Screen',
+        description:
+            'Assert that a list of expected network calls all fire within `withinMs` of a referenced UI action. Use to verify that navigating to a screen triggers the right API calls.',
+        inputSchema: VerifyNetworkOnScreenInputSchema,
+        outputSchema: VerifyNetworkOnScreenOutputSchema,
+        annotations: {
+            title: 'Verify Network On Screen',
+            readOnlyHint: true,
+            destructiveHint: false,
+            idempotentHint: true,
+            openWorldHint: true,
+        },
+    },
+    async (args) => {
+        const result = await handleVerifyNetworkOnScreen(args);
+        return {
+            content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
+            structuredContent: result,
+        };
+    }
+);
+
+// ── 6c. verify_network_absent ──
+server.registerTool(
+    TOOL_NAMES.VERIFY_NETWORK_ABSENT,
+    {
+        title: 'Verify Network Absent',
+        description:
+            'Assert that a list of forbidden network calls do NOT fire within `withinMs` of a referenced UI action. Use to verify cache hits or absence of unnecessary prefetching.',
+        inputSchema: VerifyNetworkAbsentInputSchema,
+        outputSchema: VerifyNetworkAbsentOutputSchema,
+        annotations: {
+            title: 'Verify Network Absent',
+            readOnlyHint: true,
+            destructiveHint: false,
+            idempotentHint: true,
+            openWorldHint: true,
+        },
+    },
+    async (args) => {
+        const result = await handleVerifyNetworkAbsent(args);
+        return {
+            content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
+            structuredContent: result,
+        };
+    }
+);
+
+// ── 6d. verify_network_sequence ──
+server.registerTool(
+    TOOL_NAMES.VERIFY_NETWORK_SEQUENCE,
+    {
+        title: 'Verify Network Sequence',
+        description:
+            'Assert that a set of network calls happened in a specific chronological order. Strict mode fails if any unmatched event appears between ordered matches.',
+        inputSchema: VerifyNetworkSequenceInputSchema,
+        outputSchema: VerifyNetworkSequenceOutputSchema,
+        annotations: {
+            title: 'Verify Network Sequence',
+            readOnlyHint: true,
+            destructiveHint: false,
+            idempotentHint: true,
+            openWorldHint: true,
+        },
+    },
+    async (args) => {
+        const result = await handleVerifyNetworkSequence(args);
+        return {
+            content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
+            structuredContent: result,
+        };
+    }
+);
+
+// ── 6e. verify_network_performance ──
+server.registerTool(
+    TOOL_NAMES.VERIFY_NETWORK_PERFORMANCE,
+    {
+        title: 'Verify Network Performance',
+        description:
+            'Assert latency budgets: max per-request durationMs and/or max total first-start→last-end across a matcher. Reports p50/p95 stats and excludes events with unknown durations from percentiles.',
+        inputSchema: VerifyNetworkPerformanceInputSchema,
+        outputSchema: VerifyNetworkPerformanceOutputSchema,
+        annotations: {
+            title: 'Verify Network Performance',
+            readOnlyHint: true,
+            destructiveHint: false,
+            idempotentHint: true,
+            openWorldHint: true,
+        },
+    },
+    async (args) => {
+        const result = await handleVerifyNetworkPerformance(args);
+        return {
+            content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
+            structuredContent: result,
+        };
+    }
+);
+
+// ── 6f. verify_network_payload ──
+server.registerTool(
+    TOOL_NAMES.VERIFY_NETWORK_PAYLOAD,
+    {
+        title: 'Verify Network Payload',
+        description:
+            'Assert JSON response fields via dot/bracket paths: equals, contains, exists, type, minLength. More flexible than verify_sdui_payload, which only supports exact field matching.',
+        inputSchema: VerifyNetworkPayloadInputSchema,
+        outputSchema: VerifyNetworkPayloadOutputSchema,
+        annotations: {
+            title: 'Verify Network Payload',
+            readOnlyHint: true,
+            destructiveHint: false,
+            idempotentHint: true,
+            openWorldHint: true,
+        },
+    },
+    async (args) => {
+        const result = await handleVerifyNetworkPayload(args);
+        return {
+            content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
+            structuredContent: result,
+        };
+    }
+);
+
+// ── 6g. verify_network_deduplication ──
+server.registerTool(
+    TOOL_NAMES.VERIFY_NETWORK_DEDUPLICATION,
+    {
+        title: 'Verify Network Deduplication',
+        description:
+            'Assert that requests are not duplicated beyond a threshold. Groups by URL or extracted GraphQL operationName; flags groups exceeding maxDuplicates.',
+        inputSchema: VerifyNetworkDeduplicationInputSchema,
+        outputSchema: VerifyNetworkDeduplicationOutputSchema,
+        annotations: {
+            title: 'Verify Network Deduplication',
+            readOnlyHint: true,
+            destructiveHint: false,
+            idempotentHint: true,
+            openWorldHint: true,
+        },
+    },
+    async (args) => {
+        const result = await handleVerifyNetworkDeduplication(args);
+        return {
+            content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
+            structuredContent: result,
+        };
+    }
+);
+
+// ── 6h. verify_network_error_handling ──
+server.registerTool(
+    TOOL_NAMES.VERIFY_NETWORK_ERROR_HANDLING,
+    {
+        title: 'Verify Network Error Handling',
+        description:
+            'Assert that specific error responses appear in the session. Pair with WireMock stubs to verify the app behaves correctly under injected failures.',
+        inputSchema: VerifyNetworkErrorHandlingInputSchema,
+        outputSchema: VerifyNetworkErrorHandlingOutputSchema,
+        annotations: {
+            title: 'Verify Network Error Handling',
+            readOnlyHint: true,
+            destructiveHint: false,
+            idempotentHint: true,
+            openWorldHint: true,
+        },
+    },
+    async (args) => {
+        const result = await handleVerifyNetworkErrorHandling(args);
         return {
             content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
             structuredContent: result,
