@@ -30,6 +30,9 @@ import {
   BootSimulatorOutputSchema,
   TakeScreenshotOutputSchema,
   RunUnitTestsOutputSchema,
+  FeatureTestSpecSchema,
+  RunFeatureTestInputSchema,
+  RunFeatureTestOutputSchema,
 } from './schemas.js';
 
 describe('Schema Conformance', () => {
@@ -577,6 +580,166 @@ describe('Schema Conformance', () => {
       };
       const result = GetSessionTimelineOutputSchema.safeParse(output);
       expect(result.success).toBe(true);
+    });
+  });
+
+  describe('FeatureTestSpecSchema', () => {
+    it('accepts a minimal spec', () => {
+      const spec = {
+        name: 'SDUI parallelism',
+        appBundleId: 'com.example.app',
+        actions: [{ tap: { id: 'tab-equifax' } }],
+        assertions: [
+          { type: 'parallelism', matcher: { pathContains: '/graphql' }, maxWindowMs: 2000, minExpectedCount: 6 },
+        ],
+      };
+      const result = FeatureTestSpecSchema.safeParse(spec);
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.data.setup).toEqual([]);
+        expect(result.data.teardown).toEqual([]);
+      }
+    });
+
+    it('accepts all documented action shapes', () => {
+      const spec = {
+        name: 'action-coverage',
+        appBundleId: 'com.example.app',
+        actions: [
+          { tap: { point: { x: 100, y: 200 } } },
+          { tap: { id: 'menu' } },
+          { tap: { text: 'Sign in' } },
+          { type: { id: 'email', text: 'a@b.c' } },
+          { scroll: { direction: 'down' } },
+          { wait: 1500 },
+          { assertVisible: { id: 'home' } },
+        ],
+        assertions: [],
+      };
+      expect(FeatureTestSpecSchema.safeParse(spec).success).toBe(true);
+    });
+
+    it('accepts all eight assertion types', () => {
+      const spec = {
+        name: 'assertion-coverage',
+        appBundleId: 'com.example.app',
+        actions: [{ tap: { id: 'go' } }],
+        assertions: [
+          { type: 'parallelism', matcher: { pathContains: '/x' }, maxWindowMs: 2000, minExpectedCount: 2 },
+          { type: 'on_screen', expectedCalls: [{ pathContains: '/x' }] },
+          { type: 'absent', forbiddenCalls: [{ pathContains: '/bad' }] },
+          { type: 'sequence', expectedOrder: [{ pathContains: '/a' }, { pathContains: '/b' }] },
+          { type: 'performance', matcher: { pathContains: '/x' }, maxIndividualMs: 500 },
+          { type: 'payload', matcher: { pathContains: '/x' }, responseAssertions: [{ path: 'data', exists: true }] },
+          { type: 'deduplication', matcher: { pathContains: '/x' }, maxDuplicates: 1 },
+          { type: 'error_handling', expectedErrors: [{ statusCode: 500 }] },
+        ],
+      };
+      const result = FeatureTestSpecSchema.safeParse(spec);
+      expect(result.success).toBe(true);
+    });
+
+    it('rejects an action entry with two action keys at once', () => {
+      const spec = {
+        name: 'bad',
+        appBundleId: 'com.example.app',
+        actions: [{ tap: { id: 'a' }, wait: 500 }],
+        assertions: [],
+      };
+      expect(FeatureTestSpecSchema.safeParse(spec).success).toBe(false);
+    });
+
+    it('rejects an unknown assertion type', () => {
+      const spec = {
+        name: 'bad',
+        appBundleId: 'com.example.app',
+        actions: [],
+        assertions: [{ type: 'nonsense', matcher: {} }],
+      };
+      expect(FeatureTestSpecSchema.safeParse(spec).success).toBe(false);
+    });
+  });
+
+  describe('RunFeatureTestInputSchema', () => {
+    it('accepts a string spec (file path)', () => {
+      const result = RunFeatureTestInputSchema.safeParse({ spec: '/tmp/feature.yaml' });
+      expect(result.success).toBe(true);
+    });
+
+    it('accepts an inline spec object with all timeout overrides', () => {
+      const result = RunFeatureTestInputSchema.safeParse({
+        spec: {
+          name: 't',
+          appBundleId: 'com.e.a',
+          actions: [],
+          assertions: [],
+        },
+        env: { TOKEN: 'abc' },
+        platform: 'ios',
+        flowsDir: '/repo/flows',
+        stubsDir: '/repo/stubs',
+        setupTimeoutMs: 90000,
+        actionTimeoutMs: 20000,
+        settleMs: 2000,
+        driverCooldownMs: 4000,
+      });
+      expect(result.success).toBe(true);
+    });
+  });
+
+  describe('RunFeatureTestOutputSchema', () => {
+    it('accepts a fully populated passing result', () => {
+      const output = {
+        passed: true,
+        name: 'SDUI parallelism',
+        durationMs: 82000,
+        setup: {
+          passed: true,
+          flows: [
+            { name: 'login', passed: true, durationMs: 6000 },
+          ],
+        },
+        actions: {
+          sessionId: 's-1',
+          interactions: [
+            { action: 'tap', element: 'point(201,186)', durationMs: 1200 },
+            { action: 'wait', element: '5000ms', durationMs: 5001, waitMs: 5000 },
+          ],
+        },
+        assertions: [
+          {
+            type: 'parallelism',
+            passed: true,
+            verdict: '6 events fired within 453ms (≤2000)',
+            details: { count: 6, actualSpanMs: 453 },
+          },
+        ],
+        teardown: {
+          flows: [{ name: 'sign-out', passed: true, durationMs: 4000 }],
+          compiledYamlPath: '/tmp/test-s1.yaml',
+        },
+      };
+      const result = RunFeatureTestOutputSchema.safeParse(output);
+      expect(result.success).toBe(true);
+    });
+
+    it('accepts a failure result carrying an error and partial phases', () => {
+      const output = {
+        passed: false,
+        name: 'SDUI parallelism',
+        durationMs: 14000,
+        setup: {
+          passed: false,
+          flows: [
+            { name: 'login', passed: false, durationMs: 14000, error: 'Timeout waiting for splash' },
+          ],
+        },
+        actions: { sessionId: '', interactions: [] },
+        assertions: [],
+        teardown: { flows: [] },
+        error: 'Setup phase failed',
+      };
+      expect(RunFeatureTestOutputSchema.safeParse(output).success).toBe(true);
     });
   });
 });

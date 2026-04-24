@@ -108,7 +108,10 @@ import type {
     TakeScreenshotOutput,
     RunUnitTestsInput,
     RunUnitTestsOutput,
+    RunFeatureTestInput,
+    RunFeatureTestOutput,
 } from './schemas.js';
+import { runFeatureTest, defaultSleep } from './featureTest/index.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -2024,4 +2027,30 @@ export async function handleRunUnitTests(
         reportDir: result.reportDir,
         output: result.output,
     };
+}
+
+// ---- run_feature_test ----
+//
+// Thin wrapper: the actual orchestration lives in featureTest/runner.ts. We pass
+// the existing handlers in as a deps bag so the runner stays free of module
+// cycles and is trivially mockable in tests.
+export async function handleRunFeatureTest(
+    input: RunFeatureTestInput,
+): Promise<RunFeatureTestOutput> {
+    console.error(`[MCP] run_feature_test: spec=${typeof input.spec === 'string' ? input.spec : input.spec.name}`);
+    return runFeatureTest(input, {
+        runFlow: handleRunFlow,
+        startRecording: handleStartRecording,
+        executeUIAction: handleExecuteUIAction,
+        stopAndCompile: handleStopAndCompile,
+        verifyParallelism: handleVerifyNetworkParallelism,
+        verifyOnScreen: handleVerifyNetworkOnScreen,
+        verifyAbsent: handleVerifyNetworkAbsent,
+        verifySequence: handleVerifyNetworkSequence,
+        verifyPerformance: handleVerifyNetworkPerformance,
+        verifyPayload: handleVerifyNetworkPayload,
+        verifyDeduplication: handleVerifyNetworkDeduplication,
+        verifyErrorHandling: handleVerifyNetworkErrorHandling,
+        sleep: defaultSleep,
+    });
 }

@@ -5,7 +5,8 @@
     "type": "module",
     "main": "dist/index.js",
     "bin": {
-        "mobile-automator": "./bin/mobile-automator"
+        "mobile-automator": "./bin/mobile-automator",
+        "mobile-automator-feature-test": "./bin/mobile-automator-feature-test"
     },
     "engines": {
         "node": ">=20"
@@ -23,10 +24,12 @@
     },
     "dependencies": {
         "@modelcontextprotocol/sdk": "^1.12.0",
+        "js-yaml": "^4.1.1",
         "sql.js": "^1.12.0",
         "zod": "^3.22.4"
     },
     "devDependencies": {
+        "@types/js-yaml": "^4.0.9",
         "@types/node": "^20.11.5",
         "@types/sql.js": "^1.4.9",
         "@typescript-eslint/eslint-plugin": "^6.19.1",
