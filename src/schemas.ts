@@ -47,6 +47,35 @@ const NetworkEventSchema = z.object({
     durationMs: z.number().optional(),
 });
 
+// ── Shared sub-schemas for verify_network_* tools ──
+
+const NetworkMatcherSchema = z.object({
+    pathContains: z.string().optional().describe('Substring match on the URL'),
+    operationMatches: z
+        .string()
+        .optional()
+        .describe('Regex matched against the GraphQL operationName (falls back to raw requestBody)'),
+    statusCode: z.number().int().optional().describe('Exact HTTP status code'),
+    bodyContains: z.string().optional().describe('Substring match on the response body'),
+    requestBodyContains: z.string().optional().describe('Substring match on the request body'),
+    method: z.string().optional().describe('HTTP method (case-insensitive, e.g., "POST")'),
+});
+
+const AfterActionRefSchema = z.discriminatedUnion('kind', [
+    z.object({
+        kind: z.literal('timestamp'),
+        value: z.string().describe('ISO-8601 timestamp to anchor the window to'),
+    }),
+    z.object({
+        kind: z.literal('index'),
+        value: z.number().int().nonnegative().describe('0-based index into the session\'s interactions'),
+    }),
+    z.object({
+        kind: z.literal('elementText'),
+        value: z.string().describe('Case-insensitive substring match against UIInteraction.element (id/testId/accessibilityLabel/text)'),
+    }),
+]).describe('Reference a prior UI action to anchor the time window');
+
 const UIHierarchyNodeSchema: z.ZodType<UIHierarchyNodeShape> = z.lazy(() =>
     z.object({
         id: z.string().optional(),
@@ -254,6 +283,158 @@ export const VerifySDUIPayloadInputSchema = z.object({
         .record(z.unknown())
         .optional()
         .describe('Key-value pairs that must be present in the response payload'),
+});
+
+// ──────────────────────────────────────────────
+// verify_network_* input schemas
+// ──────────────────────────────────────────────
+
+const VerifyCommonFields = {
+    sessionId: z.string().describe('Active or completed session ID'),
+    filterDomains: z.array(z.string()).optional().describe('Optional Proxyman domain filter'),
+};
+
+export const VerifyNetworkParallelismInputSchema = z.object({
+    ...VerifyCommonFields,
+    matcher: NetworkMatcherSchema.describe('Predicate selecting requests to test for parallelism'),
+    maxWindowMs: z
+        .number()
+        .int()
+        .positive()
+        .describe('All matching requests must START within this window, in milliseconds'),
+    minExpectedCount: z
+        .number()
+        .int()
+        .positive()
+        .describe('Fail if fewer than this many requests fall inside the window'),
+});
+
+export const VerifyNetworkOnScreenInputSchema = z.object({
+    ...VerifyCommonFields,
+    afterAction: AfterActionRefSchema,
+    withinMs: z
+        .number()
+        .int()
+        .positive()
+        .default(3000)
+        .describe('Look at network traffic within this many milliseconds of the anchor (default 3000, matches the Correlator window)'),
+    expectedCalls: z
+        .array(NetworkMatcherSchema)
+        .describe('Every matcher in this list must find at least one event in the window'),
+});
+
+export const VerifyNetworkAbsentInputSchema = z.object({
+    ...VerifyCommonFields,
+    afterAction: AfterActionRefSchema,
+    withinMs: z.number().int().positive().default(3000),
+    forbiddenCalls: z
+        .array(NetworkMatcherSchema)
+        .describe('No matcher in this list may find any event in the window'),
+});
+
+export const VerifyNetworkSequenceInputSchema = z.object({
+    ...VerifyCommonFields,
+    afterAction: AfterActionRefSchema.optional(),
+    withinMs: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe('Optional window around afterAction; omit to scan all session traffic'),
+    matcher: NetworkMatcherSchema.optional().describe('Optional pre-filter applied before ordering'),
+    expectedOrder: z
+        .array(NetworkMatcherSchema)
+        .describe('Matchers that must fire in this chronological order'),
+    strict: z
+        .boolean()
+        .default(false)
+        .describe('If true, no un-matched events may appear between ordered matches'),
+});
+
+export const VerifyNetworkPerformanceInputSchema = z.object({
+    ...VerifyCommonFields,
+    matcher: NetworkMatcherSchema.describe('Predicate selecting requests to measure'),
+    afterAction: AfterActionRefSchema.optional(),
+    withinMs: z.number().int().positive().optional(),
+    maxIndividualMs: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe('Each matching request must complete within this many milliseconds'),
+    maxTotalMs: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe('First request start → last request end must be within this many milliseconds'),
+});
+
+const PayloadAssertionSchema = z.object({
+    path: z
+        .string()
+        .describe('Dot/bracket path into the JSON response (e.g., "data.items[0].type")'),
+    equals: z.unknown().optional().describe('Value must equal this (deep compare)'),
+    contains: z
+        .string()
+        .optional()
+        .describe('String value must contain this substring (stringified for non-strings)'),
+    exists: z
+        .boolean()
+        .optional()
+        .describe('If true, the path must resolve; if false, it must not'),
+    type: z
+        .enum(['string', 'number', 'boolean', 'object', 'array', 'null'])
+        .optional()
+        .describe('Value must be of this JSON type'),
+    minLength: z
+        .number()
+        .int()
+        .nonnegative()
+        .optional()
+        .describe('For arrays/strings: length must be at least this'),
+});
+
+export const VerifyNetworkPayloadInputSchema = z.object({
+    ...VerifyCommonFields,
+    url: z.string().optional().describe('Exact or partial URL; use this OR matcher'),
+    matcher: NetworkMatcherSchema.optional().describe('Matcher to locate the event; use this OR url'),
+    responseAssertions: z
+        .array(PayloadAssertionSchema)
+        .describe('Path-based assertions to evaluate on the response body'),
+});
+
+export const VerifyNetworkDeduplicationInputSchema = z.object({
+    ...VerifyCommonFields,
+    matcher: NetworkMatcherSchema.optional(),
+    afterAction: AfterActionRefSchema.optional(),
+    withinMs: z.number().int().positive().optional(),
+    groupBy: z
+        .enum(['url', 'operationName'])
+        .default('operationName')
+        .describe('Group events by URL or by extracted GraphQL operationName'),
+    maxDuplicates: z
+        .number()
+        .int()
+        .positive()
+        .default(1)
+        .describe('Each unique key may appear at most this many times'),
+});
+
+export const VerifyNetworkErrorHandlingInputSchema = z.object({
+    ...VerifyCommonFields,
+    expectedErrors: z
+        .array(
+            NetworkMatcherSchema.extend({
+                statusCode: z
+                    .number()
+                    .int()
+                    .describe('Expected error status code'),
+            }),
+        )
+        .describe('Error responses that must appear in session traffic'),
+    afterAction: AfterActionRefSchema.optional(),
+    withinMs: z.number().int().positive().optional(),
 });
 
 export const RegisterSegmentInputSchema = z.object({
@@ -844,6 +1025,128 @@ export const VerifySDUIPayloadOutputSchema = z.object({
         .describe('List of field paths that did not match expectations'),
 });
 
+// ──────────────────────────────────────────────
+// verify_network_* output schemas
+// ──────────────────────────────────────────────
+
+const EventSummarySchema = z.object({
+    timestamp: z.string(),
+    method: z.string(),
+    url: z.string(),
+    statusCode: z.number(),
+    durationMs: z.number().optional(),
+    operationName: z.string().optional(),
+});
+
+export const VerifyNetworkParallelismOutputSchema = z.object({
+    passed: z.boolean(),
+    verdict: z.string().describe('Human-readable summary'),
+    count: z.number().describe('Total matching events'),
+    actualSpanMs: z.number().describe('Span (ms) from first to last matching event'),
+    avgGapMs: z.number().describe('Average time between consecutive matching events'),
+    events: z.array(EventSummarySchema),
+});
+
+const ExpectedCallOutcomeSchema = z.object({
+    matcher: z.record(z.unknown()).describe('The matcher description'),
+    description: z.string(),
+    matched: z.boolean(),
+    event: EventSummarySchema.optional(),
+});
+
+export const VerifyNetworkOnScreenOutputSchema = z.object({
+    passed: z.boolean(),
+    verdict: z.string(),
+    anchorTimestamp: z.string().optional(),
+    matched: z.array(ExpectedCallOutcomeSchema),
+    missing: z.array(ExpectedCallOutcomeSchema),
+    extras: z.array(EventSummarySchema).describe('Events in the window that did not correspond to any expected matcher'),
+});
+
+export const VerifyNetworkAbsentOutputSchema = z.object({
+    passed: z.boolean(),
+    verdict: z.string(),
+    anchorTimestamp: z.string().optional(),
+    violations: z.array(
+        z.object({
+            matcher: z.record(z.unknown()),
+            description: z.string(),
+            events: z.array(EventSummarySchema),
+        }),
+    ),
+});
+
+export const VerifyNetworkSequenceOutputSchema = z.object({
+    passed: z.boolean(),
+    verdict: z.string(),
+    actualOrder: z.array(
+        z.object({
+            expectedIndex: z.number(),
+            description: z.string(),
+            event: EventSummarySchema,
+        }),
+    ),
+    firstDeviationIndex: z.number().optional(),
+    missing: z
+        .array(z.object({ expectedIndex: z.number(), description: z.string() }))
+        .optional(),
+});
+
+export const VerifyNetworkPerformanceOutputSchema = z.object({
+    passed: z.boolean(),
+    verdict: z.string(),
+    count: z.number(),
+    unknownDurationCount: z.number(),
+    totalMs: z.number().describe('First start → last end (ms)'),
+    slowestMs: z.number().optional(),
+    fastestMs: z.number().optional(),
+    p50: z.number().optional(),
+    p95: z.number().optional(),
+    violators: z.array(
+        z.object({
+            event: EventSummarySchema,
+            reason: z.string(),
+        }),
+    ),
+});
+
+export const VerifyNetworkPayloadOutputSchema = z.object({
+    passed: z.boolean(),
+    verdict: z.string(),
+    event: EventSummarySchema.optional(),
+    mismatches: z.array(z.string()),
+});
+
+export const VerifyNetworkDeduplicationOutputSchema = z.object({
+    passed: z.boolean(),
+    verdict: z.string(),
+    duplicates: z.array(
+        z.object({
+            key: z.string(),
+            count: z.number(),
+            timestamps: z.array(z.string()),
+        }),
+    ),
+});
+
+export const VerifyNetworkErrorHandlingOutputSchema = z.object({
+    passed: z.boolean(),
+    verdict: z.string(),
+    errorsFound: z.array(
+        z.object({
+            expectedIndex: z.number(),
+            description: z.string(),
+            event: EventSummarySchema,
+        }),
+    ),
+    missingErrors: z.array(
+        z.object({
+            expectedIndex: z.number(),
+            description: z.string(),
+        }),
+    ),
+});
+
 // ── get_session_timeline input/output schemas ──
 
 export const GetSessionTimelineInputSchema = z.object({
@@ -901,6 +1204,30 @@ export type GetNetworkLogsOutput = z.infer<typeof GetNetworkLogsOutputSchema>;
 export type VerifySDUIPayloadInput = z.infer<typeof VerifySDUIPayloadInputSchema>;
 export type VerifySDUIPayloadOutput = z.infer<typeof VerifySDUIPayloadOutputSchema>;
 
+export type VerifyNetworkParallelismInput = z.infer<typeof VerifyNetworkParallelismInputSchema>;
+export type VerifyNetworkParallelismOutput = z.infer<typeof VerifyNetworkParallelismOutputSchema>;
+
+export type VerifyNetworkOnScreenInput = z.infer<typeof VerifyNetworkOnScreenInputSchema>;
+export type VerifyNetworkOnScreenOutput = z.infer<typeof VerifyNetworkOnScreenOutputSchema>;
+
+export type VerifyNetworkAbsentInput = z.infer<typeof VerifyNetworkAbsentInputSchema>;
+export type VerifyNetworkAbsentOutput = z.infer<typeof VerifyNetworkAbsentOutputSchema>;
+
+export type VerifyNetworkSequenceInput = z.infer<typeof VerifyNetworkSequenceInputSchema>;
+export type VerifyNetworkSequenceOutput = z.infer<typeof VerifyNetworkSequenceOutputSchema>;
+
+export type VerifyNetworkPerformanceInput = z.infer<typeof VerifyNetworkPerformanceInputSchema>;
+export type VerifyNetworkPerformanceOutput = z.infer<typeof VerifyNetworkPerformanceOutputSchema>;
+
+export type VerifyNetworkPayloadInput = z.infer<typeof VerifyNetworkPayloadInputSchema>;
+export type VerifyNetworkPayloadOutput = z.infer<typeof VerifyNetworkPayloadOutputSchema>;
+
+export type VerifyNetworkDeduplicationInput = z.infer<typeof VerifyNetworkDeduplicationInputSchema>;
+export type VerifyNetworkDeduplicationOutput = z.infer<typeof VerifyNetworkDeduplicationOutputSchema>;
+
+export type VerifyNetworkErrorHandlingInput = z.infer<typeof VerifyNetworkErrorHandlingInputSchema>;
+export type VerifyNetworkErrorHandlingOutput = z.infer<typeof VerifyNetworkErrorHandlingOutputSchema>;
+
 export type RegisterSegmentInput = z.infer<typeof RegisterSegmentInputSchema>;
 export type RegisterSegmentOutput = z.infer<typeof RegisterSegmentOutputSchema>;
 
@@ -948,6 +1275,14 @@ export const TOOL_NAMES = {
     EXECUTE_UI_ACTION: 'execute_ui_action',
     GET_NETWORK_LOGS: 'get_network_logs',
     VERIFY_SDUI_PAYLOAD: 'verify_sdui_payload',
+    VERIFY_NETWORK_PARALLELISM: 'verify_network_parallelism',
+    VERIFY_NETWORK_ON_SCREEN: 'verify_network_on_screen',
+    VERIFY_NETWORK_ABSENT: 'verify_network_absent',
+    VERIFY_NETWORK_SEQUENCE: 'verify_network_sequence',
+    VERIFY_NETWORK_PERFORMANCE: 'verify_network_performance',
+    VERIFY_NETWORK_PAYLOAD: 'verify_network_payload',
+    VERIFY_NETWORK_DEDUPLICATION: 'verify_network_deduplication',
+    VERIFY_NETWORK_ERROR_HANDLING: 'verify_network_error_handling',
     REGISTER_SEGMENT: 'register_segment',
     RUN_TEST: 'run_test',
     LIST_DEVICES: 'list_devices',
