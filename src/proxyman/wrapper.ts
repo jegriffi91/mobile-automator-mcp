@@ -164,6 +164,31 @@ export function _resetResolvedCliPath(): void {
   resolvedCliError = undefined;
 }
 
+// ── Response body decoding ──
+
+/**
+ * Decode a response body from HAR, handling base64-encoded content.
+ * Returns the decoded text, or undefined if not available.
+ */
+function decodeResponseBody(content: { text?: string; encoding?: string }): string | undefined {
+  if (!content.text) {
+    return undefined;
+  }
+
+  // If encoding is specified and is base64, decode it
+  if (content.encoding === 'base64') {
+    try {
+      return Buffer.from(content.text, 'base64').toString('utf-8');
+    } catch {
+      console.error('[ProxymanWrapper] Failed to base64-decode response body');
+      return content.text; // Fallback to raw text
+    }
+  }
+
+  // Return text as-is (either plaintext or unknown encoding)
+  return content.text;
+}
+
 // ── Minimal HAR type definitions ──
 
 interface HarEntry {
@@ -178,6 +203,7 @@ interface HarEntry {
     content: {
       text?: string;
       mimeType?: string;
+      encoding?: string;
     };
   };
   time?: number;
@@ -223,6 +249,7 @@ function classifyCliError(error: unknown, cliBin: string): Error {
 
 export class ProxymanWrapper {
   private cliBinOverride?: string;
+  private cachedHar: { data: HarLog; timestamp: number } | null = null;
 
   /**
    * @param cliBin - Optional explicit CLI path. If omitted, uses the
@@ -368,12 +395,40 @@ export class ProxymanWrapper {
     limit?: number,
     domains?: string[],
   ): Promise<NetworkEvent[]> {
+    const now = Date.now();
+    const cacheValidityMs = 2000;
+
+    // Reuse cached HAR if available and fresh (within 2s)
+    if (this.cachedHar && now - this.cachedHar.timestamp < cacheValidityMs) {
+      console.error('[ProxymanWrapper] getTransactions: using cached HAR (age: ' + (now - this.cachedHar.timestamp) + 'ms)');
+      const har = this.cachedHar.data;
+      let events: NetworkEvent[] = har.log.entries.map((entry) => ({
+        sessionId,
+        timestamp: entry.startedDateTime,
+        method: entry.request.method,
+        url: entry.request.url,
+        statusCode: entry.response.status,
+        requestBody: entry.request.postData?.text,
+        responseBody: decodeResponseBody(entry.response.content),
+        durationMs: entry.time ? Math.round(entry.time) : undefined,
+      }));
+
+      if (filterPath) {
+        events = events.filter((e) => e.url.includes(filterPath));
+      }
+
+      return limit === undefined ? events : events.slice(0, limit);
+    }
+
     const tmpFile = path.join(os.tmpdir(), `proxyman-har-${randomUUID()}.har`);
 
     try {
       await this.exportHar(tmpFile, domains);
       const raw = await fs.readFile(tmpFile, 'utf-8');
       const har: HarLog = JSON.parse(raw);
+
+      // Cache the fresh HAR for rapid successive calls
+      this.cachedHar = { data: har, timestamp: now };
 
       let events: NetworkEvent[] = har.log.entries.map((entry) => ({
         sessionId,
@@ -382,7 +437,7 @@ export class ProxymanWrapper {
         url: entry.request.url,
         statusCode: entry.response.status,
         requestBody: entry.request.postData?.text,
-        responseBody: entry.response.content?.text,
+        responseBody: decodeResponseBody(entry.response.content),
         durationMs: entry.time ? Math.round(entry.time) : undefined,
       }));
 
@@ -408,6 +463,30 @@ export class ProxymanWrapper {
    * @param domains - Optional domain list for pre-filtering
    */
   async getPayload(url: string, domains?: string[]): Promise<Record<string, unknown> | null> {
+    const now = Date.now();
+    const cacheValidityMs = 2000;
+
+    // Check cache first
+    if (this.cachedHar && now - this.cachedHar.timestamp < cacheValidityMs) {
+      const har = this.cachedHar.data;
+      const match = har.log.entries.filter((e) => e.request.url.includes(url)).pop();
+
+      if (!match) {
+        return null;
+      }
+
+      const body = decodeResponseBody(match.response.content);
+      if (!body) {
+        return null;
+      }
+
+      try {
+        return JSON.parse(body);
+      } catch {
+        return null;
+      }
+    }
+
     const tmpFile = path.join(os.tmpdir(), `proxyman-har-${randomUUID()}.har`);
 
     try {
@@ -415,14 +494,22 @@ export class ProxymanWrapper {
       const raw = await fs.readFile(tmpFile, 'utf-8');
       const har: HarLog = JSON.parse(raw);
 
+      // Cache the fresh HAR
+      this.cachedHar = { data: har, timestamp: now };
+
       // Find the most recent matching entry (last match wins)
       const match = har.log.entries.filter((e) => e.request.url.includes(url)).pop();
 
-      if (!match || !match.response.content?.text) {
+      if (!match) {
         return null;
       }
 
-      return JSON.parse(match.response.content.text);
+      const body = decodeResponseBody(match.response.content);
+      if (!body) {
+        return null;
+      }
+
+      return JSON.parse(body);
     } catch (error: unknown) {
       // exportHar already classifies CLI errors — re-throw as-is
       console.error(`[ProxymanWrapper] getPayload(${url}) failed:`, error);

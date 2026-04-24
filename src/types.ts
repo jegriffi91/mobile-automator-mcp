@@ -57,7 +57,12 @@ export interface UIElement {
 export interface UIInteraction {
     id?: number;
     sessionId: string;
+    /** @deprecated use dispatchedAt instead for network verification */
     timestamp: string;
+    /** When the action was sent to the device (before execution). Used for network call verification. */
+    dispatchedAt?: string;
+    /** When the action completed on the device (after UI settled). */
+    completedAt?: string;
     actionType: UIActionType;
     element: UIElement;
     textInput?: string;

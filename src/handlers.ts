@@ -649,14 +649,19 @@ export async function handleExecuteUIAction(
     // Suppress the poller to prevent double-logging
     sessionManager.suppressNextInference(input.sessionId);
 
+    const dispatchedAt = new Date().toISOString();
     const result = await driver.executeAction(input.action, input.element, input.textInput);
+    const completedAt = new Date().toISOString();
+
     if (!result.success) {
         throw new Error(`Failed to execute action: ${result.error}`);
     }
 
     await sessionManager.logInteraction({
         sessionId: input.sessionId,
-        timestamp: new Date().toISOString(),
+        timestamp: dispatchedAt,
+        dispatchedAt,
+        completedAt,
         actionType: input.action,
         element: input.element,
         textInput: input.textInput,
