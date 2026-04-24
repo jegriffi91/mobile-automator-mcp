@@ -64,6 +64,8 @@ import {
     TakeScreenshotOutputSchema,
     RunUnitTestsInputSchema,
     RunUnitTestsOutputSchema,
+    RunFeatureTestInputSchema,
+    RunFeatureTestOutputSchema,
     TOOL_NAMES,
 } from './schemas.js';
 
@@ -94,6 +96,7 @@ import {
     handleBootSimulator,
     handleTakeScreenshot,
     handleRunUnitTests,
+    handleRunFeatureTest,
     setMcpServer,
 } from './handlers.js';
 
@@ -780,6 +783,32 @@ server.registerTool(
     },
     async (args) => {
         const result = await handleRunUnitTests(args);
+        return {
+            content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
+            structuredContent: result,
+        };
+    }
+);
+
+// ── 19. run_feature_test ──
+server.registerTool(
+    TOOL_NAMES.RUN_FEATURE_TEST,
+    {
+        title: 'Run Feature Test',
+        description:
+            'Execute a declarative feature test in ONE tool call: setup flows → start recording → UI actions → network assertions → stop & compile → teardown. Replaces 8–15 AI-orchestrated tool calls per run with a single deterministic lifecycle. Accepts an inline FeatureTestSpec or a path to a .yaml/.json spec file.',
+        inputSchema: RunFeatureTestInputSchema,
+        outputSchema: RunFeatureTestOutputSchema,
+        annotations: {
+            title: 'Run Feature Test',
+            readOnlyHint: false,
+            destructiveHint: false,
+            idempotentHint: false,
+            openWorldHint: true,
+        },
+    },
+    async (args) => {
+        const result = await handleRunFeatureTest(args);
         return {
             content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
             structuredContent: result,

@@ -710,6 +710,166 @@ export const RunTestInputSchema = z.object({
 });
 
 // ──────────────────────────────────────────────
+// run_feature_test — declarative composite test spec
+// ──────────────────────────────────────────────
+//
+// A single tool call that executes the setup → record → act → assert → teardown
+// lifecycle deterministically. Replaces 8–15 AI-orchestrated tool calls per run.
+
+const FlowRefSchema = z.object({
+    flow: z.string().describe('Flow name (filename without .yaml extension) under flowsDir'),
+    params: z
+        .record(z.string())
+        .optional()
+        .describe('Per-flow param overrides merged on top of top-level env'),
+});
+
+// Selector shared by tap / assertVisible. Uses the same priority order as UIElement
+// (id > accessibilityLabel > text > point).
+const ActionSelectorSchema = z.object({
+    id: z.string().optional(),
+    accessibilityLabel: z.string().optional(),
+    text: z.string().optional(),
+    point: PointSchema.optional(),
+});
+
+// `type` action: the inline `text` is the text to type; id/accessibilityLabel target
+// the field. Deliberately separate from ActionSelectorSchema to disambiguate `text`.
+const TypeActionSchema = z.object({
+    id: z.string().optional(),
+    accessibilityLabel: z.string().optional(),
+    point: PointSchema.optional(),
+    text: z.string().describe('Text to type into the target field'),
+});
+
+const ScrollSpecSchema = z
+    .object({
+        direction: z.enum(['up', 'down', 'left', 'right']).optional(),
+    })
+    .optional();
+
+const FeatureActionSpecSchema = z
+    .union([
+        z.object({ tap: ActionSelectorSchema }).strict(),
+        z.object({ type: TypeActionSchema }).strict(),
+        z.object({ scroll: ScrollSpecSchema }).strict(),
+        z.object({ wait: z.number().int().nonnegative() }).strict(),
+        z.object({ assertVisible: ActionSelectorSchema }).strict(),
+    ])
+    .describe(
+        'One action per array entry. Exactly one of tap / type / scroll / wait / assertVisible must be set.',
+    );
+
+// Assertion variants — composed from the existing verify_network_* input schemas
+// via .omit so that the spec stays in lock-step with each tool's contract.
+const AssertionParallelismSchema = VerifyNetworkParallelismInputSchema
+    .omit({ sessionId: true, filterDomains: true })
+    .extend({ type: z.literal('parallelism') });
+
+const AssertionOnScreenSchema = VerifyNetworkOnScreenInputSchema
+    .omit({ sessionId: true, filterDomains: true })
+    .extend({
+        type: z.literal('on_screen'),
+        afterAction: AfterActionRefSchema.optional(),
+    });
+
+const AssertionAbsentSchema = VerifyNetworkAbsentInputSchema
+    .omit({ sessionId: true, filterDomains: true })
+    .extend({
+        type: z.literal('absent'),
+        afterAction: AfterActionRefSchema.optional(),
+    });
+
+const AssertionSequenceSchema = VerifyNetworkSequenceInputSchema
+    .omit({ sessionId: true, filterDomains: true })
+    .extend({ type: z.literal('sequence') });
+
+const AssertionPerformanceSchema = VerifyNetworkPerformanceInputSchema
+    .omit({ sessionId: true, filterDomains: true })
+    .extend({ type: z.literal('performance') });
+
+const AssertionPayloadSchema = VerifyNetworkPayloadInputSchema
+    .omit({ sessionId: true, filterDomains: true })
+    .extend({ type: z.literal('payload') });
+
+const AssertionDeduplicationSchema = VerifyNetworkDeduplicationInputSchema
+    .omit({ sessionId: true, filterDomains: true })
+    .extend({ type: z.literal('deduplication') });
+
+const AssertionErrorHandlingSchema = VerifyNetworkErrorHandlingInputSchema
+    .omit({ sessionId: true, filterDomains: true })
+    .extend({ type: z.literal('error_handling') });
+
+const FeatureAssertionSpecSchema = z.discriminatedUnion('type', [
+    AssertionParallelismSchema,
+    AssertionOnScreenSchema,
+    AssertionAbsentSchema,
+    AssertionSequenceSchema,
+    AssertionPerformanceSchema,
+    AssertionPayloadSchema,
+    AssertionDeduplicationSchema,
+    AssertionErrorHandlingSchema,
+]);
+
+export const FeatureTestSpecSchema = z.object({
+    name: z.string().describe('Short human-readable test name'),
+    description: z.string().optional(),
+    appBundleId: z.string().describe('The app under test (passed to start_recording_session)'),
+    setup: z.array(FlowRefSchema).optional().default([]),
+    actions: z.array(FeatureActionSpecSchema).describe('UI actions dispatched inside the recording session'),
+    assertions: z
+        .array(FeatureAssertionSpecSchema)
+        .describe('Network assertions run sequentially after actions settle'),
+    teardown: z.array(FlowRefSchema).optional().default([]),
+    filterDomains: z
+        .array(z.string())
+        .optional()
+        .describe('Proxyman domain filter applied to the recording session and all assertions'),
+    captureMode: z.enum(['event-triggered', 'polling']).optional(),
+    trackEventPaths: z.array(z.string()).optional(),
+});
+
+export const RunFeatureTestInputSchema = z.object({
+    spec: z
+        .union([FeatureTestSpecSchema, z.string()])
+        .describe('Inline FeatureTestSpec object or absolute path to a .yaml/.json spec file'),
+    env: z
+        .record(z.string())
+        .optional()
+        .describe('Env vars passed to every setup/teardown flow as Maestro -e KEY=VALUE'),
+    platform: z.enum(['ios', 'android']).optional().describe('Target platform (default: ios)'),
+    flowsDir: z.string().optional().describe('Directory for setup/teardown flow YAML files'),
+    stubsDir: z
+        .string()
+        .optional()
+        .describe('Optional WireMock stubs root directory used by setup/teardown flows'),
+    setupTimeoutMs: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe('Max wall-clock time for all setup flows combined (default: 120000)'),
+    actionTimeoutMs: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe('Max wall-clock time for the entire actions phase (default: 30000)'),
+    settleMs: z
+        .number()
+        .int()
+        .nonnegative()
+        .optional()
+        .describe('Wait after the last action before running assertions (default: 5000)'),
+    driverCooldownMs: z
+        .number()
+        .int()
+        .nonnegative()
+        .optional()
+        .describe('Pause inserted between consecutive setup flows (default: 5000)'),
+});
+
+// ──────────────────────────────────────────────
 // Tool Output Schemas
 // ──────────────────────────────────────────────
 
@@ -1182,6 +1342,50 @@ export const GetSessionTimelineOutputSchema = z.object({
     })).describe('Most recent 10 poll records for quick inspection'),
 });
 
+// ── run_feature_test output ──
+
+const FlowResultSchema = z.object({
+    name: z.string(),
+    passed: z.boolean(),
+    durationMs: z.number(),
+    error: z.string().optional(),
+});
+
+const InteractionSummarySchema = z.object({
+    action: z.string(),
+    element: z.string().describe('Human-readable target description'),
+    durationMs: z.number(),
+    waitMs: z.number().optional().describe('Set when the entry is a `wait` pause'),
+});
+
+const AssertionResultSchema = z.object({
+    type: z.string(),
+    passed: z.boolean(),
+    verdict: z.string(),
+    details: z.record(z.unknown()).describe('Full structured output from the verify_network_* tool'),
+    error: z.string().optional(),
+});
+
+export const RunFeatureTestOutputSchema = z.object({
+    passed: z.boolean().describe('True only if setup, all actions, and every assertion passed'),
+    name: z.string(),
+    durationMs: z.number(),
+    setup: z.object({
+        passed: z.boolean(),
+        flows: z.array(FlowResultSchema),
+    }),
+    actions: z.object({
+        sessionId: z.string(),
+        interactions: z.array(InteractionSummarySchema),
+    }),
+    assertions: z.array(AssertionResultSchema),
+    teardown: z.object({
+        flows: z.array(FlowResultSchema),
+        compiledYamlPath: z.string().optional(),
+    }),
+    error: z.string().optional().describe('Populated when the test aborted before completion'),
+});
+
 // ──────────────────────────────────────────────
 // Derived TypeScript types (single source of truth)
 // ──────────────────────────────────────────────
@@ -1264,6 +1468,10 @@ export type TakeScreenshotOutput = z.infer<typeof TakeScreenshotOutputSchema>;
 export type RunUnitTestsInput = z.infer<typeof RunUnitTestsInputSchema>;
 export type RunUnitTestsOutput = z.infer<typeof RunUnitTestsOutputSchema>;
 
+export type FeatureTestSpec = z.infer<typeof FeatureTestSpecSchema>;
+export type RunFeatureTestInput = z.infer<typeof RunFeatureTestInputSchema>;
+export type RunFeatureTestOutput = z.infer<typeof RunFeatureTestOutputSchema>;
+
 // ──────────────────────────────────────────────
 // Tool name constants
 // ──────────────────────────────────────────────
@@ -1295,4 +1503,5 @@ export const TOOL_NAMES = {
     BOOT_SIMULATOR: 'boot_simulator',
     TAKE_SCREENSHOT: 'take_screenshot',
     RUN_UNIT_TESTS: 'run_unit_tests',
+    RUN_FEATURE_TEST: 'run_feature_test',
 } as const;
