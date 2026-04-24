@@ -733,6 +733,105 @@ export const RunTestInputSchema = z.object({
 });
 
 // ──────────────────────────────────────────────
+// set_mock_response / clear_mock_responses — runtime live-mocking
+// ──────────────────────────────────────────────
+//
+// A thin per-session HTTP server that selectively rewrites backend responses.
+// Requires the app / simulator to be pointed at the mock server's port as its
+// base URL (user-managed for now — no auto proxy flip).
+
+const MockMatcherSchema = z.object({
+    pathContains: z.string().optional().describe('Substring match on the URL path'),
+    urlPathEquals: z.string().optional().describe('Exact URL path match (no query string)'),
+    method: z.string().optional().describe('HTTP method (case-insensitive)'),
+    requestBodyContains: z
+        .string()
+        .optional()
+        .describe('Substring match on the request body (e.g., GraphQL operationName)'),
+});
+
+const JsonPatchOpSchema = z.object({
+    op: z.enum(['replace', 'add', 'remove']).describe('RFC 6902 operation'),
+    path: z.string().describe('RFC 6901 JSON Pointer (e.g., "/data/customerStatusV3/loginStatus")'),
+    value: z.unknown().optional().describe('Required for replace/add; ignored for remove'),
+});
+
+const MockStaticResponseSchema = z.object({
+    status: z.number().int().positive().default(200),
+    jsonBody: z.unknown().optional().describe('Returned verbatim as JSON with Content-Type application/json'),
+    body: z.string().optional().describe('Returned verbatim as raw text. Use jsonBody for JSON.'),
+    headers: z.record(z.string()).optional(),
+});
+
+const MockResponseTransformSchema = z.object({
+    jsonPatch: z
+        .array(JsonPatchOpSchema)
+        .describe('Applied to the JSON-decoded response body from the upstream backend'),
+});
+
+const MockSpecBodySchema = z.object({
+    id: z.string().optional().describe('Stable ID. Auto-generated if omitted.'),
+    matcher: MockMatcherSchema,
+    proxyBaseUrl: z
+        .string()
+        .url()
+        .optional()
+        .describe('Real backend to proxy to. Required when responseTransform is set.'),
+    responseTransform: MockResponseTransformSchema.optional(),
+    staticResponse: MockStaticResponseSchema.optional(),
+}).refine(
+    (m) => (m.staticResponse ? !m.proxyBaseUrl : !!m.proxyBaseUrl),
+    { message: 'Exactly one of staticResponse or proxyBaseUrl must be set' },
+).refine(
+    (m) => !m.responseTransform || !!m.proxyBaseUrl,
+    { message: 'responseTransform requires proxyBaseUrl' },
+);
+
+export const SetMockResponseInputSchema = z.object({
+    sessionId: z.string().describe('Active recording session ID'),
+    mock: MockSpecBodySchema,
+    defaultPassthroughUrl: z
+        .string()
+        .url()
+        .optional()
+        .describe(
+            'Real backend to proxy non-matched requests to. Required on the first call for a session; ' +
+            'later calls may omit it (the first value is sticky).',
+        ),
+    port: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe('Fixed port for the mock server. Auto-assigned on first call if omitted.'),
+});
+
+export const SetMockResponseOutputSchema = z.object({
+    mockId: z.string().describe('ID of the registered mock (echoed if provided, generated if not)'),
+    port: z.number().int().describe('Port the mock server is listening on'),
+    baseUrl: z
+        .string()
+        .describe('URL prefix the app should point at to route traffic through the mock server'),
+    totalMocks: z.number().int().describe('Number of active mocks for this session after this call'),
+    defaultPassthroughUrl: z.string().nullable().describe('Current default passthrough URL, or null'),
+});
+
+export const ClearMockResponsesInputSchema = z.object({
+    sessionId: z.string().describe('Active session ID'),
+    mockId: z.string().optional().describe('Remove only this mock. If omitted, clears all mocks.'),
+    stopServer: z
+        .boolean()
+        .default(false)
+        .describe('If true, also stop the mock server. Default: keep it running so further mocks can be added.'),
+});
+
+export const ClearMockResponsesOutputSchema = z.object({
+    removed: z.number().int().describe('Number of mocks removed'),
+    remaining: z.number().int().describe('Number of mocks still active'),
+    serverStopped: z.boolean().describe('True if the mock server was stopped by this call'),
+});
+
+// ──────────────────────────────────────────────
 // run_feature_test — declarative composite test spec
 // ──────────────────────────────────────────────
 //
@@ -1500,6 +1599,11 @@ export type FeatureTestSpec = z.infer<typeof FeatureTestSpecSchema>;
 export type RunFeatureTestInput = z.infer<typeof RunFeatureTestInputSchema>;
 export type RunFeatureTestOutput = z.infer<typeof RunFeatureTestOutputSchema>;
 
+export type SetMockResponseInput = z.infer<typeof SetMockResponseInputSchema>;
+export type SetMockResponseOutput = z.infer<typeof SetMockResponseOutputSchema>;
+export type ClearMockResponsesInput = z.infer<typeof ClearMockResponsesInputSchema>;
+export type ClearMockResponsesOutput = z.infer<typeof ClearMockResponsesOutputSchema>;
+
 // ──────────────────────────────────────────────
 // Tool name constants
 // ──────────────────────────────────────────────
@@ -1532,4 +1636,6 @@ export const TOOL_NAMES = {
     TAKE_SCREENSHOT: 'take_screenshot',
     RUN_UNIT_TESTS: 'run_unit_tests',
     RUN_FEATURE_TEST: 'run_feature_test',
+    SET_MOCK_RESPONSE: 'set_mock_response',
+    CLEAR_MOCK_RESPONSES: 'clear_mock_responses',
 } as const;

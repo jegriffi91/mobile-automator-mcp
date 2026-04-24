@@ -8,3 +8,12 @@
  */
 
 export { StubServer } from './runner.js';
+export { MockServer } from './mock-manager.js';
+export type {
+    MockSpec,
+    MockMatcher,
+    MockStaticResponse,
+    MockResponseTransform,
+} from './mock-manager.js';
+export { applyPatch, JsonPatchError } from './json-patch.js';
+export type { JsonPatchOp } from './json-patch.js';

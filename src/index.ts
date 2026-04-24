@@ -66,6 +66,10 @@ import {
     RunUnitTestsOutputSchema,
     RunFeatureTestInputSchema,
     RunFeatureTestOutputSchema,
+    SetMockResponseInputSchema,
+    SetMockResponseOutputSchema,
+    ClearMockResponsesInputSchema,
+    ClearMockResponsesOutputSchema,
     TOOL_NAMES,
 } from './schemas.js';
 
@@ -97,6 +101,8 @@ import {
     handleTakeScreenshot,
     handleRunUnitTests,
     handleRunFeatureTest,
+    handleSetMockResponse,
+    handleClearMockResponses,
     setMcpServer,
 } from './handlers.js';
 
@@ -809,6 +815,58 @@ server.registerTool(
     },
     async (args) => {
         const result = await handleRunFeatureTest(args);
+        return {
+            content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
+            structuredContent: result,
+        };
+    }
+);
+
+// ── 20. set_mock_response ──
+server.registerTool(
+    TOOL_NAMES.SET_MOCK_RESPONSE,
+    {
+        title: 'Set Mock Response',
+        description:
+            'Register a live-mocking rule for an active recording session. The MCP spins up a per-session HTTP mock server and either returns a static response or proxies matched requests to a real backend and rewrites the response via JSON Patch. The app / simulator must be pointed at the returned baseUrl for mocks to apply — this tool does not rewire the simulator proxy. First call must include defaultPassthroughUrl (the real backend for non-matched requests).',
+        inputSchema: SetMockResponseInputSchema,
+        outputSchema: SetMockResponseOutputSchema,
+        annotations: {
+            title: 'Set Mock Response',
+            readOnlyHint: false,
+            destructiveHint: false,
+            idempotentHint: false,
+            openWorldHint: true,
+        },
+    },
+    async (args) => {
+        const result = await handleSetMockResponse(args);
+        return {
+            content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
+            structuredContent: result,
+        };
+    }
+);
+
+// ── 21. clear_mock_responses ──
+server.registerTool(
+    TOOL_NAMES.CLEAR_MOCK_RESPONSES,
+    {
+        title: 'Clear Mock Responses',
+        description:
+            'Remove mocks registered via set_mock_response. Pass mockId to remove one specific mock; omit it to clear all mocks for the session. Pass stopServer=true to also tear down the mock server.',
+        inputSchema: ClearMockResponsesInputSchema,
+        outputSchema: ClearMockResponsesOutputSchema,
+        annotations: {
+            title: 'Clear Mock Responses',
+            readOnlyHint: false,
+            destructiveHint: true,
+            idempotentHint: true,
+            openWorldHint: false,
+        },
+    },
+    async (args) => {
+        const result = await handleClearMockResponses(args);
         return {
             content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
             structuredContent: result,

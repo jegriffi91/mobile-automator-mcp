@@ -92,6 +92,8 @@ const {
   handleRunTest,
   handleGetSessionTimeline,
   handleGetNetworkLogs,
+  handleSetMockResponse,
+  handleClearMockResponses,
 } = await import('../src/handlers.js');
 
 // ── Test suites ──
@@ -432,6 +434,196 @@ describe('Handler Integration Tests', () => {
           platform: 'ios',
         }),
       ).rejects.toThrow('No booted');
+    });
+  });
+
+  describe('set_mock_response / clear_mock_responses', () => {
+    // These tests stand up a real local origin + real MockServer, so we can
+    // validate the end-to-end path (app → mock server → backend) rather than
+    // just checking handler bookkeeping.
+    let http: typeof import('http');
+    let origin: import('http').Server;
+    let originPort: number;
+    let sessionId: string;
+
+    beforeAll(async () => {
+      http = await import('http');
+    });
+
+    beforeEach(async () => {
+      origin = http.createServer((req, res) => {
+        const chunks: Buffer[] = [];
+        req.on('data', (c) => chunks.push(c));
+        req.on('end', () => {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            data: { customerStatusV3: { loginStatus: 'SUCCESS' } },
+            path: req.url,
+          }));
+        });
+      });
+      originPort = await new Promise<number>((resolve) => {
+        origin.listen(0, '127.0.0.1', () => {
+          const a = origin.address();
+          if (a && typeof a !== 'string') resolve(a.port);
+        });
+      });
+
+      const start = await handleStartRecording({
+        appBundleId: 'com.test.app',
+        platform: 'ios',
+      });
+      sessionId = start.sessionId;
+    });
+
+    afterEach(async () => {
+      // Best-effort cleanup — tests may have already torn the session down
+      // via their own stopAndCompile call, in which case the transition throws.
+      try { await handleClearMockResponses({ sessionId, stopServer: true }); } catch { /* already gone */ }
+      try { await handleStopAndCompile({ sessionId }); } catch { /* already compiled */ }
+      await new Promise<void>((resolve) => origin.close(() => resolve()));
+    });
+
+    it('proxies a matched request to the real backend and applies jsonPatch', async () => {
+      const result = await handleSetMockResponse({
+        sessionId,
+        defaultPassthroughUrl: `http://127.0.0.1:${originPort}`,
+        mock: {
+          matcher: { pathContains: '/graphql', method: 'POST' },
+          proxyBaseUrl: `http://127.0.0.1:${originPort}`,
+          responseTransform: {
+            jsonPatch: [
+              { op: 'replace', path: '/data/customerStatusV3/loginStatus', value: 'OP2_INTERCEPT' },
+            ],
+          },
+        },
+      });
+      expect(result.mockId).toBeTruthy();
+      expect(result.port).toBeGreaterThan(0);
+      expect(result.baseUrl).toBe(`http://127.0.0.1:${result.port}`);
+      expect(result.totalMocks).toBe(1);
+
+      const res = await fetch(`${result.baseUrl}/graphql`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query: 'CustomerStatusAndCustomerAuthenticationQuery' }),
+      });
+      const body = await res.json() as { data: { customerStatusV3: { loginStatus: string } } };
+      expect(body.data.customerStatusV3.loginStatus).toBe('OP2_INTERCEPT');
+    });
+
+    it('serves a static response when staticResponse is set', async () => {
+      const result = await handleSetMockResponse({
+        sessionId,
+        defaultPassthroughUrl: `http://127.0.0.1:${originPort}`,
+        mock: {
+          id: 'feature-flag-off',
+          matcher: { pathContains: '/api/flags' },
+          staticResponse: { status: 200, jsonBody: { newLogin: false } },
+        },
+      });
+      expect(result.mockId).toBe('feature-flag-off');
+
+      const res = await fetch(`${result.baseUrl}/api/flags`);
+      expect(await res.json()).toEqual({ newLogin: false });
+    });
+
+    it('passes non-matched requests through to the real backend', async () => {
+      const result = await handleSetMockResponse({
+        sessionId,
+        defaultPassthroughUrl: `http://127.0.0.1:${originPort}`,
+        mock: {
+          matcher: { pathContains: '/only-this' },
+          staticResponse: { status: 418, jsonBody: { teapot: true } },
+        },
+      });
+
+      const res = await fetch(`${result.baseUrl}/elsewhere`);
+      const body = await res.json() as { data: unknown; path: string };
+      expect(res.status).toBe(200);
+      expect(body.path).toBe('/elsewhere');
+      expect(body.data).toBeDefined();
+    });
+
+    it('requires defaultPassthroughUrl on the first call for a session', async () => {
+      await expect(
+        handleSetMockResponse({
+          sessionId,
+          mock: {
+            matcher: { pathContains: '/x' },
+            staticResponse: { status: 200 },
+          },
+        }),
+      ).rejects.toThrow(/defaultPassthroughUrl/);
+    });
+
+    it('refuses to change defaultPassthroughUrl mid-session', async () => {
+      await handleSetMockResponse({
+        sessionId,
+        defaultPassthroughUrl: `http://127.0.0.1:${originPort}`,
+        mock: { matcher: { pathContains: '/a' }, staticResponse: { status: 200 } },
+      });
+      await expect(
+        handleSetMockResponse({
+          sessionId,
+          defaultPassthroughUrl: 'http://other.example.com',
+          mock: { matcher: { pathContains: '/b' }, staticResponse: { status: 200 } },
+        }),
+      ).rejects.toThrow(/refusing to change/);
+    });
+
+    it('clear_mock_responses with mockId removes one; without it removes all', async () => {
+      const a = await handleSetMockResponse({
+        sessionId,
+        defaultPassthroughUrl: `http://127.0.0.1:${originPort}`,
+        mock: { id: 'a', matcher: { pathContains: '/a' }, staticResponse: { status: 200 } },
+      });
+      await handleSetMockResponse({
+        sessionId,
+        mock: { id: 'b', matcher: { pathContains: '/b' }, staticResponse: { status: 200 } },
+      });
+      expect(a.totalMocks).toBe(1); // a at time of registration
+
+      const removeOne = await handleClearMockResponses({ sessionId, mockId: 'a' });
+      expect(removeOne.removed).toBe(1);
+      expect(removeOne.remaining).toBe(1);
+
+      const removeRest = await handleClearMockResponses({ sessionId });
+      expect(removeRest.removed).toBe(1);
+      expect(removeRest.remaining).toBe(0);
+    });
+
+    it('clear_mock_responses with stopServer=true shuts the mock server down', async () => {
+      const set = await handleSetMockResponse({
+        sessionId,
+        defaultPassthroughUrl: `http://127.0.0.1:${originPort}`,
+        mock: { matcher: { pathContains: '/x' }, staticResponse: { status: 200 } },
+      });
+      const cleared = await handleClearMockResponses({ sessionId, stopServer: true });
+      expect(cleared.serverStopped).toBe(true);
+
+      // Server should no longer accept connections
+      await expect(fetch(`${set.baseUrl}/x`)).rejects.toThrow();
+    });
+
+    it('rejects set_mock_response for an unknown session', async () => {
+      await expect(
+        handleSetMockResponse({
+          sessionId: 'nonexistent-session',
+          defaultPassthroughUrl: `http://127.0.0.1:${originPort}`,
+          mock: { matcher: { pathContains: '/x' }, staticResponse: { status: 200 } },
+        }),
+      ).rejects.toThrow(/Session not found/);
+    });
+
+    it('stop_and_compile tears down the mock server automatically', async () => {
+      const set = await handleSetMockResponse({
+        sessionId,
+        defaultPassthroughUrl: `http://127.0.0.1:${originPort}`,
+        mock: { matcher: { pathContains: '/x' }, staticResponse: { status: 200 } },
+      });
+      await handleStopAndCompile({ sessionId });
+      await expect(fetch(`${set.baseUrl}/x`)).rejects.toThrow();
     });
   });
 });

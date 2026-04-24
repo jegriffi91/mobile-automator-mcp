@@ -33,6 +33,10 @@ import {
   FeatureTestSpecSchema,
   RunFeatureTestInputSchema,
   RunFeatureTestOutputSchema,
+  SetMockResponseInputSchema,
+  SetMockResponseOutputSchema,
+  ClearMockResponsesInputSchema,
+  ClearMockResponsesOutputSchema,
 } from './schemas.js';
 
 describe('Schema Conformance', () => {
@@ -740,6 +744,121 @@ describe('Schema Conformance', () => {
         error: 'Setup phase failed',
       };
       expect(RunFeatureTestOutputSchema.safeParse(output).success).toBe(true);
+    });
+  });
+
+  describe('SetMockResponseInputSchema', () => {
+    it('accepts a proxy + jsonPatch mock', () => {
+      const result = SetMockResponseInputSchema.safeParse({
+        sessionId: 'sess-1',
+        defaultPassthroughUrl: 'https://api.example.com',
+        mock: {
+          id: 'status-override',
+          matcher: {
+            pathContains: '/graphql',
+            method: 'POST',
+            requestBodyContains: 'CustomerStatusAndCustomerAuthenticationQuery',
+          },
+          proxyBaseUrl: 'https://api.example.com',
+          responseTransform: {
+            jsonPatch: [
+              { op: 'replace', path: '/data/customerStatusV3/loginStatus', value: 'OP2_INTERCEPT' },
+            ],
+          },
+        },
+      });
+      expect(result.success).toBe(true);
+    });
+
+    it('accepts a static response mock', () => {
+      const result = SetMockResponseInputSchema.safeParse({
+        sessionId: 'sess-1',
+        defaultPassthroughUrl: 'https://api.example.com',
+        mock: {
+          matcher: { urlPathEquals: '/api/flags' },
+          staticResponse: {
+            status: 200,
+            jsonBody: { flags: { newLogin: false } },
+            headers: { 'Cache-Control': 'no-store' },
+          },
+        },
+      });
+      expect(result.success).toBe(true);
+    });
+
+    it('rejects a mock that has both staticResponse and proxyBaseUrl', () => {
+      const result = SetMockResponseInputSchema.safeParse({
+        sessionId: 'sess-1',
+        mock: {
+          matcher: { pathContains: '/x' },
+          staticResponse: { status: 200 },
+          proxyBaseUrl: 'https://real.example.com',
+        },
+      });
+      expect(result.success).toBe(false);
+    });
+
+    it('rejects a mock with responseTransform but no proxyBaseUrl', () => {
+      const result = SetMockResponseInputSchema.safeParse({
+        sessionId: 'sess-1',
+        mock: {
+          matcher: { pathContains: '/x' },
+          staticResponse: { status: 200 },
+          responseTransform: { jsonPatch: [{ op: 'replace', path: '/x', value: 1 }] },
+        },
+      });
+      expect(result.success).toBe(false);
+    });
+
+    it('rejects an unknown JSON Patch op', () => {
+      const result = SetMockResponseInputSchema.safeParse({
+        sessionId: 'sess-1',
+        mock: {
+          matcher: { pathContains: '/x' },
+          proxyBaseUrl: 'https://real.example.com',
+          responseTransform: { jsonPatch: [{ op: 'test', path: '/x', value: 1 }] },
+        },
+      });
+      expect(result.success).toBe(false);
+    });
+  });
+
+  describe('SetMockResponseOutputSchema', () => {
+    it('accepts a valid output', () => {
+      const result = SetMockResponseOutputSchema.safeParse({
+        mockId: 'mock-abcd1234',
+        port: 54321,
+        baseUrl: 'http://127.0.0.1:54321',
+        totalMocks: 3,
+        defaultPassthroughUrl: 'https://api.example.com',
+      });
+      expect(result.success).toBe(true);
+    });
+  });
+
+  describe('ClearMockResponsesInput/OutputSchema', () => {
+    it('accepts clear-all (no mockId)', () => {
+      expect(ClearMockResponsesInputSchema.safeParse({ sessionId: 'sess-1' }).success).toBe(true);
+    });
+
+    it('accepts clear-one with stopServer', () => {
+      expect(
+        ClearMockResponsesInputSchema.safeParse({
+          sessionId: 'sess-1',
+          mockId: 'mock-abcd1234',
+          stopServer: true,
+        }).success,
+      ).toBe(true);
+    });
+
+    it('output accepts a valid shape', () => {
+      expect(
+        ClearMockResponsesOutputSchema.safeParse({
+          removed: 2,
+          remaining: 1,
+          serverStopped: false,
+        }).success,
+      ).toBe(true);
     });
   });
 });

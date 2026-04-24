@@ -33,7 +33,7 @@ import {
 } from './build/index.js';
 import { takeIosScreenshot, takeAndroidScreenshot } from './screenshot/index.js';
 import { runIosUnitTests, runAndroidUnitTests } from './testing/index.js';
-import { StubServer } from './wiremock/index.js';
+import { StubServer, MockServer } from './wiremock/index.js';
 import { extractTrackEvents } from './session/track-event-extractor.js';
 import {
     getMergedEvents,
@@ -110,8 +110,13 @@ import type {
     RunUnitTestsOutput,
     RunFeatureTestInput,
     RunFeatureTestOutput,
+    SetMockResponseInput,
+    SetMockResponseOutput,
+    ClearMockResponsesInput,
+    ClearMockResponsesOutput,
 } from './schemas.js';
 import { runFeatureTest, defaultSleep } from './featureTest/index.js';
+import { randomBytes } from 'crypto';
 
 const execFileAsync = promisify(execFile);
 
@@ -140,6 +145,9 @@ function createPollingNotifier(): PollingNotifier | undefined {
 
 // ── Per-session driver instances ──
 const activeDrivers: Map<string, AutomationDriver> = new Map();
+
+// ── Per-session live-mocking servers (set_mock_response / clear_mock_responses) ──
+const mockServers: Map<string, MockServer> = new Map();
 
 // ── Persistent standalone driver (reused across sessionless get_ui_hierarchy calls) ──
 // Daemon-backed so the JVM stays warm after the first call.
@@ -484,6 +492,17 @@ export async function handleStopAndCompile(
                 console.error('[MCP] stop_and_compile_test: driver cleanup failed (non-fatal)', err);
             }
             activeDrivers.delete(input.sessionId);
+        }
+
+        // Tear down any live-mocking server owned by this session.
+        const mockServer = mockServers.get(input.sessionId);
+        if (mockServer) {
+            try {
+                await mockServer.stop();
+            } catch (err) {
+                console.error('[MCP] stop_and_compile_test: mock server cleanup failed (non-fatal)', err);
+            }
+            mockServers.delete(input.sessionId);
         }
 
         // Purge hierarchy snapshots to free memory
@@ -2033,6 +2052,102 @@ export async function handleRunUnitTests(
         reportDir: result.reportDir,
         output: result.output,
     };
+}
+
+// ---- set_mock_response ----
+//
+// Register a live-mocking rule on a per-session MockServer. The mock server is
+// lazily created on first call; subsequent calls reuse it and add more rules.
+// The app / simulator must be pointed at the returned baseUrl for the mocks to
+// take effect — this tool does NOT rewire the simulator's proxy settings (that
+// stays user-managed for now).
+export async function handleSetMockResponse(
+    input: SetMockResponseInput,
+): Promise<SetMockResponseOutput> {
+    const session = await sessionManager.getSession(input.sessionId);
+    if (!session) {
+        throw new Error(`Session not found: ${input.sessionId}. Was start_recording_session called?`);
+    }
+
+    let server = mockServers.get(input.sessionId);
+    if (!server) {
+        if (!input.defaultPassthroughUrl) {
+            throw new Error(
+                'First set_mock_response call for a session requires defaultPassthroughUrl ' +
+                '(the real backend that non-matched requests get proxied to).',
+            );
+        }
+        server = new MockServer();
+        server.setDefaultPassthrough(input.defaultPassthroughUrl);
+        await server.start(input.port ?? 0);
+        mockServers.set(input.sessionId, server);
+    } else if (input.defaultPassthroughUrl && input.defaultPassthroughUrl !== server.getDefaultPassthrough()) {
+        throw new Error(
+            `defaultPassthroughUrl for session ${input.sessionId} is already ${server.getDefaultPassthrough()}; ` +
+            `refusing to change it mid-session.`,
+        );
+    }
+
+    const mockId = input.mock.id ?? `mock-${randomBytes(4).toString('hex')}`;
+    server.setMock({
+        id: mockId,
+        matcher: input.mock.matcher,
+        proxyBaseUrl: input.mock.proxyBaseUrl,
+        staticResponse: input.mock.staticResponse,
+        responseTransform: input.mock.responseTransform,
+    });
+
+    const port = server.getPort();
+    if (port === null) {
+        throw new Error('MockServer reported null port after start — this should not happen');
+    }
+
+    console.error(
+        `[MCP] set_mock_response: session=${input.sessionId} mockId=${mockId} port=${port} ` +
+        `mode=${input.mock.staticResponse ? 'static' : (input.mock.responseTransform ? 'proxy+transform' : 'proxy')}`,
+    );
+
+    return {
+        mockId,
+        port,
+        baseUrl: `http://127.0.0.1:${port}`,
+        totalMocks: server.listMocks().length,
+        defaultPassthroughUrl: server.getDefaultPassthrough(),
+    };
+}
+
+// ---- clear_mock_responses ----
+export async function handleClearMockResponses(
+    input: ClearMockResponsesInput,
+): Promise<ClearMockResponsesOutput> {
+    const server = mockServers.get(input.sessionId);
+    if (!server) {
+        return { removed: 0, remaining: 0, serverStopped: false };
+    }
+
+    const before = server.listMocks().length;
+    if (input.mockId) {
+        const didRemove = server.removeMock(input.mockId);
+        if (!didRemove) {
+            console.error(`[MCP] clear_mock_responses: mockId ${input.mockId} not found`);
+        }
+    } else {
+        server.clearMocks();
+    }
+    const after = server.listMocks().length;
+
+    let serverStopped = false;
+    if (input.stopServer) {
+        await server.stop();
+        mockServers.delete(input.sessionId);
+        serverStopped = true;
+    }
+
+    console.error(
+        `[MCP] clear_mock_responses: session=${input.sessionId} removed=${before - after} remaining=${after} stopped=${serverStopped}`,
+    );
+
+    return { removed: before - after, remaining: after, serverStopped };
 }
 
 // ---- run_feature_test ----
