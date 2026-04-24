@@ -44,11 +44,14 @@ import {
     type VerifyNetworkDeduplicationOutput,
     type VerifyNetworkErrorHandlingInput,
     type VerifyNetworkErrorHandlingOutput,
+    type SetMockResponseInput,
+    type SetMockResponseOutput,
 } from '../schemas.js';
 
 export interface RunnerDeps {
     runFlow(input: RunFlowInput): Promise<RunFlowOutput>;
     startRecording(input: StartRecordingInput): Promise<StartRecordingOutput>;
+    setMockResponse(input: SetMockResponseInput): Promise<SetMockResponseOutput>;
     executeUIAction(input: ExecuteUIActionInput): Promise<ExecuteUIActionOutput>;
     stopAndCompile(input: StopAndCompileInput): Promise<StopAndCompileOutput>;
     verifyParallelism(input: VerifyNetworkParallelismInput): Promise<VerifyNetworkParallelismOutput>;
@@ -105,6 +108,7 @@ export async function runFeatureTest(
         name: spec.name,
         durationMs: 0,
         setup: { passed: true, flows: [] },
+        mocks: { installed: [] },
         actions: { sessionId: '', interactions: [] },
         assertions: [],
         teardown: { flows: [] },
@@ -188,42 +192,74 @@ export async function runFeatureTest(
         return result;
     }
 
-    let actionsPassed = true;
-    const actionsStart = Date.now();
-    try {
-        for (const action of spec.actions) {
-            const elapsed = Date.now() - actionsStart;
-            if (elapsed > actionTimeoutMs) {
-                actionsPassed = false;
-                result.error = `Actions phase timed out after ${elapsed}ms (budget: ${actionTimeoutMs}ms)`;
+    // ── Phase 2b: Install live mocks (Proxyman MCP gateway) ──
+    //
+    // Runs after recording starts so we have a sessionId, and before any UI
+    // action so the first matching request hits the rule. If any mock fails to
+    // install, abort the test — earlier mocks may already be active, but
+    // stop_and_compile will still tag-clean them.
+    let mocksFailed = false;
+    if (spec.mocks && spec.mocks.length > 0) {
+        for (const mockSpec of spec.mocks) {
+            try {
+                const r = await deps.setMockResponse({ sessionId, mock: mockSpec });
+                result.mocks.installed.push({
+                    mockId: r.mockId,
+                    proxymanRuleId: r.proxymanRuleId,
+                    ruleName: r.ruleName,
+                });
+            } catch (err) {
+                result.mocks.error = `Failed to install mock${mockSpec.id ? ` "${mockSpec.id}"` : ''}: ${(err as Error).message}`;
+                mocksFailed = true;
                 break;
             }
-
-            if ('wait' in action) {
-                const ms = action.wait;
-                const waitStart = Date.now();
-                await deps.sleep(ms);
-                result.actions.interactions.push({
-                    action: 'wait',
-                    element: `${ms}ms`,
-                    durationMs: Date.now() - waitStart,
-                    waitMs: ms,
-                });
-                continue;
-            }
-
-            const uiInput = toExecuteActionInput(action, sessionId);
-            const callStart = Date.now();
-            await deps.executeUIAction(uiInput);
-            result.actions.interactions.push({
-                action: uiInput.action,
-                element: describeElement(uiInput),
-                durationMs: Date.now() - callStart,
-            });
         }
-    } catch (err) {
-        actionsPassed = false;
-        result.error = `execute_ui_action failed: ${(err as Error).message}`;
+    }
+
+    let actionsPassed = !mocksFailed;
+    if (mocksFailed) {
+        // Skip the actions phase — running them with partial mocks installed
+        // would produce nonsense results. Teardown still runs so the session +
+        // any partially-installed mocks get cleaned up.
+        result.error = result.mocks.error;
+    }
+    if (actionsPassed) {
+        const actionsStart = Date.now();
+        try {
+            for (const action of spec.actions) {
+                const elapsed = Date.now() - actionsStart;
+                if (elapsed > actionTimeoutMs) {
+                    actionsPassed = false;
+                    result.error = `Actions phase timed out after ${elapsed}ms (budget: ${actionTimeoutMs}ms)`;
+                    break;
+                }
+
+                if ('wait' in action) {
+                    const ms = action.wait;
+                    const waitStart = Date.now();
+                    await deps.sleep(ms);
+                    result.actions.interactions.push({
+                        action: 'wait',
+                        element: `${ms}ms`,
+                        durationMs: Date.now() - waitStart,
+                        waitMs: ms,
+                    });
+                    continue;
+                }
+
+                const uiInput = toExecuteActionInput(action, sessionId);
+                const callStart = Date.now();
+                await deps.executeUIAction(uiInput);
+                result.actions.interactions.push({
+                    action: uiInput.action,
+                    element: describeElement(uiInput),
+                    durationMs: Date.now() - callStart,
+                });
+            }
+        } catch (err) {
+            actionsPassed = false;
+            result.error = `execute_ui_action failed: ${(err as Error).message}`;
+        }
     }
 
     // Settle: let in-flight network traffic land before assertions.

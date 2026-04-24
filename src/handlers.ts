@@ -2277,6 +2277,7 @@ export async function handleRunFeatureTest(
     return runFeatureTest(input, {
         runFlow: handleRunFlow,
         startRecording: handleStartRecording,
+        setMockResponse: handleSetMockResponse,
         executeUIAction: handleExecuteUIAction,
         stopAndCompile: handleStopAndCompile,
         verifyParallelism: handleVerifyNetworkParallelism,
