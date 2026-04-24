@@ -5,7 +5,8 @@
     "type": "module",
     "main": "dist/index.js",
     "bin": {
-        "mobile-automator": "./bin/mobile-automator"
+        "mobile-automator": "./bin/mobile-automator",
+        "mobile-automator-feature-test": "./bin/mobile-automator-feature-test"
     },
     "engines": {
         "node": ">=20"
