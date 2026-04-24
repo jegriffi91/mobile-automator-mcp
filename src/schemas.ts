@@ -784,7 +784,8 @@ const MockResponseTransformSchema = z.object({
         .describe('Applied to the JSON-decoded response body in flight'),
 });
 
-const MockSpecBodySchema = z.object({
+// Exported so FeatureTestSpec can declare mocks: [...] inline.
+export const MockSpecSchema = z.object({
     id: z.string().optional().describe('Stable mock ID. Auto-generated if omitted.'),
     matcher: MockMatcherSchema,
     responseTransform: MockResponseTransformSchema.optional(),
@@ -796,7 +797,7 @@ const MockSpecBodySchema = z.object({
 
 export const SetMockResponseInputSchema = z.object({
     sessionId: z.string().describe('Active recording session ID'),
-    mock: MockSpecBodySchema,
+    mock: MockSpecSchema,
 });
 
 export const SetMockResponseOutputSchema = z.object({
@@ -923,6 +924,14 @@ export const FeatureTestSpecSchema = z.object({
     description: z.string().optional(),
     appBundleId: z.string().describe('The app under test (passed to start_recording_session)'),
     setup: z.array(FlowRefSchema).optional().default([]),
+    mocks: z
+        .array(MockSpecSchema)
+        .optional()
+        .default([])
+        .describe(
+            'Live response-mocking rules installed via Proxyman MCP after start_recording_session ' +
+            'and before actions begin. Same shape as set_mock_response. Auto-cleaned when the session ends.',
+        ),
     actions: z.array(FeatureActionSpecSchema).describe('UI actions dispatched inside the recording session'),
     assertions: z
         .array(FeatureAssertionSpecSchema)
@@ -1478,6 +1487,12 @@ const AssertionResultSchema = z.object({
     error: z.string().optional(),
 });
 
+const MockInstallSummarySchema = z.object({
+    mockId: z.string(),
+    proxymanRuleId: z.string(),
+    ruleName: z.string(),
+});
+
 export const RunFeatureTestOutputSchema = z.object({
     passed: z.boolean().describe('True only if setup, all actions, and every assertion passed'),
     name: z.string(),
@@ -1486,6 +1501,12 @@ export const RunFeatureTestOutputSchema = z.object({
         passed: z.boolean(),
         flows: z.array(FlowResultSchema),
     }),
+    mocks: z.object({
+        installed: z.array(MockInstallSummarySchema)
+            .describe('Mocks successfully installed via Proxyman MCP, in spec order'),
+        error: z.string().optional()
+            .describe('Populated when a mock failed to install — earlier mocks may already be active'),
+    }).default({ installed: [] }),
     actions: z.object({
         sessionId: z.string(),
         interactions: z.array(InteractionSummarySchema),

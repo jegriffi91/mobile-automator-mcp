@@ -30,6 +30,12 @@ function makeDeps(overrides: Partial<RunnerDeps> = {}): RunnerDeps {
             message: 'ready',
             readiness: { driverReady: true, baselineCaptured: true, pollerStarted: true },
         }),
+        setMockResponse: vi.fn().mockImplementation(async ({ mock }) => ({
+            mockId: mock.id ?? 'mock-default',
+            proxymanRuleId: 'RULE-DEFAULT',
+            ruleName: `mca:sess-1:${mock.id ?? 'mock-default'}`,
+            totalSessionMocks: 1,
+        })),
         executeUIAction: vi.fn().mockResolvedValue({ success: true, message: 'ok' }),
         stopAndCompile: vi.fn().mockResolvedValue({
             sessionId: 'sess-1',
@@ -411,6 +417,138 @@ describe('runFeatureTest — defaults & action mapping', () => {
         expect(deps.startRecording).toHaveBeenCalledWith(
             expect.objectContaining({ filterDomains: ['api.example.com'] }),
         );
+    });
+});
+
+describe('runFeatureTest — mocks in spec', () => {
+    it('installs each mock in spec order between recording start and actions', async () => {
+        const callOrder: string[] = [];
+        const deps = makeDeps({
+            startRecording: vi.fn().mockImplementation(async () => {
+                callOrder.push('startRecording');
+                return {
+                    sessionId: 'sess-1',
+                    message: 'ready',
+                    readiness: { driverReady: true, baselineCaptured: true, pollerStarted: true },
+                };
+            }),
+            setMockResponse: vi.fn().mockImplementation(async ({ mock }) => {
+                callOrder.push(`mock:${mock.id ?? 'auto'}`);
+                return {
+                    mockId: mock.id ?? 'auto',
+                    proxymanRuleId: `RULE-${mock.id ?? 'auto'}`,
+                    ruleName: `mca:sess-1:${mock.id ?? 'auto'}`,
+                    totalSessionMocks: 1,
+                };
+            }),
+            executeUIAction: vi.fn().mockImplementation(async () => {
+                callOrder.push('action');
+                return { success: true, message: 'ok' };
+            }),
+        });
+
+        const result = await runFeatureTest(
+            {
+                spec: {
+                    ...MINIMAL_SPEC,
+                    mocks: [
+                        { id: 'first', matcher: { pathContains: '/a' }, staticResponse: { status: 200 } },
+                        { id: 'second', matcher: { pathContains: '/b' }, staticResponse: { status: 200 } },
+                    ],
+                    actions: [{ tap: { id: 'go' } }],
+                    assertions: [{ type: 'parallelism', matcher: {}, maxWindowMs: 1000, minExpectedCount: 1 }],
+                },
+            },
+            deps,
+        );
+
+        expect(callOrder).toEqual(['startRecording', 'mock:first', 'mock:second', 'action']);
+        expect(result.mocks.installed).toHaveLength(2);
+        expect(result.mocks.installed[0]).toMatchObject({
+            mockId: 'first',
+            proxymanRuleId: 'RULE-first',
+            ruleName: 'mca:sess-1:first',
+        });
+        expect(result.passed).toBe(true);
+    });
+
+    it('records auto-generated mock IDs from the gateway', async () => {
+        const deps = makeDeps({
+            setMockResponse: vi.fn().mockResolvedValue({
+                mockId: 'mock-deadbeef',
+                proxymanRuleId: 'RULE-DEAD',
+                ruleName: 'mca:sess-1:mock-deadbeef',
+                totalSessionMocks: 1,
+            }),
+        });
+        const result = await runFeatureTest(
+            {
+                spec: {
+                    ...MINIMAL_SPEC,
+                    mocks: [{ matcher: { pathContains: '/x' }, staticResponse: { status: 200 } }],
+                    actions: [{ tap: { id: 'x' } }],
+                },
+            },
+            deps,
+        );
+        expect(result.mocks.installed).toEqual([
+            { mockId: 'mock-deadbeef', proxymanRuleId: 'RULE-DEAD', ruleName: 'mca:sess-1:mock-deadbeef' },
+        ]);
+    });
+
+    it('aborts and skips actions/assertions when a mock fails to install, but still runs teardown', async () => {
+        const deps = makeDeps({
+            setMockResponse: vi.fn()
+                .mockResolvedValueOnce({
+                    mockId: 'first',
+                    proxymanRuleId: 'RULE-1',
+                    ruleName: 'mca:sess-1:first',
+                    totalSessionMocks: 1,
+                })
+                .mockRejectedValueOnce(new Error('Proxyman MCP not enabled')),
+        });
+        const result = await runFeatureTest(
+            {
+                spec: {
+                    ...MINIMAL_SPEC,
+                    mocks: [
+                        { id: 'first', matcher: { pathContains: '/a' }, staticResponse: { status: 200 } },
+                        { id: 'broken', matcher: { pathContains: '/b' }, staticResponse: { status: 200 } },
+                    ],
+                    actions: [{ tap: { id: 'x' } }],
+                    assertions: [{ type: 'parallelism', matcher: {}, maxWindowMs: 1000, minExpectedCount: 1 }],
+                    teardown: [{ flow: 'sign-out' }],
+                },
+            },
+            deps,
+        );
+
+        expect(result.passed).toBe(false);
+        expect(result.mocks.installed).toHaveLength(1); // first one succeeded
+        expect(result.mocks.error).toContain('Failed to install mock "broken"');
+        expect(result.error).toBe(result.mocks.error);
+        expect(deps.executeUIAction).not.toHaveBeenCalled();
+        expect(result.assertions).toHaveLength(0);
+
+        // Teardown + stopAndCompile still run so the session + partial mocks get cleaned up
+        expect(deps.stopAndCompile).toHaveBeenCalledTimes(1);
+        expect(result.teardown.flows).toHaveLength(1);
+    });
+
+    it('treats spec.mocks default ([]) as a no-op — existing behavior unchanged', async () => {
+        const deps = makeDeps();
+        const result = await runFeatureTest(
+            {
+                spec: {
+                    ...MINIMAL_SPEC,
+                    actions: [{ tap: { id: 'x' } }],
+                },
+            },
+            deps,
+        );
+        expect(deps.setMockResponse).not.toHaveBeenCalled();
+        expect(result.mocks.installed).toEqual([]);
+        expect(result.passed).toBe(true);
     });
 });
 

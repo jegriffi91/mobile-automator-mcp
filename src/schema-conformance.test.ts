@@ -623,6 +623,66 @@ describe('Schema Conformance', () => {
       expect(FeatureTestSpecSchema.safeParse(spec).success).toBe(true);
     });
 
+    it('accepts an inline mocks[] block (spec-level Proxyman gateway integration)', () => {
+      const spec = {
+        name: 'mocks-in-spec',
+        appBundleId: 'com.example.app',
+        mocks: [
+          {
+            id: 'login-status-override',
+            matcher: {
+              pathContains: '/api/federated/graphql',
+              method: 'POST',
+              requestBodyContains: 'CustomerStatusAndCustomerAuthenticationQuery',
+            },
+            responseTransform: {
+              jsonPatch: [
+                { op: 'replace', path: '/data/customerStatusV3/loginStatus', value: 'OP2_INTERCEPT' },
+              ],
+            },
+          },
+          {
+            matcher: { urlPathEquals: '/api/v2/flags' },
+            staticResponse: {
+              status: 200,
+              jsonBody: { flags: { newLogin: false } },
+            },
+          },
+        ],
+        actions: [{ tap: { id: 'go' } }],
+        assertions: [],
+      };
+      const result = FeatureTestSpecSchema.safeParse(spec);
+      expect(result.success).toBe(true);
+    });
+
+    it('rejects a mocks entry that mixes staticResponse and responseTransform', () => {
+      const spec = {
+        name: 'bad',
+        appBundleId: 'com.example.app',
+        mocks: [{
+          matcher: { pathContains: '/x' },
+          staticResponse: { status: 200 },
+          responseTransform: { jsonPatch: [] },
+        }],
+        actions: [],
+        assertions: [],
+      };
+      expect(FeatureTestSpecSchema.safeParse(spec).success).toBe(false);
+    });
+
+    it('treats omitted mocks[] as default empty array', () => {
+      const spec = {
+        name: 'no-mocks',
+        appBundleId: 'com.example.app',
+        actions: [],
+        assertions: [],
+      };
+      const result = FeatureTestSpecSchema.safeParse(spec);
+      expect(result.success).toBe(true);
+      if (result.success) expect(result.data.mocks).toEqual([]);
+    });
+
     it('accepts all eight assertion types', () => {
       const spec = {
         name: 'assertion-coverage',
