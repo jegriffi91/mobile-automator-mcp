@@ -157,6 +157,11 @@ export const StartRecordingInputSchema = z.object({
                 .describe('Timeout for daemon JSON-RPC requests (ms). Default: 15000'),
             daemonShutdownMs: z.number().int().positive().optional()
                 .describe('Timeout for daemon graceful shutdown (ms). Default: 3000'),
+            driverCooldownMs: z.number().int().nonnegative().optional()
+                .describe(
+                    'iOS-only: pause after uninstalling the XCTest driver to let port 7001 drain (ms). ' +
+                    'Default: 3000. Only applies on the uninstall path — a healthy driver is reused without cooldown.',
+                ),
         })
         .optional()
         .describe('Optional timeout overrides. All values merge with defaults — only override what you need.'),
@@ -656,6 +661,15 @@ export const RunFlowInputSchema = z.object({
         .number()
         .optional()
         .describe('Port for the optional stub server (default: auto-select)'),
+    driverCooldownMs: z
+        .number()
+        .int()
+        .nonnegative()
+        .optional()
+        .describe(
+            'iOS-only: pause after uninstalling the XCTest driver to let port 7001 drain (default: 3000). ' +
+            'Only applies on the uninstall path — a healthy driver is reused without cooldown.',
+        ),
 });
 
 export const RunTestInputSchema = z.object({
@@ -681,6 +695,15 @@ export const RunTestInputSchema = z.object({
         .optional()
         .describe(
             'Environment variables passed to Maestro via -e KEY=VALUE flags (e.g., { "APP_ID": "io.appcision.project-doombot" })'
+        ),
+    driverCooldownMs: z
+        .number()
+        .int()
+        .nonnegative()
+        .optional()
+        .describe(
+            'iOS-only: pause after uninstalling the XCTest driver to let port 7001 drain (default: 3000). ' +
+            'Only applies on the uninstall path — a healthy driver is reused without cooldown.',
         ),
     profiling: z
         .object({
@@ -866,7 +889,12 @@ export const RunFeatureTestInputSchema = z.object({
         .int()
         .nonnegative()
         .optional()
-        .describe('Pause inserted between consecutive setup flows (default: 5000)'),
+        .describe(
+            'Unified iOS driver cooldown (default: 5000). Applied in two places: ' +
+            '(1) sleep between consecutive setup flows, ' +
+            '(2) cooldown after the XCTest driver is uninstalled inside start_recording_session / run_flow ' +
+            '(only hits that path when the driver health probe fails).',
+        ),
 });
 
 // ──────────────────────────────────────────────

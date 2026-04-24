@@ -386,6 +386,20 @@ describe('Handler Integration Tests', () => {
       expect(result.passed).toBe(false);
       expect(result.output).toContain('AssertVisible failed');
     });
+
+    it('forwards driverCooldownMs into DriverFactory.createCliOnly (Bug #9 fix)', async () => {
+      await handleRunTest({
+        yamlPath: '/tmp/test.yaml',
+        driverCooldownMs: 7500,
+      });
+
+      expect(DriverFactory.createCliOnly).toHaveBeenCalledWith({ driverCooldownMs: 7500 });
+    });
+
+    it('omits timeouts when driverCooldownMs is not supplied', async () => {
+      await handleRunTest({ yamlPath: '/tmp/test.yaml' });
+      expect(DriverFactory.createCliOnly).toHaveBeenCalledWith(undefined);
+    });
   });
 
   describe('Error handling', () => {

@@ -134,6 +134,7 @@ export async function runFeatureTest(
                 params: { ...input.env, ...ref.params },
                 platform,
                 stubsDir: input.stubsDir,
+                driverCooldownMs,
             });
             result.setup.flows.push({
                 name: ref.flow,
@@ -177,6 +178,7 @@ export async function runFeatureTest(
             filterDomains: spec.filterDomains,
             captureMode: spec.captureMode,
             trackEventPaths: spec.trackEventPaths,
+            timeouts: { driverCooldownMs },
         });
         sessionId = recording.sessionId;
         result.actions.sessionId = sessionId;
@@ -258,6 +260,7 @@ export async function runFeatureTest(
                 params: { ...input.env, ...ref.params },
                 platform,
                 stubsDir: input.stubsDir,
+                driverCooldownMs,
             });
             result.teardown.flows.push({
                 name: ref.flow,
