@@ -733,6 +733,90 @@ export const RunTestInputSchema = z.object({
 });
 
 // ──────────────────────────────────────────────
+// set_mock_response / clear_mock_responses — Proxyman MCP gateway
+// ──────────────────────────────────────────────
+//
+// Per-session live response mocking, implemented as a thin gateway over the
+// Proxyman MCP server. Our handler translates a structured spec into a
+// JavaScript scripting rule and asks Proxyman to install it on the running
+// proxy. Rules are tagged with the session ID in their display name so we can
+// bulk-delete on stop_and_compile_test.
+
+const MockMatcherSchema = z.object({
+    pathContains: z.string().optional().describe('Substring match on the URL path'),
+    urlPathEquals: z.string().optional().describe('Exact URL path match (no query string)'),
+    method: z
+        .enum(['ANY', 'GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS', 'HEAD'])
+        .optional()
+        .describe('HTTP method (default: ANY)'),
+    requestBodyContains: z
+        .string()
+        .optional()
+        .describe(
+            'Substring match on the request body (e.g., a GraphQL operationName). ' +
+            'Enforced inside the generated script — Proxyman has no native filter for this.',
+        ),
+    graphqlQueryName: z
+        .string()
+        .optional()
+        .describe(
+            'GraphQL operation name (translated to Proxyman\'s native graphql_query_name filter). ' +
+            'More precise than requestBodyContains for GraphQL traffic.',
+        ),
+});
+
+const JsonPatchOpSchema = z.object({
+    op: z.enum(['replace', 'add', 'remove']).describe('RFC 6902 operation'),
+    path: z.string().describe('RFC 6901 JSON Pointer (e.g., "/data/customerStatusV3/loginStatus")'),
+    value: z.unknown().optional().describe('Required for replace/add; ignored for remove'),
+});
+
+const MockStaticResponseSchema = z.object({
+    status: z.number().int().positive().default(200),
+    jsonBody: z.unknown().optional().describe('Returned verbatim as JSON with Content-Type application/json'),
+    body: z.string().optional().describe('Returned verbatim as raw text. Use jsonBody for JSON.'),
+    headers: z.record(z.string()).optional(),
+});
+
+const MockResponseTransformSchema = z.object({
+    jsonPatch: z
+        .array(JsonPatchOpSchema)
+        .describe('Applied to the JSON-decoded response body in flight'),
+});
+
+const MockSpecBodySchema = z.object({
+    id: z.string().optional().describe('Stable mock ID. Auto-generated if omitted.'),
+    matcher: MockMatcherSchema,
+    responseTransform: MockResponseTransformSchema.optional(),
+    staticResponse: MockStaticResponseSchema.optional(),
+}).refine(
+    (m) => Boolean(m.staticResponse) !== Boolean(m.responseTransform),
+    { message: 'Exactly one of staticResponse or responseTransform must be set' },
+);
+
+export const SetMockResponseInputSchema = z.object({
+    sessionId: z.string().describe('Active recording session ID'),
+    mock: MockSpecBodySchema,
+});
+
+export const SetMockResponseOutputSchema = z.object({
+    mockId: z.string().describe('Stable mock ID (echoed if provided, generated if not)'),
+    proxymanRuleId: z.string().describe('Proxyman rule ID, useful for direct inspection in the Proxyman UI'),
+    ruleName: z.string().describe('Display name of the rule in Proxyman (mca:<sessionId>:<mockId>)'),
+    totalSessionMocks: z.number().int().describe('Total active mocks for this session after this call'),
+});
+
+export const ClearMockResponsesInputSchema = z.object({
+    sessionId: z.string().describe('Active session ID'),
+    mockId: z.string().optional().describe('Remove only this mock. If omitted, clears all session mocks.'),
+});
+
+export const ClearMockResponsesOutputSchema = z.object({
+    removed: z.number().int().describe('Number of rules deleted from Proxyman'),
+    remaining: z.number().int().describe('Number of rules still active for this session'),
+});
+
+// ──────────────────────────────────────────────
 // run_feature_test — declarative composite test spec
 // ──────────────────────────────────────────────
 //
@@ -1500,6 +1584,11 @@ export type FeatureTestSpec = z.infer<typeof FeatureTestSpecSchema>;
 export type RunFeatureTestInput = z.infer<typeof RunFeatureTestInputSchema>;
 export type RunFeatureTestOutput = z.infer<typeof RunFeatureTestOutputSchema>;
 
+export type SetMockResponseInput = z.infer<typeof SetMockResponseInputSchema>;
+export type SetMockResponseOutput = z.infer<typeof SetMockResponseOutputSchema>;
+export type ClearMockResponsesInput = z.infer<typeof ClearMockResponsesInputSchema>;
+export type ClearMockResponsesOutput = z.infer<typeof ClearMockResponsesOutputSchema>;
+
 // ──────────────────────────────────────────────
 // Tool name constants
 // ──────────────────────────────────────────────
@@ -1532,4 +1621,6 @@ export const TOOL_NAMES = {
     TAKE_SCREENSHOT: 'take_screenshot',
     RUN_UNIT_TESTS: 'run_unit_tests',
     RUN_FEATURE_TEST: 'run_feature_test',
+    SET_MOCK_RESPONSE: 'set_mock_response',
+    CLEAR_MOCK_RESPONSES: 'clear_mock_responses',
 } as const;

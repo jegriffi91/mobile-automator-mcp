@@ -110,8 +110,22 @@ import type {
     RunUnitTestsOutput,
     RunFeatureTestInput,
     RunFeatureTestOutput,
+    SetMockResponseInput,
+    SetMockResponseOutput,
+    ClearMockResponsesInput,
+    ClearMockResponsesOutput,
 } from './schemas.js';
 import { runFeatureTest, defaultSleep } from './featureTest/index.js';
+import {
+    getProxymanMcpClient,
+    type ProxymanMcpClient,
+    buildScriptContent,
+    buildProxymanUrlPattern,
+    buildRuleName,
+    isOurRuleForSession,
+    ProxymanMcpError,
+} from './proxymanMcp/index.js';
+import { randomBytes } from 'crypto';
 
 const execFileAsync = promisify(execFile);
 
@@ -140,6 +154,25 @@ function createPollingNotifier(): PollingNotifier | undefined {
 
 // ── Per-session driver instances ──
 const activeDrivers: Map<string, AutomationDriver> = new Map();
+
+// ── Per-session mock-rule ledger (sessionId → mockId → Proxyman rule ID) ──
+//
+// Backs handleSetMockResponse / handleClearMockResponses, plus session-end
+// cleanup in handleStopAndCompile. We treat Proxyman as the source of truth
+// (re-listing on cleanup so externally-deleted rules don't leak), but the
+// ledger gives us O(1) lookup by mockId for partial clears.
+const sessionMocks: Map<string, Map<string, string>> = new Map();
+
+/**
+ * Test-only — replace the Proxyman MCP client used by handlers. Returns the
+ * previous instance so tests can restore it.
+ */
+let _proxymanClientFactory: () => ProxymanMcpClient = getProxymanMcpClient;
+export function _setProxymanMcpClientFactory(factory: () => ProxymanMcpClient): () => ProxymanMcpClient {
+    const prev = _proxymanClientFactory;
+    _proxymanClientFactory = factory;
+    return prev;
+}
 
 // ── Persistent standalone driver (reused across sessionless get_ui_hierarchy calls) ──
 // Daemon-backed so the JVM stays warm after the first call.
@@ -207,6 +240,28 @@ export async function handleStartRecording(
     const notifier = createPollingNotifier();
     await sessionManager.startPolling(sessionId, input.platform, input.appBundleId, driver, notifier);
     const pollerStarted = true;
+
+    // Best-effort: ask Proxyman to enable SSL Proxying for each filterDomain so
+    // any later set_mock_response can transparently mock HTTPS traffic. This
+    // only matters when the user's app talks to HTTPS backends, but the cost
+    // when it doesn't is negligible. Skipped silently if Proxyman MCP isn't
+    // available — the rest of the session works without it.
+    if (input.filterDomains && input.filterDomains.length > 0) {
+        const proxymanClient = _proxymanClientFactory();
+        for (const domain of input.filterDomains) {
+            // Strip any port suffix — enable_ssl_proxying takes hosts only.
+            const hostOnly = domain.split(':')[0];
+            try {
+                await proxymanClient.enableSslProxying(hostOnly);
+            } catch (err) {
+                console.error(
+                    `[MCP] start_recording_session: enable_ssl_proxying("${hostOnly}") failed (non-fatal)`,
+                    err,
+                );
+                break; // Don't keep trying if Proxyman MCP isn't reachable
+            }
+        }
+    }
 
     const readinessMsg = baselineCaptured
         ? 'All systems ready'
@@ -485,6 +540,12 @@ export async function handleStopAndCompile(
             }
             activeDrivers.delete(input.sessionId);
         }
+
+        // Bulk-delete any Proxyman scripting rules this session installed.
+        // Uses the rule name prefix as the source of truth (resilient to the
+        // ledger drifting from Proxyman's actual state — e.g. if the user
+        // deleted some rules through the UI mid-session).
+        await cleanupProxymanRulesForSession(input.sessionId);
 
         // Purge hierarchy snapshots to free memory
         await sessionManager.purgeSnapshots(input.sessionId);
@@ -2033,6 +2094,175 @@ export async function handleRunUnitTests(
         reportDir: result.reportDir,
         output: result.output,
     };
+}
+
+// ---- set_mock_response (Proxyman MCP gateway) ----
+//
+// Registers a live response-mocking rule by translating our structured spec
+// into a Proxyman scripting rule. The MCP gateway pattern means agents see one
+// cohesive interface — they don't need to know about Proxyman's MCP, our
+// session lifecycle, or the include_paths gotcha.
+export async function handleSetMockResponse(
+    input: SetMockResponseInput,
+): Promise<SetMockResponseOutput> {
+    const session = await sessionManager.getSession(input.sessionId);
+    if (!session) {
+        throw new Error(`Session not found: ${input.sessionId}. Was start_recording_session called?`);
+    }
+
+    const mockId = input.mock.id ?? `mock-${randomBytes(4).toString('hex')}`;
+    const ruleName = buildRuleName(input.sessionId, mockId);
+    const url = buildProxymanUrlPattern(input.mock.matcher);
+    const scriptContent = buildScriptContent({
+        matcher: input.mock.matcher,
+        staticResponse: input.mock.staticResponse,
+        responseTransform: input.mock.responseTransform,
+    });
+
+    const client = _proxymanClientFactory();
+
+    // Defensive: ensure the Scripting tool master toggle is on. Otherwise the
+    // rule installs successfully but no-ops on traffic — exact behavior we
+    // chased down in the spike.
+    try {
+        await client.toggleTool('scripting', true);
+    } catch (err) {
+        // Non-fatal: surface the full Proxyman error if the next step fails too.
+        console.error('[MCP] set_mock_response: toggle_tool(scripting,on) failed (non-fatal):', err);
+    }
+
+    let proxymanRuleId: string;
+    try {
+        proxymanRuleId = await client.createScriptingRule({
+            name: ruleName,
+            url,
+            scriptContent,
+            method: input.mock.matcher.method,
+            // Proxyman's create_scripting_rule defaults include_paths to false
+            // for Scripting only — that's the silent-no-match footgun. Our
+            // client wrapper forces true unless overridden.
+            enableRequest: false,
+            enableResponse: true,
+            graphqlQueryName: input.mock.matcher.graphqlQueryName,
+        });
+    } catch (err) {
+        if (err instanceof ProxymanMcpError) {
+            throw new Error(
+                `Proxyman MCP rejected the rule: ${err.message}. ` +
+                `Is Proxyman running with MCP enabled (Settings → MCP)?`,
+            );
+        }
+        throw err;
+    }
+
+    let perSession = sessionMocks.get(input.sessionId);
+    if (!perSession) {
+        perSession = new Map();
+        sessionMocks.set(input.sessionId, perSession);
+    }
+    perSession.set(mockId, proxymanRuleId);
+
+    console.error(
+        `[MCP] set_mock_response: session=${input.sessionId} mockId=${mockId} ruleId=${proxymanRuleId} url="${url}" ` +
+        `mode=${input.mock.staticResponse ? 'static' : 'jsonPatch'}`,
+    );
+
+    return {
+        mockId,
+        proxymanRuleId,
+        ruleName,
+        totalSessionMocks: perSession.size,
+    };
+}
+
+// ---- clear_mock_responses (Proxyman MCP gateway) ----
+export async function handleClearMockResponses(
+    input: ClearMockResponsesInput,
+): Promise<ClearMockResponsesOutput> {
+    const perSession = sessionMocks.get(input.sessionId);
+    if (!perSession || perSession.size === 0) {
+        return { removed: 0, remaining: 0 };
+    }
+
+    const client = _proxymanClientFactory();
+    let removed = 0;
+
+    if (input.mockId) {
+        const ruleId = perSession.get(input.mockId);
+        if (ruleId) {
+            try {
+                await client.deleteRule(ruleId, 'scripting');
+                removed = 1;
+            } catch (err) {
+                console.error(`[MCP] clear_mock_responses: delete failed for rule ${ruleId} (continuing)`, err);
+            }
+            perSession.delete(input.mockId);
+        }
+    } else {
+        for (const [mockId, ruleId] of perSession.entries()) {
+            try {
+                await client.deleteRule(ruleId, 'scripting');
+                removed++;
+            } catch (err) {
+                console.error(`[MCP] clear_mock_responses: delete failed for rule ${ruleId} (continuing)`, err);
+            }
+            perSession.delete(mockId);
+        }
+    }
+
+    if (perSession.size === 0) {
+        sessionMocks.delete(input.sessionId);
+    }
+    const remaining = perSession.size;
+
+    console.error(
+        `[MCP] clear_mock_responses: session=${input.sessionId} removed=${removed} remaining=${remaining}`,
+    );
+    return { removed, remaining };
+}
+
+/**
+ * Bulk-delete every scripting rule tagged with this session ID. Called from
+ * stop_and_compile_test. Uses Proxyman's list_rules as the source of truth so
+ * we don't leak when the local ledger is stale (e.g. user deleted via the UI
+ * mid-session).
+ */
+async function cleanupProxymanRulesForSession(sessionId: string): Promise<void> {
+    const ledgerEntry = sessionMocks.get(sessionId);
+    if (!ledgerEntry || ledgerEntry.size === 0) return;
+
+    const client = _proxymanClientFactory();
+    if (!client.isConnected()) {
+        // Connection was never established this session — nothing to clean up
+        // remotely. Still drop the local ledger.
+        sessionMocks.delete(sessionId);
+        return;
+    }
+
+    let toDelete: string[] = [];
+    try {
+        const rules = await client.listRules('scripting');
+        toDelete = rules.filter((r) => isOurRuleForSession(r.name, sessionId)).map((r) => r.id);
+    } catch (err) {
+        // Fall back to the local ledger if Proxyman is unreachable.
+        console.error('[MCP] cleanupProxymanRulesForSession: list_rules failed, falling back to ledger', err);
+        toDelete = [...ledgerEntry.values()];
+    }
+
+    for (const id of toDelete) {
+        try {
+            await client.deleteRule(id, 'scripting');
+        } catch (err) {
+            console.error(`[MCP] cleanupProxymanRulesForSession: delete ${id} failed (continuing)`, err);
+        }
+    }
+    sessionMocks.delete(sessionId);
+
+    if (toDelete.length > 0) {
+        console.error(
+            `[MCP] cleanupProxymanRulesForSession: cleaned ${toDelete.length} rule(s) for session ${sessionId}`,
+        );
+    }
 }
 
 // ---- run_feature_test ----

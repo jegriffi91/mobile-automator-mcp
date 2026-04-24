@@ -33,6 +33,10 @@ import {
   FeatureTestSpecSchema,
   RunFeatureTestInputSchema,
   RunFeatureTestOutputSchema,
+  SetMockResponseInputSchema,
+  SetMockResponseOutputSchema,
+  ClearMockResponsesInputSchema,
+  ClearMockResponsesOutputSchema,
 } from './schemas.js';
 
 describe('Schema Conformance', () => {
@@ -740,6 +744,126 @@ describe('Schema Conformance', () => {
         error: 'Setup phase failed',
       };
       expect(RunFeatureTestOutputSchema.safeParse(output).success).toBe(true);
+    });
+  });
+
+  describe('SetMockResponseInputSchema', () => {
+    it('accepts a jsonPatch (responseTransform) mock', () => {
+      const result = SetMockResponseInputSchema.safeParse({
+        sessionId: 'sess-1',
+        mock: {
+          matcher: {
+            pathContains: '/api/federated/graphql',
+            method: 'POST',
+            requestBodyContains: 'CustomerStatusAndCustomerAuthenticationQuery',
+          },
+          responseTransform: {
+            jsonPatch: [
+              { op: 'replace', path: '/data/customerStatusV3/loginStatus', value: 'OP2_INTERCEPT' },
+            ],
+          },
+        },
+      });
+      expect(result.success).toBe(true);
+    });
+
+    it('accepts a staticResponse mock with explicit ID', () => {
+      const result = SetMockResponseInputSchema.safeParse({
+        sessionId: 'sess-1',
+        mock: {
+          id: 'flag-off',
+          matcher: { urlPathEquals: '/api/v2/flags' },
+          staticResponse: {
+            status: 200,
+            jsonBody: { newLogin: false },
+            headers: { 'Cache-Control': 'no-store' },
+          },
+        },
+      });
+      expect(result.success).toBe(true);
+    });
+
+    it('accepts a graphqlQueryName matcher (Proxyman-native filter)', () => {
+      const result = SetMockResponseInputSchema.safeParse({
+        sessionId: 'sess-1',
+        mock: {
+          matcher: { pathContains: '/graphql', graphqlQueryName: 'GetCurrentUser' },
+          staticResponse: { status: 200, jsonBody: { user: null } },
+        },
+      });
+      expect(result.success).toBe(true);
+    });
+
+    it('rejects a mock with both staticResponse and responseTransform', () => {
+      const result = SetMockResponseInputSchema.safeParse({
+        sessionId: 'sess-1',
+        mock: {
+          matcher: { pathContains: '/x' },
+          staticResponse: { status: 200 },
+          responseTransform: { jsonPatch: [] },
+        },
+      });
+      expect(result.success).toBe(false);
+    });
+
+    it('rejects a mock with neither staticResponse nor responseTransform', () => {
+      const result = SetMockResponseInputSchema.safeParse({
+        sessionId: 'sess-1',
+        mock: { matcher: { pathContains: '/x' } },
+      });
+      expect(result.success).toBe(false);
+    });
+
+    it('rejects unknown JSON Patch ops', () => {
+      const result = SetMockResponseInputSchema.safeParse({
+        sessionId: 'sess-1',
+        mock: {
+          matcher: { pathContains: '/x' },
+          responseTransform: { jsonPatch: [{ op: 'test', path: '/x', value: 1 }] },
+        },
+      });
+      expect(result.success).toBe(false);
+    });
+
+    it('rejects an unknown HTTP method', () => {
+      const result = SetMockResponseInputSchema.safeParse({
+        sessionId: 'sess-1',
+        mock: {
+          matcher: { pathContains: '/x', method: 'TRACE' },
+          staticResponse: { status: 200 },
+        },
+      });
+      expect(result.success).toBe(false);
+    });
+  });
+
+  describe('SetMockResponseOutputSchema', () => {
+    it('accepts a valid output', () => {
+      const result = SetMockResponseOutputSchema.safeParse({
+        mockId: 'mock-abcd1234',
+        proxymanRuleId: 'AC5CFB7B',
+        ruleName: 'mca:sess-1:mock-abcd1234',
+        totalSessionMocks: 3,
+      });
+      expect(result.success).toBe(true);
+    });
+  });
+
+  describe('ClearMockResponses I/O schemas', () => {
+    it('accepts clear-all (no mockId)', () => {
+      expect(ClearMockResponsesInputSchema.safeParse({ sessionId: 'sess-1' }).success).toBe(true);
+    });
+
+    it('accepts clear-one (with mockId)', () => {
+      expect(
+        ClearMockResponsesInputSchema.safeParse({ sessionId: 'sess-1', mockId: 'mock-abcd' }).success,
+      ).toBe(true);
+    });
+
+    it('output accepts a valid shape', () => {
+      expect(
+        ClearMockResponsesOutputSchema.safeParse({ removed: 2, remaining: 1 }).success,
+      ).toBe(true);
     });
   });
 });
