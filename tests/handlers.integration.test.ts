@@ -92,6 +92,9 @@ const {
   handleRunTest,
   handleGetSessionTimeline,
   handleGetNetworkLogs,
+  handleSetMockResponse,
+  handleClearMockResponses,
+  _setProxymanMcpClientFactory,
 } = await import('../src/handlers.js');
 
 // ── Test suites ──
@@ -432,6 +435,296 @@ describe('Handler Integration Tests', () => {
           platform: 'ios',
         }),
       ).rejects.toThrow('No booted');
+    });
+  });
+
+  describe('set_mock_response / clear_mock_responses (Proxyman MCP gateway)', () => {
+    // Inject a fully-mocked ProxymanMcpClient so we can assert what the gateway
+    // forwards to Proxyman without spawning the real mcp-server.
+    let mockProxymanClient: {
+      isConnected: ReturnType<typeof vi.fn>;
+      connect: ReturnType<typeof vi.fn>;
+      close: ReturnType<typeof vi.fn>;
+      callTool: ReturnType<typeof vi.fn>;
+      getProxyStatus: ReturnType<typeof vi.fn>;
+      toggleTool: ReturnType<typeof vi.fn>;
+      enableSslProxying: ReturnType<typeof vi.fn>;
+      createScriptingRule: ReturnType<typeof vi.fn>;
+      deleteRule: ReturnType<typeof vi.fn>;
+      listRules: ReturnType<typeof vi.fn>;
+    };
+    let restoreFactory: () => unknown;
+    let sessionId: string;
+
+    beforeEach(async () => {
+      mockProxymanClient = {
+        isConnected: vi.fn().mockReturnValue(true),
+        connect: vi.fn().mockResolvedValue(undefined),
+        close: vi.fn().mockResolvedValue(undefined),
+        callTool: vi.fn().mockResolvedValue(''),
+        getProxyStatus: vi.fn().mockResolvedValue('Recording: Active'),
+        toggleTool: vi.fn().mockResolvedValue(undefined),
+        enableSslProxying: vi.fn().mockResolvedValue(undefined),
+        createScriptingRule: vi.fn().mockImplementation(async () =>
+          `RULE-${Math.random().toString(36).slice(2, 10).toUpperCase()}`,
+        ),
+        deleteRule: vi.fn().mockResolvedValue(undefined),
+        listRules: vi.fn().mockResolvedValue([]),
+      };
+      restoreFactory = _setProxymanMcpClientFactory(() => mockProxymanClient as never);
+      const start = await handleStartRecording({
+        appBundleId: 'com.test.app',
+        platform: 'ios',
+      });
+      sessionId = start.sessionId;
+    });
+
+    afterEach(async () => {
+      try { await handleStopAndCompile({ sessionId }); } catch { /* may already be done */ }
+      _setProxymanMcpClientFactory(restoreFactory);
+    });
+
+    it('translates a jsonPatch mock into a Proxyman scripting rule', async () => {
+      const result = await handleSetMockResponse({
+        sessionId,
+        mock: {
+          matcher: {
+            pathContains: '/api/federated/graphql',
+            method: 'POST',
+            requestBodyContains: 'CustomerStatusAndCustomerAuthenticationQuery',
+          },
+          responseTransform: {
+            jsonPatch: [
+              { op: 'replace', path: '/data/customerStatusV3/loginStatus', value: 'OP2_INTERCEPT' },
+            ],
+          },
+        },
+      });
+      expect(result.mockId).toBeTruthy();
+      expect(result.proxymanRuleId).toMatch(/^RULE-/);
+      expect(result.ruleName).toBe(`mca:${sessionId}:${result.mockId}`);
+      expect(result.totalSessionMocks).toBe(1);
+
+      // Confirms include_paths default flip happens via the client wrapper
+      expect(mockProxymanClient.createScriptingRule).toHaveBeenCalledWith(
+        expect.objectContaining({
+          name: result.ruleName,
+          url: '*/api/federated/graphql*',
+          method: 'POST',
+          enableRequest: false,
+          enableResponse: true,
+        }),
+      );
+      const generatedScript = mockProxymanClient.createScriptingRule.mock.calls[0][0].scriptContent;
+      expect(generatedScript).toContain('OP2_INTERCEPT');
+      expect(generatedScript).toContain('/data/customerStatusV3/loginStatus');
+      expect(generatedScript).toContain('CustomerStatusAndCustomerAuthenticationQuery');
+    });
+
+    it('translates a staticResponse mock into a script that hard-replaces the body', async () => {
+      const result = await handleSetMockResponse({
+        sessionId,
+        mock: {
+          id: 'flag-off',
+          matcher: { urlPathEquals: '/api/v2/flags' },
+          staticResponse: {
+            status: 200,
+            jsonBody: { flags: { newLogin: false } },
+          },
+        },
+      });
+      expect(result.mockId).toBe('flag-off');
+
+      const script = mockProxymanClient.createScriptingRule.mock.calls[0][0].scriptContent;
+      expect(script).toContain('response.statusCode = 200');
+      expect(script).toContain('newLogin');
+      expect(script).toContain("'application/json'");
+    });
+
+    it('passes graphqlQueryName through to Proxyman natively', async () => {
+      await handleSetMockResponse({
+        sessionId,
+        mock: {
+          matcher: {
+            pathContains: '/graphql',
+            graphqlQueryName: 'GetCurrentUser',
+          },
+          staticResponse: { status: 200, jsonBody: { user: null } },
+        },
+      });
+      expect(mockProxymanClient.createScriptingRule).toHaveBeenCalledWith(
+        expect.objectContaining({ graphqlQueryName: 'GetCurrentUser' }),
+      );
+    });
+
+    it('defensively toggles the Scripting tool master switch on each set call', async () => {
+      await handleSetMockResponse({
+        sessionId,
+        mock: {
+          matcher: { pathContains: '/x' },
+          staticResponse: { status: 200 },
+        },
+      });
+      expect(mockProxymanClient.toggleTool).toHaveBeenCalledWith('scripting', true);
+    });
+
+    it('clear_mock_responses with mockId removes one rule', async () => {
+      const a = await handleSetMockResponse({
+        sessionId,
+        mock: { id: 'a', matcher: { pathContains: '/a' }, staticResponse: { status: 200 } },
+      });
+      const b = await handleSetMockResponse({
+        sessionId,
+        mock: { id: 'b', matcher: { pathContains: '/b' }, staticResponse: { status: 200 } },
+      });
+      expect(b.totalSessionMocks).toBe(2);
+
+      const cleared = await handleClearMockResponses({ sessionId, mockId: 'a' });
+      expect(cleared.removed).toBe(1);
+      expect(cleared.remaining).toBe(1);
+      expect(mockProxymanClient.deleteRule).toHaveBeenCalledWith(a.proxymanRuleId, 'scripting');
+    });
+
+    it('clear_mock_responses without mockId clears all session rules', async () => {
+      await handleSetMockResponse({
+        sessionId,
+        mock: { matcher: { pathContains: '/a' }, staticResponse: { status: 200 } },
+      });
+      await handleSetMockResponse({
+        sessionId,
+        mock: { matcher: { pathContains: '/b' }, staticResponse: { status: 200 } },
+      });
+
+      const cleared = await handleClearMockResponses({ sessionId });
+      expect(cleared.removed).toBe(2);
+      expect(cleared.remaining).toBe(0);
+      expect(mockProxymanClient.deleteRule).toHaveBeenCalledTimes(2);
+    });
+
+    it('stop_and_compile auto-cleans session-tagged rules from Proxyman', async () => {
+      const setResult = await handleSetMockResponse({
+        sessionId,
+        mock: { matcher: { pathContains: '/x' }, staticResponse: { status: 200 } },
+      });
+
+      // Pretend Proxyman reports this rule and one stale rule from another session
+      mockProxymanClient.listRules.mockResolvedValue([
+        { id: setResult.proxymanRuleId, name: setResult.ruleName, url: '*', enabled: true, ruleType: 'scripting' },
+        { id: 'OTHER-X', name: 'mca:other-session:m1', url: '*', enabled: true, ruleType: 'scripting' },
+        { id: 'USER-Y', name: 'UserCreatedRule', url: '*', enabled: true, ruleType: 'scripting' },
+      ]);
+
+      await handleStopAndCompile({ sessionId });
+
+      // Only this session's rule was deleted
+      expect(mockProxymanClient.deleteRule).toHaveBeenCalledWith(setResult.proxymanRuleId, 'scripting');
+      expect(mockProxymanClient.deleteRule).not.toHaveBeenCalledWith('OTHER-X', 'scripting');
+      expect(mockProxymanClient.deleteRule).not.toHaveBeenCalledWith('USER-Y', 'scripting');
+    });
+
+    it('rejects set_mock_response for an unknown session', async () => {
+      await expect(
+        handleSetMockResponse({
+          sessionId: 'nonexistent-session',
+          mock: { matcher: { pathContains: '/x' }, staticResponse: { status: 200 } },
+        }),
+      ).rejects.toThrow(/Session not found/);
+    });
+
+    it('returns a clear error when Proxyman MCP rejects the rule (e.g. MCP disabled)', async () => {
+      mockProxymanClient.createScriptingRule.mockRejectedValueOnce(
+        Object.assign(new Error('Proxyman is not running or MCP server not started.'), { name: 'ProxymanMcpError' }),
+      );
+      await expect(
+        handleSetMockResponse({
+          sessionId,
+          mock: { matcher: { pathContains: '/x' }, staticResponse: { status: 200 } },
+        }),
+      ).rejects.toThrow();
+    });
+
+    it('falls back to the local ledger if list_rules fails during cleanup', async () => {
+      const setResult = await handleSetMockResponse({
+        sessionId,
+        mock: { matcher: { pathContains: '/x' }, staticResponse: { status: 200 } },
+      });
+      mockProxymanClient.listRules.mockRejectedValue(new Error('Proxyman went away'));
+
+      await handleStopAndCompile({ sessionId });
+
+      // Even though list_rules failed, the ledger entry was still deleted
+      expect(mockProxymanClient.deleteRule).toHaveBeenCalledWith(setResult.proxymanRuleId, 'scripting');
+    });
+
+    it('skips Proxyman cleanup entirely when the client never connected', async () => {
+      // Set up a fresh session with a NEVER-connected client (isConnected=false,
+      // no rules registered locally either)
+      const offlineClient = {
+        ...mockProxymanClient,
+        isConnected: vi.fn().mockReturnValue(false),
+      };
+      _setProxymanMcpClientFactory(() => offlineClient as never);
+
+      const start = await handleStartRecording({
+        appBundleId: 'com.test.app',
+        platform: 'ios',
+      });
+
+      // No set_mock_response calls — ledger is empty for this session.
+      // stop_and_compile should not attempt list_rules / deleteRule.
+      await handleStopAndCompile({ sessionId: start.sessionId });
+      expect(offlineClient.listRules).not.toHaveBeenCalled();
+      expect(offlineClient.deleteRule).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('start_recording_session → enable_ssl_proxying integration', () => {
+    let mockProxymanClient: { enableSslProxying: ReturnType<typeof vi.fn> } & Record<string, unknown>;
+    let restoreFactory: () => unknown;
+
+    beforeEach(() => {
+      mockProxymanClient = {
+        isConnected: vi.fn().mockReturnValue(true),
+        enableSslProxying: vi.fn().mockResolvedValue(undefined),
+      };
+      restoreFactory = _setProxymanMcpClientFactory(() => mockProxymanClient as never);
+    });
+
+    afterEach(() => {
+      _setProxymanMcpClientFactory(restoreFactory);
+    });
+
+    it('auto-arms SSL proxying for each filterDomain on session start', async () => {
+      const result = await handleStartRecording({
+        appBundleId: 'com.test.app',
+        platform: 'ios',
+        filterDomains: ['api.experian.com', 'api2.experian.com:443'],
+      });
+      expect(mockProxymanClient.enableSslProxying).toHaveBeenCalledTimes(2);
+      // Port suffix stripped before forwarding to Proxyman
+      expect(mockProxymanClient.enableSslProxying).toHaveBeenCalledWith('api.experian.com');
+      expect(mockProxymanClient.enableSslProxying).toHaveBeenCalledWith('api2.experian.com');
+      await handleStopAndCompile({ sessionId: result.sessionId });
+    });
+
+    it('does not call SSL proxying when filterDomains is omitted', async () => {
+      const result = await handleStartRecording({
+        appBundleId: 'com.test.app',
+        platform: 'ios',
+      });
+      expect(mockProxymanClient.enableSslProxying).not.toHaveBeenCalled();
+      await handleStopAndCompile({ sessionId: result.sessionId });
+    });
+
+    it('continues recording start when SSL proxying fails (Proxyman MCP unavailable)', async () => {
+      mockProxymanClient.enableSslProxying.mockRejectedValue(new Error('connection refused'));
+      const result = await handleStartRecording({
+        appBundleId: 'com.test.app',
+        platform: 'ios',
+        filterDomains: ['api.example.com'],
+      });
+      expect(result.readiness?.driverReady).toBe(true);
+      await handleStopAndCompile({ sessionId: result.sessionId });
     });
   });
 });

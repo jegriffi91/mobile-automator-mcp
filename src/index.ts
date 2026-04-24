@@ -66,6 +66,10 @@ import {
     RunUnitTestsOutputSchema,
     RunFeatureTestInputSchema,
     RunFeatureTestOutputSchema,
+    SetMockResponseInputSchema,
+    SetMockResponseOutputSchema,
+    ClearMockResponsesInputSchema,
+    ClearMockResponsesOutputSchema,
     TOOL_NAMES,
 } from './schemas.js';
 
@@ -97,6 +101,8 @@ import {
     handleTakeScreenshot,
     handleRunUnitTests,
     handleRunFeatureTest,
+    handleSetMockResponse,
+    handleClearMockResponses,
     setMcpServer,
 } from './handlers.js';
 
@@ -809,6 +815,58 @@ server.registerTool(
     },
     async (args) => {
         const result = await handleRunFeatureTest(args);
+        return {
+            content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
+            structuredContent: result,
+        };
+    }
+);
+
+// ── 20. set_mock_response (Proxyman MCP gateway) ──
+server.registerTool(
+    TOOL_NAMES.SET_MOCK_RESPONSE,
+    {
+        title: 'Set Mock Response',
+        description:
+            'Install a live response-mocking rule for an active recording session. Internally translates the spec into a Proxyman scripting rule and asks Proxyman (via its MCP) to install it on the running proxy. Two modes: staticResponse (return a verbatim payload — good for feature flags / fixtures) and responseTransform.jsonPatch (proxy to the real backend, then mutate the response body in flight — good for the loginStatus override pattern). Rules are tagged with the session ID so stop_and_compile_test can clean them up. REQUIRES: Proxyman running with MCP enabled (Settings → MCP).',
+        inputSchema: SetMockResponseInputSchema,
+        outputSchema: SetMockResponseOutputSchema,
+        annotations: {
+            title: 'Set Mock Response',
+            readOnlyHint: false,
+            destructiveHint: false,
+            idempotentHint: false,
+            openWorldHint: true,
+        },
+    },
+    async (args) => {
+        const result = await handleSetMockResponse(args);
+        return {
+            content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
+            structuredContent: result,
+        };
+    }
+);
+
+// ── 21. clear_mock_responses (Proxyman MCP gateway) ──
+server.registerTool(
+    TOOL_NAMES.CLEAR_MOCK_RESPONSES,
+    {
+        title: 'Clear Mock Responses',
+        description:
+            'Remove mocks installed by set_mock_response. Pass mockId to remove one specific mock; omit to clear all mocks for the session. The companion to set_mock_response — stop_and_compile_test runs this implicitly on session end so leaks should be rare.',
+        inputSchema: ClearMockResponsesInputSchema,
+        outputSchema: ClearMockResponsesOutputSchema,
+        annotations: {
+            title: 'Clear Mock Responses',
+            readOnlyHint: false,
+            destructiveHint: true,
+            idempotentHint: true,
+            openWorldHint: false,
+        },
+    },
+    async (args) => {
+        const result = await handleClearMockResponses(args);
         return {
             content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
             structuredContent: result,
