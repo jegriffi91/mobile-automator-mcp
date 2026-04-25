@@ -2096,6 +2096,90 @@ export async function handleRunUnitTests(
     };
 }
 
+// ── Internal: runner-driven mock install (no session required) ─────────────
+//
+// Used by run_feature_test to install spec.mocks BEFORE setup flows fire any
+// network traffic. The session-scoped public tool (set_mock_response) requires
+// an active recording session, but the runner needs to install rules earlier:
+// the motivating bug was login flows whose GraphQL call fired during setup,
+// before the post-recording mock-install phase ran.
+//
+// Rules installed via this path are tagged with a runner-controlled prefix
+// (e.g., `mca:run-<runId>`) and are NOT cleaned up by stop_and_compile_test's
+// session-tag cleanup — the runner manages their lifecycle directly via a
+// try/finally around the test body. Not registered as an MCP tool; exposed
+// only through RunnerDeps for the composite runner.
+export interface InstallRunnerMockInput {
+    /** Rule-name prefix (typically `mca:run-<runId>`). The mock ID is appended. */
+    ruleNamePrefix: string;
+    mock: SetMockResponseInput['mock'];
+}
+
+export interface InstallRunnerMockOutput {
+    mockId: string;
+    proxymanRuleId: string;
+    ruleName: string;
+}
+
+export async function handleInstallRunnerMock(
+    input: InstallRunnerMockInput,
+): Promise<InstallRunnerMockOutput> {
+    const mockId = input.mock.id ?? `mock-${randomBytes(4).toString('hex')}`;
+    const ruleName = `${input.ruleNamePrefix}:${mockId}`;
+    const url = buildProxymanUrlPattern(input.mock.matcher);
+    const scriptContent = buildScriptContent({
+        matcher: input.mock.matcher,
+        staticResponse: input.mock.staticResponse,
+        responseTransform: input.mock.responseTransform,
+    });
+
+    const client = _proxymanClientFactory();
+
+    // Defensive: ensure the Scripting tool master toggle is on. Mirrors the
+    // same guard handleSetMockResponse does — without it, rules install
+    // successfully but no-op silently on traffic.
+    try {
+        await client.toggleTool('scripting', true);
+    } catch (err) {
+        console.error('[MCP] handleInstallRunnerMock: toggle_tool(scripting,on) failed (non-fatal):', err);
+    }
+
+    let proxymanRuleId: string;
+    try {
+        proxymanRuleId = await client.createScriptingRule({
+            name: ruleName,
+            url,
+            scriptContent,
+            method: input.mock.matcher.method,
+            enableRequest: false,
+            enableResponse: true,
+            graphqlQueryName: input.mock.matcher.graphqlQueryName,
+        });
+    } catch (err) {
+        if (err instanceof ProxymanMcpError) {
+            throw new Error(
+                `Proxyman MCP rejected the runner mock: ${err.message}. ` +
+                `Is Proxyman running with MCP enabled (Settings → MCP)?`,
+            );
+        }
+        throw err;
+    }
+
+    console.error(
+        `[MCP] install_runner_mock: ruleName="${ruleName}" ruleId=${proxymanRuleId} url="${url}" ` +
+        `mode=${input.mock.staticResponse ? 'static' : 'jsonPatch'}`,
+    );
+
+    return { mockId, proxymanRuleId, ruleName };
+}
+
+export async function handleDeleteRunnerMock(
+    proxymanRuleId: string,
+): Promise<void> {
+    const client = _proxymanClientFactory();
+    await client.deleteRule(proxymanRuleId, 'scripting');
+}
+
 // ---- set_mock_response (Proxyman MCP gateway) ----
 //
 // Registers a live response-mocking rule by translating our structured spec
@@ -2277,7 +2361,8 @@ export async function handleRunFeatureTest(
     return runFeatureTest(input, {
         runFlow: handleRunFlow,
         startRecording: handleStartRecording,
-        setMockResponse: handleSetMockResponse,
+        installRunnerMock: handleInstallRunnerMock,
+        deleteRunnerMock: handleDeleteRunnerMock,
         executeUIAction: handleExecuteUIAction,
         stopAndCompile: handleStopAndCompile,
         verifyParallelism: handleVerifyNetworkParallelism,

@@ -45,13 +45,31 @@ import {
     type VerifyNetworkErrorHandlingInput,
     type VerifyNetworkErrorHandlingOutput,
     type SetMockResponseInput,
-    type SetMockResponseOutput,
 } from '../schemas.js';
+
+/**
+ * Runner-driven mock installer. Bypasses session-scoped checks so spec.mocks
+ * can be installed BEFORE setup flows run (the motivating bug: login flows
+ * fire the API we want to mock during setup, missing post-recording mocks).
+ * Rules tagged with a runner-controlled prefix; runner cleans them up itself
+ * in a try/finally around the test body — they are NOT covered by
+ * stop_and_compile_test's session-tag cleanup.
+ */
+export interface RunnerMockInstall {
+    ruleNamePrefix: string;
+    mock: SetMockResponseInput['mock'];
+}
+export interface RunnerMockInstalled {
+    mockId: string;
+    proxymanRuleId: string;
+    ruleName: string;
+}
 
 export interface RunnerDeps {
     runFlow(input: RunFlowInput): Promise<RunFlowOutput>;
     startRecording(input: StartRecordingInput): Promise<StartRecordingOutput>;
-    setMockResponse(input: SetMockResponseInput): Promise<SetMockResponseOutput>;
+    installRunnerMock(input: RunnerMockInstall): Promise<RunnerMockInstalled>;
+    deleteRunnerMock(proxymanRuleId: string): Promise<void>;
     executeUIAction(input: ExecuteUIActionInput): Promise<ExecuteUIActionOutput>;
     stopAndCompile(input: StopAndCompileInput): Promise<StopAndCompileOutput>;
     verifyParallelism(input: VerifyNetworkParallelismInput): Promise<VerifyNetworkParallelismOutput>;
@@ -113,6 +131,37 @@ export async function runFeatureTest(
         assertions: [],
         teardown: { flows: [] },
     };
+
+    // Run-scoped mock identifier — used to tag rules so the runner can clean
+    // them up in finally regardless of which path through the lifecycle we
+    // take. Independent from the recording session's ID because mocks must
+    // install BEFORE start_recording_session (the motivating fix).
+    const runId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const runMockTagPrefix = `mca:run-${runId}`;
+    const installedRunMocks: string[] = []; // Proxyman rule IDs
+
+    try {
+    // ── Phase 0: Install spec.mocks BEFORE any phase that might fire matching
+    //    network traffic. This was previously installed AFTER startRecording,
+    //    which let setup-phase login flows miss the mock entirely. ──
+    if (spec.mocks && spec.mocks.length > 0) {
+        for (const mockSpec of spec.mocks) {
+            try {
+                const r = await deps.installRunnerMock({ ruleNamePrefix: runMockTagPrefix, mock: mockSpec });
+                installedRunMocks.push(r.proxymanRuleId);
+                result.mocks.installed.push({
+                    mockId: r.mockId,
+                    proxymanRuleId: r.proxymanRuleId,
+                    ruleName: r.ruleName,
+                });
+            } catch (err) {
+                result.mocks.error = `Failed to install mock${mockSpec.id ? ` "${mockSpec.id}"` : ''}: ${(err as Error).message}`;
+                result.error = result.mocks.error;
+                result.durationMs = Date.now() - startedAt;
+                return result; // finally{} below cleans up partial installs
+            }
+        }
+    }
 
     // ── Phase 1: Setup flows ──
     const setupStart = Date.now();
@@ -192,74 +241,46 @@ export async function runFeatureTest(
         return result;
     }
 
-    // ── Phase 2b: Install live mocks (Proxyman MCP gateway) ──
-    //
-    // Runs after recording starts so we have a sessionId, and before any UI
-    // action so the first matching request hits the rule. If any mock fails to
-    // install, abort the test — earlier mocks may already be active, but
-    // stop_and_compile will still tag-clean them.
-    let mocksFailed = false;
-    if (spec.mocks && spec.mocks.length > 0) {
-        for (const mockSpec of spec.mocks) {
-            try {
-                const r = await deps.setMockResponse({ sessionId, mock: mockSpec });
-                result.mocks.installed.push({
-                    mockId: r.mockId,
-                    proxymanRuleId: r.proxymanRuleId,
-                    ruleName: r.ruleName,
-                });
-            } catch (err) {
-                result.mocks.error = `Failed to install mock${mockSpec.id ? ` "${mockSpec.id}"` : ''}: ${(err as Error).message}`;
-                mocksFailed = true;
+    // (Mocks are installed in Phase 0 above, before setup. The runner cleans
+    //  them up in the finally{} block at the end of this function regardless
+    //  of which exit path we take.)
+
+    let actionsPassed = true;
+    const actionsStart = Date.now();
+    try {
+        for (const action of spec.actions) {
+            const elapsed = Date.now() - actionsStart;
+            if (elapsed > actionTimeoutMs) {
+                actionsPassed = false;
+                result.error = `Actions phase timed out after ${elapsed}ms (budget: ${actionTimeoutMs}ms)`;
                 break;
             }
-        }
-    }
 
-    let actionsPassed = !mocksFailed;
-    if (mocksFailed) {
-        // Skip the actions phase — running them with partial mocks installed
-        // would produce nonsense results. Teardown still runs so the session +
-        // any partially-installed mocks get cleaned up.
-        result.error = result.mocks.error;
-    }
-    if (actionsPassed) {
-        const actionsStart = Date.now();
-        try {
-            for (const action of spec.actions) {
-                const elapsed = Date.now() - actionsStart;
-                if (elapsed > actionTimeoutMs) {
-                    actionsPassed = false;
-                    result.error = `Actions phase timed out after ${elapsed}ms (budget: ${actionTimeoutMs}ms)`;
-                    break;
-                }
-
-                if ('wait' in action) {
-                    const ms = action.wait;
-                    const waitStart = Date.now();
-                    await deps.sleep(ms);
-                    result.actions.interactions.push({
-                        action: 'wait',
-                        element: `${ms}ms`,
-                        durationMs: Date.now() - waitStart,
-                        waitMs: ms,
-                    });
-                    continue;
-                }
-
-                const uiInput = toExecuteActionInput(action, sessionId);
-                const callStart = Date.now();
-                await deps.executeUIAction(uiInput);
+            if ('wait' in action) {
+                const ms = action.wait;
+                const waitStart = Date.now();
+                await deps.sleep(ms);
                 result.actions.interactions.push({
-                    action: uiInput.action,
-                    element: describeElement(uiInput),
-                    durationMs: Date.now() - callStart,
+                    action: 'wait',
+                    element: `${ms}ms`,
+                    durationMs: Date.now() - waitStart,
+                    waitMs: ms,
                 });
+                continue;
             }
-        } catch (err) {
-            actionsPassed = false;
-            result.error = `execute_ui_action failed: ${(err as Error).message}`;
+
+            const uiInput = toExecuteActionInput(action, sessionId);
+            const callStart = Date.now();
+            await deps.executeUIAction(uiInput);
+            result.actions.interactions.push({
+                action: uiInput.action,
+                element: describeElement(uiInput),
+                durationMs: Date.now() - callStart,
+            });
         }
+    } catch (err) {
+        actionsPassed = false;
+        result.error = `execute_ui_action failed: ${(err as Error).message}`;
     }
 
     // Settle: let in-flight network traffic land before assertions.
@@ -321,6 +342,23 @@ export async function runFeatureTest(
     result.passed = result.setup.passed && actionsPassed && assertionsPassed;
     result.durationMs = Date.now() - startedAt;
     return result;
+    } finally {
+        // Always clean up runner-installed mocks, regardless of which `return`
+        // got us here (early aborts, normal success, exceptions). These rules
+        // are tagged `mca:run-<runId>:*`, NOT `mca:<sessionId>:*`, so they are
+        // outside stop_and_compile_test's session-scoped cleanup and would
+        // otherwise leak in Proxyman's rule list.
+        for (const proxymanRuleId of installedRunMocks) {
+            try {
+                await deps.deleteRunnerMock(proxymanRuleId);
+            } catch (err) {
+                console.error(
+                    `[run_feature_test] cleanup failed for runner mock ${proxymanRuleId} (non-fatal)`,
+                    err,
+                );
+            }
+        }
+    }
 }
 
 function toExecuteActionInput(
