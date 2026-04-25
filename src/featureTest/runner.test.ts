@@ -30,12 +30,15 @@ function makeDeps(overrides: Partial<RunnerDeps> = {}): RunnerDeps {
             message: 'ready',
             readiness: { driverReady: true, baselineCaptured: true, pollerStarted: true },
         }),
-        setMockResponse: vi.fn().mockImplementation(async ({ mock }) => ({
-            mockId: mock.id ?? 'mock-default',
-            proxymanRuleId: 'RULE-DEFAULT',
-            ruleName: `mca:sess-1:${mock.id ?? 'mock-default'}`,
-            totalSessionMocks: 1,
-        })),
+        installRunnerMock: vi.fn().mockImplementation(async ({ ruleNamePrefix, mock }) => {
+            const mockId = mock.id ?? 'mock-default';
+            return {
+                mockId,
+                proxymanRuleId: `RULE-${mockId}`,
+                ruleName: `${ruleNamePrefix}:${mockId}`,
+            };
+        }),
+        deleteRunnerMock: vi.fn().mockResolvedValue(undefined),
         executeUIAction: vi.fn().mockResolvedValue({ success: true, message: 'ok' }),
         stopAndCompile: vi.fn().mockResolvedValue({
             sessionId: 'sess-1',
@@ -420,25 +423,32 @@ describe('runFeatureTest — defaults & action mapping', () => {
     });
 });
 
-describe('runFeatureTest — mocks in spec', () => {
-    it('installs each mock in spec order between recording start and actions', async () => {
+describe('runFeatureTest — mocks in spec (Phase 0 install)', () => {
+    it('installs every mock BEFORE setup flows fire (was the loginStatus blocker)', async () => {
         const callOrder: string[] = [];
         const deps = makeDeps({
+            installRunnerMock: vi.fn().mockImplementation(async ({ ruleNamePrefix, mock }) => {
+                callOrder.push(`installMock:${mock.id ?? 'auto'}`);
+                const mockId = mock.id ?? 'auto';
+                return {
+                    mockId,
+                    proxymanRuleId: `RULE-${mockId}`,
+                    ruleName: `${ruleNamePrefix}:${mockId}`,
+                };
+            }),
+            runFlow: vi.fn().mockImplementation(async ({ name }) => {
+                callOrder.push(`runFlow:${name}`);
+                return {
+                    passed: true, flowName: name, flowPath: `/flows/${name}.yaml`,
+                    appliedParams: {}, output: 'ok', durationMs: 1,
+                };
+            }),
             startRecording: vi.fn().mockImplementation(async () => {
                 callOrder.push('startRecording');
                 return {
                     sessionId: 'sess-1',
                     message: 'ready',
                     readiness: { driverReady: true, baselineCaptured: true, pollerStarted: true },
-                };
-            }),
-            setMockResponse: vi.fn().mockImplementation(async ({ mock }) => {
-                callOrder.push(`mock:${mock.id ?? 'auto'}`);
-                return {
-                    mockId: mock.id ?? 'auto',
-                    proxymanRuleId: `RULE-${mock.id ?? 'auto'}`,
-                    ruleName: `mca:sess-1:${mock.id ?? 'auto'}`,
-                    totalSessionMocks: 1,
                 };
             }),
             executeUIAction: vi.fn().mockImplementation(async () => {
@@ -452,9 +462,9 @@ describe('runFeatureTest — mocks in spec', () => {
                 spec: {
                     ...MINIMAL_SPEC,
                     mocks: [
-                        { id: 'first', matcher: { pathContains: '/a' }, staticResponse: { status: 200 } },
-                        { id: 'second', matcher: { pathContains: '/b' }, staticResponse: { status: 200 } },
+                        { id: 'login-status', matcher: { pathContains: '/graphql' }, staticResponse: { status: 200 } },
                     ],
+                    setup: [{ flow: 'login' }],
                     actions: [{ tap: { id: 'go' } }],
                     assertions: [{ type: 'parallelism', matcher: {}, maxWindowMs: 1000, minExpectedCount: 1 }],
                 },
@@ -462,25 +472,27 @@ describe('runFeatureTest — mocks in spec', () => {
             deps,
         );
 
-        expect(callOrder).toEqual(['startRecording', 'mock:first', 'mock:second', 'action']);
-        expect(result.mocks.installed).toHaveLength(2);
+        // The whole point of this PR: mocks install BEFORE setup flows so the
+        // login-flow's GraphQL call hits the mocked response.
+        expect(callOrder).toEqual([
+            'installMock:login-status',
+            'runFlow:login',
+            'startRecording',
+            'action',
+        ]);
+        expect(result.mocks.installed).toHaveLength(1);
         expect(result.mocks.installed[0]).toMatchObject({
-            mockId: 'first',
-            proxymanRuleId: 'RULE-first',
-            ruleName: 'mca:sess-1:first',
+            mockId: 'login-status',
+            proxymanRuleId: 'RULE-login-status',
         });
+        // Rule name uses the runner's run-tag prefix, not a session ID
+        expect(result.mocks.installed[0].ruleName).toMatch(/^mca:run-/);
+        expect(result.mocks.installed[0].ruleName).toContain('login-status');
         expect(result.passed).toBe(true);
     });
 
-    it('records auto-generated mock IDs from the gateway', async () => {
-        const deps = makeDeps({
-            setMockResponse: vi.fn().mockResolvedValue({
-                mockId: 'mock-deadbeef',
-                proxymanRuleId: 'RULE-DEAD',
-                ruleName: 'mca:sess-1:mock-deadbeef',
-                totalSessionMocks: 1,
-            }),
-        });
+    it('records auto-generated mock IDs when the spec omits them', async () => {
+        const deps = makeDeps();
         const result = await runFeatureTest(
             {
                 spec: {
@@ -491,19 +503,18 @@ describe('runFeatureTest — mocks in spec', () => {
             },
             deps,
         );
-        expect(result.mocks.installed).toEqual([
-            { mockId: 'mock-deadbeef', proxymanRuleId: 'RULE-DEAD', ruleName: 'mca:sess-1:mock-deadbeef' },
-        ]);
+        expect(result.mocks.installed).toHaveLength(1);
+        expect(result.mocks.installed[0].mockId).toBeTruthy();
+        expect(result.mocks.installed[0].proxymanRuleId).toBeTruthy();
     });
 
-    it('aborts and skips actions/assertions when a mock fails to install, but still runs teardown', async () => {
+    it('aborts the entire test and skips ALL phases when a mock fails to install', async () => {
         const deps = makeDeps({
-            setMockResponse: vi.fn()
+            installRunnerMock: vi.fn()
                 .mockResolvedValueOnce({
                     mockId: 'first',
                     proxymanRuleId: 'RULE-1',
-                    ruleName: 'mca:sess-1:first',
-                    totalSessionMocks: 1,
+                    ruleName: 'mca:run-X:first',
                 })
                 .mockRejectedValueOnce(new Error('Proxyman MCP not enabled')),
         });
@@ -515,6 +526,7 @@ describe('runFeatureTest — mocks in spec', () => {
                         { id: 'first', matcher: { pathContains: '/a' }, staticResponse: { status: 200 } },
                         { id: 'broken', matcher: { pathContains: '/b' }, staticResponse: { status: 200 } },
                     ],
+                    setup: [{ flow: 'login' }],
                     actions: [{ tap: { id: 'x' } }],
                     assertions: [{ type: 'parallelism', matcher: {}, maxWindowMs: 1000, minExpectedCount: 1 }],
                     teardown: [{ flow: 'sign-out' }],
@@ -527,12 +539,84 @@ describe('runFeatureTest — mocks in spec', () => {
         expect(result.mocks.installed).toHaveLength(1); // first one succeeded
         expect(result.mocks.error).toContain('Failed to install mock "broken"');
         expect(result.error).toBe(result.mocks.error);
+
+        // None of the post-mock phases run. Setup never logs in; running it
+        // with broken mocks would corrupt the test signal.
+        expect(deps.runFlow).not.toHaveBeenCalled();
+        expect(deps.startRecording).not.toHaveBeenCalled();
         expect(deps.executeUIAction).not.toHaveBeenCalled();
         expect(result.assertions).toHaveLength(0);
+        expect(deps.stopAndCompile).not.toHaveBeenCalled();
+        expect(result.teardown.flows).toHaveLength(0);
+    });
 
-        // Teardown + stopAndCompile still run so the session + partial mocks get cleaned up
-        expect(deps.stopAndCompile).toHaveBeenCalledTimes(1);
-        expect(result.teardown.flows).toHaveLength(1);
+    it('cleans up partially-installed mocks on abort (finally block)', async () => {
+        const deps = makeDeps({
+            installRunnerMock: vi.fn()
+                .mockResolvedValueOnce({
+                    mockId: 'first',
+                    proxymanRuleId: 'RULE-1',
+                    ruleName: 'mca:run-X:first',
+                })
+                .mockRejectedValueOnce(new Error('boom')),
+        });
+
+        await runFeatureTest(
+            {
+                spec: {
+                    ...MINIMAL_SPEC,
+                    mocks: [
+                        { id: 'first', matcher: { pathContains: '/a' }, staticResponse: { status: 200 } },
+                        { id: 'second', matcher: { pathContains: '/b' }, staticResponse: { status: 200 } },
+                    ],
+                    actions: [{ tap: { id: 'x' } }],
+                },
+            },
+            deps,
+        );
+
+        // The first mock got installed before the second one failed → cleanup
+        // must still delete it so we don't leak the rule in Proxyman.
+        expect(deps.deleteRunnerMock).toHaveBeenCalledTimes(1);
+        expect(deps.deleteRunnerMock).toHaveBeenCalledWith('RULE-1');
+    });
+
+    it('cleans up runner mocks on the success path too', async () => {
+        const deps = makeDeps();
+        const result = await runFeatureTest(
+            {
+                spec: {
+                    ...MINIMAL_SPEC,
+                    mocks: [
+                        { id: 'a', matcher: { pathContains: '/a' }, staticResponse: { status: 200 } },
+                        { id: 'b', matcher: { pathContains: '/b' }, staticResponse: { status: 200 } },
+                    ],
+                    actions: [{ tap: { id: 'x' } }],
+                },
+            },
+            deps,
+        );
+        expect(result.passed).toBe(true);
+        expect(deps.deleteRunnerMock).toHaveBeenCalledTimes(2);
+        expect(deps.deleteRunnerMock).toHaveBeenCalledWith('RULE-a');
+        expect(deps.deleteRunnerMock).toHaveBeenCalledWith('RULE-b');
+    });
+
+    it('cleans up even when actions throw partway through', async () => {
+        const deps = makeDeps({
+            executeUIAction: vi.fn().mockRejectedValue(new Error('driver crashed')),
+        });
+        await runFeatureTest(
+            {
+                spec: {
+                    ...MINIMAL_SPEC,
+                    mocks: [{ id: 'a', matcher: { pathContains: '/a' }, staticResponse: { status: 200 } }],
+                    actions: [{ tap: { id: 'x' } }],
+                },
+            },
+            deps,
+        );
+        expect(deps.deleteRunnerMock).toHaveBeenCalledWith('RULE-a');
     });
 
     it('treats spec.mocks default ([]) as a no-op — existing behavior unchanged', async () => {
@@ -546,8 +630,30 @@ describe('runFeatureTest — mocks in spec', () => {
             },
             deps,
         );
-        expect(deps.setMockResponse).not.toHaveBeenCalled();
+        expect(deps.installRunnerMock).not.toHaveBeenCalled();
+        expect(deps.deleteRunnerMock).not.toHaveBeenCalled();
         expect(result.mocks.installed).toEqual([]);
+        expect(result.passed).toBe(true);
+    });
+
+    it('continues if cleanup fails (non-fatal)', async () => {
+        const deps = makeDeps({
+            deleteRunnerMock: vi.fn().mockRejectedValue(new Error('Proxyman went away')),
+        });
+        const result = await runFeatureTest(
+            {
+                spec: {
+                    ...MINIMAL_SPEC,
+                    mocks: [{ id: 'a', matcher: { pathContains: '/a' }, staticResponse: { status: 200 } }],
+                    actions: [{ tap: { id: 'x' } }],
+                },
+            },
+            deps,
+        );
+        // Test still reports success; cleanup-failure logs but doesn't override
+        // the test outcome (the rule stays in Proxyman, but that's a leak the
+        // user can clean up manually — vs. crashing here would mask the real
+        // pass/fail signal).
         expect(result.passed).toBe(true);
     });
 });
