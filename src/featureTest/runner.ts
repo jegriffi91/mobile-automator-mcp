@@ -372,6 +372,11 @@ function toExecuteActionInput(
         const { text, ...element } = action.type;
         return { sessionId, action: 'type', element, textInput: text };
     }
+    if ('inputText' in action) {
+        // No element — types into the focused field. The reliable path for
+        // iOS secure password fields where tap-then-type can drop focus.
+        return { sessionId, action: 'inputText', textInput: action.inputText.text };
+    }
     if ('assertVisible' in action) {
         return { sessionId, action: 'assertVisible', element: action.assertVisible };
     }
@@ -382,6 +387,7 @@ function toExecuteActionInput(
 
 function describeElement(input: ExecuteUIActionInput): string {
     const e = input.element;
+    if (!e) return input.action === 'inputText' ? '<focused field>' : input.action;
     if (e.id) return e.id;
     if (e.accessibilityLabel) return e.accessibilityLabel;
     if (e.text) return `"${e.text}"`;

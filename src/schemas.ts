@@ -250,13 +250,24 @@ export const ListDevicesInputSchema = z.object({
 export const ExecuteUIActionInputSchema = z.object({
     sessionId: z.string().describe('Active session ID'),
     action: z
-        .enum(['tap', 'type', 'scroll', 'swipe', 'scrollUntilVisible', 'swipeUntilVisible', 'back', 'assertVisible'])
-        .describe('The UI action to perform'),
-    element: UIElementSchema.describe('Target UI element to act on'),
+        .enum([
+            'tap', 'type', 'inputText', 'scroll', 'swipe',
+            'scrollUntilVisible', 'swipeUntilVisible', 'back', 'assertVisible',
+        ])
+        .describe(
+            'The UI action to perform. ' +
+            '"type" taps the element first then types — fails on iOS secure text fields where the tap can drop focus. ' +
+            'Use "inputText" instead to type into the already-focused field with no preceding tap (matches Maestro\'s native `inputText` YAML command, the only reliable path for secure password fields). ' +
+            'For inputText, the element field is optional and ignored.',
+        ),
+    element: UIElementSchema.optional().describe(
+        'Target UI element to act on. Required for tap/type/scroll/swipe/etc. Ignored when action is "inputText" ' +
+        '(typing happens against whatever field currently holds focus).',
+    ),
     textInput: z
         .string()
         .optional()
-        .describe('Text to type (required when action is "type")'),
+        .describe('Text to type (required when action is "type" or "inputText")'),
 });
 
 export const GetNetworkLogsInputSchema = z.object({
@@ -796,25 +807,62 @@ export const MockSpecSchema = z.object({
 );
 
 export const SetMockResponseInputSchema = z.object({
-    sessionId: z.string().describe('Active recording session ID'),
+    sessionId: z.string().optional().describe(
+        'Active recording session ID. Mocks tagged with the session auto-clean on stop_and_compile_test. ' +
+        'OMIT to install a STANDALONE mock that persists until explicitly cleared via clear_mock_responses ' +
+        '({ mockId } or { allStandalone: true }) — useful for agents mocking outside any recording session.',
+    ),
     mock: MockSpecSchema,
 });
 
 export const SetMockResponseOutputSchema = z.object({
     mockId: z.string().describe('Stable mock ID (echoed if provided, generated if not)'),
     proxymanRuleId: z.string().describe('Proxyman rule ID, useful for direct inspection in the Proxyman UI'),
-    ruleName: z.string().describe('Display name of the rule in Proxyman (mca:<sessionId>:<mockId>)'),
-    totalSessionMocks: z.number().int().describe('Total active mocks for this session after this call'),
+    ruleName: z.string().describe(
+        'Display name of the rule in Proxyman: mca:<sessionId>:<mockId> for session-scoped, ' +
+        'or mca:standalone:<mockId> for standalone.',
+    ),
+    scope: z.enum(['session', 'standalone']).describe(
+        'Whether the mock is auto-cleaned on stop_and_compile (session) or persists (standalone)',
+    ),
+    totalSessionMocks: z.number().int().optional().describe(
+        'Total active mocks for this session after this call. Only set when scope === "session".',
+    ),
+    totalStandaloneMocks: z.number().int().optional().describe(
+        'Total active standalone mocks after this call. Only set when scope === "standalone".',
+    ),
 });
 
 export const ClearMockResponsesInputSchema = z.object({
-    sessionId: z.string().describe('Active session ID'),
-    mockId: z.string().optional().describe('Remove only this mock. If omitted, clears all session mocks.'),
-});
+    sessionId: z.string().optional().describe(
+        'Clear mocks scoped to this session. Pair with mockId to clear one; omit mockId to clear all session mocks.',
+    ),
+    mockId: z.string().optional().describe(
+        'Clear one specific mock by ID. With sessionId: targets that session\'s ledger. Without: targets the standalone ledger.',
+    ),
+    allStandalone: z.boolean().optional().describe(
+        'Clear ALL standalone mocks (those installed without a sessionId). Mutually exclusive with sessionId.',
+    ),
+}).refine(
+    (input) => {
+        const hasSession = !!input.sessionId;
+        const hasAllStandalone = input.allStandalone === true;
+        const hasMockId = !!input.mockId;
+        if (hasAllStandalone && hasSession) return false;
+        if (!hasSession && !hasAllStandalone && !hasMockId) return false;
+        return true;
+    },
+    {
+        message:
+            'Provide one of: sessionId (clear session mocks), mockId (clear one standalone), ' +
+            'or allStandalone:true (clear all standalone). sessionId and allStandalone are mutually exclusive.',
+    },
+);
 
 export const ClearMockResponsesOutputSchema = z.object({
     removed: z.number().int().describe('Number of rules deleted from Proxyman'),
-    remaining: z.number().int().describe('Number of rules still active for this session'),
+    remaining: z.number().int().describe('Number of rules still active in the targeted scope'),
+    scope: z.enum(['session', 'standalone-one', 'standalone-all']).describe('Which scope was targeted'),
 });
 
 // ──────────────────────────────────────────────
@@ -856,10 +904,20 @@ const ScrollSpecSchema = z
     })
     .optional();
 
+// `inputText` action: bare text-typing into the already-focused field. No
+// preceding tap. The reliable path for iOS secure password fields where
+// `type`'s tap-then-type pattern can drop focus or trip the strong-password
+// suggestion. Pair with a separate `tap` action first if focus isn't where
+// you need it.
+const InputTextSpecSchema = z.object({
+    text: z.string().describe('Text to type into the currently-focused field'),
+});
+
 const FeatureActionSpecSchema = z
     .union([
         z.object({ tap: ActionSelectorSchema }).strict(),
         z.object({ type: TypeActionSchema }).strict(),
+        z.object({ inputText: InputTextSpecSchema }).strict(),
         z.object({ scroll: ScrollSpecSchema }).strict(),
         z.object({ wait: z.number().int().nonnegative() }).strict(),
         z.object({ assertVisible: ActionSelectorSchema }).strict(),

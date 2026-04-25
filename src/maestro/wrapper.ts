@@ -27,6 +27,100 @@ import { withRetry, isTransientMaestroError } from './retry.js';
  */
 const XCTEST_DRIVER_PORT = 7001;
 
+/**
+ * JSON-encode a string so it round-trips safely as a YAML scalar. JSON-quoted
+ * strings are a strict subset of YAML's flow-style strings, so this gives us
+ * correct escaping for quotes, backslashes, newlines, and unicode without
+ * needing a YAML dump library. Used by executeAction to emit selectors and
+ * inputText payloads.
+ */
+function yamlString(s: string): string {
+    return JSON.stringify(s);
+}
+
+export type BuildActionYamlResult =
+    | { ok: true; yaml: string; commandStr: string }
+    | { ok: false; error: string };
+
+/**
+ * Build the Maestro YAML script that `executeAction` writes to a temp file.
+ * Pulled out as a pure function so its output (escaping, selector ordering,
+ * inputText vs type emission) is unit-testable without invoking the Maestro
+ * subprocess.
+ */
+export function buildActionYaml(
+    action: UIActionType,
+    element: UIElement,
+    textInput?: string,
+): BuildActionYamlResult {
+    const selector = element.id || element.accessibilityLabel || element.text;
+    const hasElement = !!(selector || element.bounds || element.point);
+
+    // Actions that target a specific element. `inputText` and the no-target
+    // actions (scroll/swipe/back) are exempt: inputText types into the focused
+    // field by design (the reliable path for iOS secure text fields where
+    // tapOn+inputText drops focus); scroll/swipe/back operate on the screen
+    // directly.
+    const SELECTOR_REQUIRED: ReadonlySet<UIActionType> = new Set([
+        'tap', 'type', 'scrollUntilVisible', 'swipeUntilVisible', 'assertVisible',
+    ]);
+    if (SELECTOR_REQUIRED.has(action) && !hasElement) {
+        return { ok: false, error: 'No valid selector (id, label, text, bounds, point) provided for element.' };
+    }
+
+    // Point takes precedence — it's the explicit escape hatch for custom
+    // controls (e.g. Bureau tabs) that don't respond to accessibility selectors.
+    const target = (() => {
+        if (element.point) return `point: ${element.point.x},${element.point.y}`;
+        if (element.id) return `id: ${yamlString(element.id)}`;
+        if (element.accessibilityLabel) return `label: ${yamlString(element.accessibilityLabel)}`;
+        if (element.text) return `text: ${yamlString(element.text)}`;
+        if (element.bounds) return `point: ${element.bounds.x},${element.bounds.y}`;
+        return '';
+    })();
+    const safeText = yamlString(textInput ?? '');
+
+    let commandStr = '';
+    switch (action) {
+        case 'tap':
+            commandStr = `- tapOn:\n    ${target}`;
+            break;
+        case 'type':
+            commandStr = `- tapOn:\n    ${target}\n- inputText: ${safeText}`;
+            break;
+        case 'inputText':
+            // Bare inputText — no preceding tap. Mirrors Maestro's native YAML
+            // command exactly. The reliable path for iOS secure text fields
+            // where tapOn+inputText fails: the tap can drop focus, animations
+            // can shift the cursor, or the strong-password suggestion can
+            // intercept input.
+            commandStr = `- inputText: ${safeText}`;
+            break;
+        case 'scroll':
+            commandStr = `- scroll`;
+            break;
+        case 'swipe':
+            commandStr = `- swipe:\n    direction: DOWN`;
+            break;
+        case 'scrollUntilVisible':
+            commandStr = `- scrollUntilVisible:\n    element:\n      ${target}\n    direction: DOWN`;
+            break;
+        case 'swipeUntilVisible':
+            commandStr = `- scrollUntilVisible:\n    element:\n      ${target}\n    direction: RIGHT`;
+            break;
+        case 'back':
+            commandStr = `- back`;
+            break;
+        case 'assertVisible':
+            commandStr = `- assertVisible:\n    ${target}`;
+            break;
+        default:
+            return { ok: false, error: `Unsupported action: ${action satisfies never}` };
+    }
+
+    return { ok: true, yaml: `appId: ""\n---\n${commandStr}\n`, commandStr };
+}
+
 /** Options controlling ensureCleanDriverState's behavior. */
 export interface EnsureCleanDriverOptions {
     /**
@@ -390,67 +484,14 @@ export class MaestroWrapper {
         element: UIElement,
         textInput?: string
     ): Promise<{ success: boolean; error?: string }> {
+        const built = buildActionYaml(action, element, textInput);
+        if (!built.ok) return { success: false, error: built.error };
+
         try {
-            let commandStr = '';
-            const selector = element.id || element.accessibilityLabel || element.text;
-
-            if (!selector && !element.bounds && !element.point) {
-                return { success: false, error: 'No valid selector (id, label, text, bounds, point) provided for element.' };
-            }
-
-            // Point takes precedence — it's the explicit escape hatch for custom
-            // controls (e.g. Bureau tabs) that don't respond to accessibility selectors.
-            const getSelectorMap = () => {
-                if (element.point) return `point: ${element.point.x},${element.point.y}`;
-                if (element.id) return `id: "${element.id}"`;
-                if (element.accessibilityLabel) return `label: "${element.accessibilityLabel}"`;
-                if (element.text) return `text: "${element.text}"`;
-                if (element.bounds) return `point: ${element.bounds.x},${element.bounds.y}`;
-                return '';
-            };
-
-            const target = getSelectorMap();
-
-            switch (action) {
-                case 'tap':
-                    commandStr = `- tapOn:\n    ${target}`;
-                    break;
-                case 'type':
-                    commandStr = `- tapOn:\n    ${target}\n- inputText: "${textInput || ''}"`;
-                    break;
-                case 'scroll':
-                    commandStr = `- scroll`;
-                    break;
-                case 'swipe':
-                    commandStr = `- swipe:\n    direction: DOWN`;
-                    break;
-                case 'scrollUntilVisible':
-                    commandStr = `- scrollUntilVisible:\n    element:\n      ${target}\n    direction: DOWN`;
-                    break;
-                case 'swipeUntilVisible':
-                    commandStr = `- scrollUntilVisible:\n    element:\n      ${target}\n    direction: RIGHT`;
-                    break;
-                case 'back':
-                    commandStr = `- back`;
-                    break;
-                case 'assertVisible':
-                    commandStr = `- assertVisible:\n    ${target}`;
-                    break;
-                default:
-                    return { success: false, error: `Unsupported action: ${action}` };
-            }
-
-            const yamlContent = `appId: ""\n---\n${commandStr}\n`;
-
             const tmpFile = path.join(os.tmpdir(), `maestro-action-${randomUUID()}.yaml`);
-            await fs.writeFile(tmpFile, yamlContent, 'utf-8');
-
-            // Execute the temporary script
+            await fs.writeFile(tmpFile, built.yaml, 'utf-8');
             await execFileAsync(this.maestroBin, this.buildArgs(['test', tmpFile]), { env: getExecEnv(), timeout: this.timeouts.actionMs });
-
-            // Cleanup
             await fs.unlink(tmpFile).catch(() => { });
-
             return { success: true };
         } catch (error: any) {
             console.error(`[MaestroWrapper] executeAction failed:`, error);

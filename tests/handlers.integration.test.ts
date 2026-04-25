@@ -480,6 +480,9 @@ describe('Handler Integration Tests', () => {
     });
 
     afterEach(async () => {
+      // Clear any standalone mocks from prior tests — they live in a
+      // module-scoped Map that survives test boundaries by default.
+      try { await handleClearMockResponses({ allStandalone: true }); } catch { /* may be empty */ }
       try { await handleStopAndCompile({ sessionId }); } catch { /* may already be done */ }
       _setProxymanMcpClientFactory(restoreFactory);
     });
@@ -622,13 +625,127 @@ describe('Handler Integration Tests', () => {
       expect(mockProxymanClient.deleteRule).not.toHaveBeenCalledWith('USER-Y', 'scripting');
     });
 
-    it('rejects set_mock_response for an unknown session', async () => {
+    it('rejects set_mock_response when sessionId is provided but unknown', async () => {
       await expect(
         handleSetMockResponse({
           sessionId: 'nonexistent-session',
           mock: { matcher: { pathContains: '/x' }, staticResponse: { status: 200 } },
         }),
       ).rejects.toThrow(/Session not found/);
+    });
+
+    // ── P1: standalone (session-independent) mocks ──────────────────────────
+
+    it('installs a STANDALONE mock when sessionId is omitted', async () => {
+      const result = await handleSetMockResponse({
+        mock: {
+          id: 'flag-off',
+          matcher: { pathContains: '/api/flags' },
+          staticResponse: { status: 200, jsonBody: { newLogin: false } },
+        },
+      });
+      expect(result.scope).toBe('standalone');
+      expect(result.ruleName).toBe('mca:standalone:flag-off');
+      expect(result.totalStandaloneMocks).toBe(1);
+      expect(result.totalSessionMocks).toBeUndefined();
+      // No session check needed — call succeeds even though no session exists
+      expect(mockProxymanClient.createScriptingRule).toHaveBeenCalledWith(
+        expect.objectContaining({ name: 'mca:standalone:flag-off' }),
+      );
+    });
+
+    it('clears a single standalone mock by mockId', async () => {
+      const set = await handleSetMockResponse({
+        mock: { id: 'a', matcher: { pathContains: '/a' }, staticResponse: { status: 200 } },
+      });
+      await handleSetMockResponse({
+        mock: { id: 'b', matcher: { pathContains: '/b' }, staticResponse: { status: 200 } },
+      });
+
+      const cleared = await handleClearMockResponses({ mockId: 'a' });
+      expect(cleared.scope).toBe('standalone-one');
+      expect(cleared.removed).toBe(1);
+      expect(cleared.remaining).toBe(1);
+      expect(mockProxymanClient.deleteRule).toHaveBeenCalledWith(set.proxymanRuleId, 'scripting');
+    });
+
+    it('clears all standalone mocks via allStandalone:true', async () => {
+      await handleSetMockResponse({
+        mock: { id: 'a', matcher: { pathContains: '/a' }, staticResponse: { status: 200 } },
+      });
+      await handleSetMockResponse({
+        mock: { id: 'b', matcher: { pathContains: '/b' }, staticResponse: { status: 200 } },
+      });
+
+      const cleared = await handleClearMockResponses({ allStandalone: true });
+      expect(cleared.scope).toBe('standalone-all');
+      expect(cleared.removed).toBe(2);
+      expect(cleared.remaining).toBe(0);
+    });
+
+    it('standalone mocks survive stop_and_compile_test (not session-tagged)', async () => {
+      const standalone = await handleSetMockResponse({
+        mock: { id: 'persist', matcher: { pathContains: '/x' }, staticResponse: { status: 200 } },
+      });
+      // Session has no mocks of its own. listRules returns the standalone +
+      // user rules, none of which are session-tagged.
+      mockProxymanClient.listRules.mockResolvedValue([
+        { id: standalone.proxymanRuleId, name: standalone.ruleName, url: '*', enabled: true, ruleType: 'scripting' },
+        { id: 'USER-Y', name: 'UserCreatedRule', url: '*', enabled: true, ruleType: 'scripting' },
+      ]);
+
+      await handleStopAndCompile({ sessionId });
+
+      // Standalone rule was NOT deleted by session cleanup
+      expect(mockProxymanClient.deleteRule).not.toHaveBeenCalledWith(standalone.proxymanRuleId, 'scripting');
+
+      // Cleanup via the standalone path still works
+      const cleared = await handleClearMockResponses({ mockId: 'persist' });
+      expect(cleared.removed).toBe(1);
+    });
+
+    it('session and standalone mocks can coexist independently', async () => {
+      const sessionMock = await handleSetMockResponse({
+        sessionId,
+        mock: { id: 's-1', matcher: { pathContains: '/s' }, staticResponse: { status: 200 } },
+      });
+      const standaloneMock = await handleSetMockResponse({
+        mock: { id: 'st-1', matcher: { pathContains: '/st' }, staticResponse: { status: 200 } },
+      });
+      expect(sessionMock.scope).toBe('session');
+      expect(standaloneMock.scope).toBe('standalone');
+      expect(sessionMock.ruleName).toContain(`mca:${sessionId}:`);
+      expect(standaloneMock.ruleName).toBe('mca:standalone:st-1');
+
+      // Clearing session shouldn't touch standalone
+      await handleClearMockResponses({ sessionId });
+      expect(mockProxymanClient.deleteRule).toHaveBeenCalledWith(sessionMock.proxymanRuleId, 'scripting');
+      expect(mockProxymanClient.deleteRule).not.toHaveBeenCalledWith(standaloneMock.proxymanRuleId, 'scripting');
+
+      // Tidy up the standalone for test isolation
+      await handleClearMockResponses({ allStandalone: true });
+    });
+
+    // ── P2: inputText action via execute_ui_action ──────────────────────────
+
+    it('inputText action succeeds without an element (focused-field typing)', async () => {
+      const result = await handleExecuteUIAction({
+        sessionId,
+        action: 'inputText',
+        textInput: 'hunter2',
+      });
+      expect(result.success).toBe(true);
+      expect(mockDriverFns.executeAction).toHaveBeenCalledWith('inputText', {}, 'hunter2');
+    });
+
+    it('non-inputText actions still require an element', async () => {
+      await expect(
+        handleExecuteUIAction({
+          sessionId,
+          action: 'tap',
+          // element omitted — should throw at the handler boundary
+        }),
+      ).rejects.toThrow(/requires an element/);
     });
 
     it('returns a clear error when Proxyman MCP rejects the rule (e.g. MCP disabled)', async () => {

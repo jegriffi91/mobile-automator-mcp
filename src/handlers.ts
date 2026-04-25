@@ -163,6 +163,16 @@ const activeDrivers: Map<string, AutomationDriver> = new Map();
 // ledger gives us O(1) lookup by mockId for partial clears.
 const sessionMocks: Map<string, Map<string, string>> = new Map();
 
+// ── Standalone mock ledger (mockId → Proxyman rule ID) ──
+//
+// Tracks mocks installed without a sessionId. These persist until explicitly
+// cleared via clear_mock_responses({ mockId }) or { allStandalone: true }.
+// Useful for agents mocking outside any recording session — the original use
+// case was 30-min agent loops where session-driven cleanup didn't apply.
+const standaloneMocks: Map<string, string> = new Map();
+
+const STANDALONE_TAG_PREFIX = 'mca:standalone';
+
 /**
  * Test-only — replace the Proxyman MCP client used by handlers. Returns the
  * previous instance so tests can restore it.
@@ -674,12 +684,20 @@ export async function handleGetUIHierarchy(
 export async function handleExecuteUIAction(
     input: ExecuteUIActionInput
 ): Promise<ExecuteUIActionOutput> {
+    // inputText is the only action that doesn't take a selector — by design,
+    // since the whole point is to type into the already-focused field. Every
+    // other action needs SOMETHING to act on.
+    if (input.action !== 'inputText' && !input.element) {
+        throw new Error(`execute_ui_action: "${input.action}" requires an element. Only "inputText" can omit it.`);
+    }
+
+    const element = input.element ?? {};
     const targetDesc =
-        input.element.id
-        ?? input.element.accessibilityLabel
-        ?? input.element.text
-        ?? (input.element.point ? `point(${input.element.point.x},${input.element.point.y})` : undefined)
-        ?? 'unknown element';
+        element.id
+        ?? element.accessibilityLabel
+        ?? element.text
+        ?? (element.point ? `point(${element.point.x},${element.point.y})` : undefined)
+        ?? (input.action === 'inputText' ? '<focused field>' : 'unknown element');
     console.error(`[MCP] execute_ui_action: ${input.action} on "${targetDesc}"`);
 
     // Get the driver for this session
@@ -714,7 +732,7 @@ export async function handleExecuteUIAction(
     sessionManager.suppressNextInference(input.sessionId);
 
     const dispatchedAt = new Date().toISOString();
-    const result = await driver.executeAction(input.action, input.element, input.textInput);
+    const result = await driver.executeAction(input.action, element, input.textInput);
     const completedAt = new Date().toISOString();
 
     if (!result.success) {
@@ -727,7 +745,7 @@ export async function handleExecuteUIAction(
         dispatchedAt,
         completedAt,
         actionType: input.action,
-        element: input.element,
+        element,
         textInput: input.textInput,
         source: 'dispatched',
     });
@@ -2186,16 +2204,29 @@ export async function handleDeleteRunnerMock(
 // into a Proxyman scripting rule. The MCP gateway pattern means agents see one
 // cohesive interface — they don't need to know about Proxyman's MCP, our
 // session lifecycle, or the include_paths gotcha.
+//
+// Two modes selected by whether sessionId is provided:
+//   - sessionId given: SESSION-scoped. Tagged `mca:<sessionId>:<mockId>`,
+//     auto-cleaned on stop_and_compile_test for that session.
+//   - sessionId omitted: STANDALONE. Tagged `mca:standalone:<mockId>`,
+//     persists until explicitly cleared. Use case: agents that want to mock
+//     outside any active recording session.
 export async function handleSetMockResponse(
     input: SetMockResponseInput,
 ): Promise<SetMockResponseOutput> {
-    const session = await sessionManager.getSession(input.sessionId);
-    if (!session) {
-        throw new Error(`Session not found: ${input.sessionId}. Was start_recording_session called?`);
+    const isSessionScoped = !!input.sessionId;
+
+    if (isSessionScoped) {
+        const session = await sessionManager.getSession(input.sessionId!);
+        if (!session) {
+            throw new Error(`Session not found: ${input.sessionId}. Was start_recording_session called?`);
+        }
     }
 
     const mockId = input.mock.id ?? `mock-${randomBytes(4).toString('hex')}`;
-    const ruleName = buildRuleName(input.sessionId, mockId);
+    const ruleName = isSessionScoped
+        ? buildRuleName(input.sessionId!, mockId)
+        : `${STANDALONE_TAG_PREFIX}:${mockId}`;
     const url = buildProxymanUrlPattern(input.mock.matcher);
     const scriptContent = buildScriptContent({
         matcher: input.mock.matcher,
@@ -2222,9 +2253,6 @@ export async function handleSetMockResponse(
             url,
             scriptContent,
             method: input.mock.matcher.method,
-            // Proxyman's create_scripting_rule defaults include_paths to false
-            // for Scripting only — that's the silent-no-match footgun. Our
-            // client wrapper forces true unless overridden.
             enableRequest: false,
             enableResponse: true,
             graphqlQueryName: input.mock.matcher.graphqlQueryName,
@@ -2239,70 +2267,122 @@ export async function handleSetMockResponse(
         throw err;
     }
 
-    let perSession = sessionMocks.get(input.sessionId);
-    if (!perSession) {
-        perSession = new Map();
-        sessionMocks.set(input.sessionId, perSession);
+    if (isSessionScoped) {
+        let perSession = sessionMocks.get(input.sessionId!);
+        if (!perSession) {
+            perSession = new Map();
+            sessionMocks.set(input.sessionId!, perSession);
+        }
+        perSession.set(mockId, proxymanRuleId);
+        console.error(
+            `[MCP] set_mock_response: session=${input.sessionId} mockId=${mockId} ruleId=${proxymanRuleId} url="${url}" ` +
+            `mode=${input.mock.staticResponse ? 'static' : 'jsonPatch'}`,
+        );
+        return {
+            mockId,
+            proxymanRuleId,
+            ruleName,
+            scope: 'session',
+            totalSessionMocks: perSession.size,
+        };
+    } else {
+        standaloneMocks.set(mockId, proxymanRuleId);
+        console.error(
+            `[MCP] set_mock_response: standalone mockId=${mockId} ruleId=${proxymanRuleId} url="${url}" ` +
+            `mode=${input.mock.staticResponse ? 'static' : 'jsonPatch'}`,
+        );
+        return {
+            mockId,
+            proxymanRuleId,
+            ruleName,
+            scope: 'standalone',
+            totalStandaloneMocks: standaloneMocks.size,
+        };
     }
-    perSession.set(mockId, proxymanRuleId);
-
-    console.error(
-        `[MCP] set_mock_response: session=${input.sessionId} mockId=${mockId} ruleId=${proxymanRuleId} url="${url}" ` +
-        `mode=${input.mock.staticResponse ? 'static' : 'jsonPatch'}`,
-    );
-
-    return {
-        mockId,
-        proxymanRuleId,
-        ruleName,
-        totalSessionMocks: perSession.size,
-    };
 }
 
 // ---- clear_mock_responses (Proxyman MCP gateway) ----
+//
+// Three modes selected by which fields are populated:
+//   - sessionId (with optional mockId): clear all session mocks, or one specific
+//   - mockId without sessionId: clear one standalone mock by ID
+//   - allStandalone: clear all standalone mocks
 export async function handleClearMockResponses(
     input: ClearMockResponsesInput,
 ): Promise<ClearMockResponsesOutput> {
-    const perSession = sessionMocks.get(input.sessionId);
-    if (!perSession || perSession.size === 0) {
-        return { removed: 0, remaining: 0 };
+    const client = _proxymanClientFactory();
+
+    // ── Session scope ──
+    if (input.sessionId) {
+        const perSession = sessionMocks.get(input.sessionId);
+        if (!perSession || perSession.size === 0) {
+            return { removed: 0, remaining: 0, scope: 'session' };
+        }
+
+        let removed = 0;
+        if (input.mockId) {
+            const ruleId = perSession.get(input.mockId);
+            if (ruleId) {
+                try {
+                    await client.deleteRule(ruleId, 'scripting');
+                    removed = 1;
+                } catch (err) {
+                    console.error(`[MCP] clear_mock_responses: delete failed for rule ${ruleId} (continuing)`, err);
+                }
+                perSession.delete(input.mockId);
+            }
+        } else {
+            for (const [mockId, ruleId] of perSession.entries()) {
+                try {
+                    await client.deleteRule(ruleId, 'scripting');
+                    removed++;
+                } catch (err) {
+                    console.error(`[MCP] clear_mock_responses: delete failed for rule ${ruleId} (continuing)`, err);
+                }
+                perSession.delete(mockId);
+            }
+        }
+
+        if (perSession.size === 0) sessionMocks.delete(input.sessionId);
+        console.error(
+            `[MCP] clear_mock_responses: session=${input.sessionId} removed=${removed} remaining=${perSession.size}`,
+        );
+        return { removed, remaining: perSession.size, scope: 'session' };
     }
 
-    const client = _proxymanClientFactory();
-    let removed = 0;
-
-    if (input.mockId) {
-        const ruleId = perSession.get(input.mockId);
-        if (ruleId) {
-            try {
-                await client.deleteRule(ruleId, 'scripting');
-                removed = 1;
-            } catch (err) {
-                console.error(`[MCP] clear_mock_responses: delete failed for rule ${ruleId} (continuing)`, err);
-            }
-            perSession.delete(input.mockId);
-        }
-    } else {
-        for (const [mockId, ruleId] of perSession.entries()) {
+    // ── Standalone all ──
+    if (input.allStandalone) {
+        let removed = 0;
+        for (const [mockId, ruleId] of standaloneMocks.entries()) {
             try {
                 await client.deleteRule(ruleId, 'scripting');
                 removed++;
             } catch (err) {
                 console.error(`[MCP] clear_mock_responses: delete failed for rule ${ruleId} (continuing)`, err);
             }
-            perSession.delete(mockId);
+            standaloneMocks.delete(mockId);
         }
+        console.error(`[MCP] clear_mock_responses: cleared ${removed} standalone mocks`);
+        return { removed, remaining: standaloneMocks.size, scope: 'standalone-all' };
     }
 
-    if (perSession.size === 0) {
-        sessionMocks.delete(input.sessionId);
+    // ── Standalone one (mockId only) ──
+    // Schema-validated: at least one of sessionId / mockId / allStandalone is set.
+    // We've eliminated sessionId and allStandalone above, so mockId must be present.
+    const ruleId = standaloneMocks.get(input.mockId!);
+    if (!ruleId) {
+        return { removed: 0, remaining: standaloneMocks.size, scope: 'standalone-one' };
     }
-    const remaining = perSession.size;
-
-    console.error(
-        `[MCP] clear_mock_responses: session=${input.sessionId} removed=${removed} remaining=${remaining}`,
-    );
-    return { removed, remaining };
+    let removed = 0;
+    try {
+        await client.deleteRule(ruleId, 'scripting');
+        removed = 1;
+    } catch (err) {
+        console.error(`[MCP] clear_mock_responses: delete failed for rule ${ruleId} (continuing)`, err);
+    }
+    standaloneMocks.delete(input.mockId!);
+    console.error(`[MCP] clear_mock_responses: standalone mockId=${input.mockId} removed=${removed}`);
+    return { removed, remaining: standaloneMocks.size, scope: 'standalone-one' };
 }
 
 /**
