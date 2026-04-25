@@ -35,7 +35,16 @@ export interface Session {
 
 // ----- UI Types -----
 
-export type UIActionType = 'tap' | 'type' | 'scroll' | 'swipe' | 'scrollUntilVisible' | 'swipeUntilVisible' | 'back' | 'assertVisible';
+export type UIActionType =
+    | 'tap'
+    | 'type'
+    | 'inputText'
+    | 'scroll'
+    | 'swipe'
+    | 'scrollUntilVisible'
+    | 'swipeUntilVisible'
+    | 'back'
+    | 'assertVisible';
 
 export interface UIElement {
     id?: string;

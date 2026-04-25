@@ -807,6 +807,19 @@ describe('Schema Conformance', () => {
     });
   });
 
+  describe('SetMockResponseInputSchema (session vs standalone)', () => {
+    it('accepts a standalone mock with sessionId omitted (P1)', () => {
+      const result = SetMockResponseInputSchema.safeParse({
+        mock: {
+          matcher: { pathContains: '/api/flags' },
+          staticResponse: { status: 200, jsonBody: { newLogin: false } },
+        },
+      });
+      expect(result.success).toBe(true);
+      if (result.success) expect(result.data.sessionId).toBeUndefined();
+    });
+  });
+
   describe('SetMockResponseInputSchema', () => {
     it('accepts a jsonPatch (responseTransform) mock', () => {
       const result = SetMockResponseInputSchema.safeParse({
@@ -898,31 +911,77 @@ describe('Schema Conformance', () => {
   });
 
   describe('SetMockResponseOutputSchema', () => {
-    it('accepts a valid output', () => {
+    it('accepts a session-scoped output', () => {
       const result = SetMockResponseOutputSchema.safeParse({
         mockId: 'mock-abcd1234',
         proxymanRuleId: 'AC5CFB7B',
         ruleName: 'mca:sess-1:mock-abcd1234',
+        scope: 'session',
         totalSessionMocks: 3,
+      });
+      expect(result.success).toBe(true);
+    });
+
+    it('accepts a standalone output', () => {
+      const result = SetMockResponseOutputSchema.safeParse({
+        mockId: 'mock-deadbeef',
+        proxymanRuleId: '12345678',
+        ruleName: 'mca:standalone:mock-deadbeef',
+        scope: 'standalone',
+        totalStandaloneMocks: 2,
       });
       expect(result.success).toBe(true);
     });
   });
 
-  describe('ClearMockResponses I/O schemas', () => {
-    it('accepts clear-all (no mockId)', () => {
+  describe('ClearMockResponsesInputSchema (3 modes)', () => {
+    it('accepts session-scoped clear-all', () => {
       expect(ClearMockResponsesInputSchema.safeParse({ sessionId: 'sess-1' }).success).toBe(true);
     });
 
-    it('accepts clear-one (with mockId)', () => {
+    it('accepts session-scoped clear-one', () => {
       expect(
         ClearMockResponsesInputSchema.safeParse({ sessionId: 'sess-1', mockId: 'mock-abcd' }).success,
       ).toBe(true);
     });
 
-    it('output accepts a valid shape', () => {
+    it('accepts standalone clear-one (mockId only)', () => {
       expect(
-        ClearMockResponsesOutputSchema.safeParse({ removed: 2, remaining: 1 }).success,
+        ClearMockResponsesInputSchema.safeParse({ mockId: 'mock-deadbeef' }).success,
+      ).toBe(true);
+    });
+
+    it('accepts allStandalone:true', () => {
+      expect(
+        ClearMockResponsesInputSchema.safeParse({ allStandalone: true }).success,
+      ).toBe(true);
+    });
+
+    it('rejects empty input (no scope signal)', () => {
+      expect(ClearMockResponsesInputSchema.safeParse({}).success).toBe(false);
+    });
+
+    it('rejects sessionId combined with allStandalone (mutually exclusive)', () => {
+      expect(
+        ClearMockResponsesInputSchema.safeParse({ sessionId: 'sess-1', allStandalone: true }).success,
+      ).toBe(false);
+    });
+
+    it('output accepts session scope', () => {
+      expect(
+        ClearMockResponsesOutputSchema.safeParse({ removed: 2, remaining: 1, scope: 'session' }).success,
+      ).toBe(true);
+    });
+
+    it('output accepts standalone-one scope', () => {
+      expect(
+        ClearMockResponsesOutputSchema.safeParse({ removed: 1, remaining: 0, scope: 'standalone-one' }).success,
+      ).toBe(true);
+    });
+
+    it('output accepts standalone-all scope', () => {
+      expect(
+        ClearMockResponsesOutputSchema.safeParse({ removed: 5, remaining: 0, scope: 'standalone-all' }).success,
       ).toBe(true);
     });
   });
