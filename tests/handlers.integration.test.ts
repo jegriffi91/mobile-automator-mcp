@@ -947,4 +947,26 @@ describe('Handler Integration Tests', () => {
       }
     });
   });
+
+  describe('start_build (Phase 2 smoke)', () => {
+    it('returns a UUID and registers a running task', async () => {
+      const { handleStartBuild } = await import('../src/handlers.js');
+      const { taskRegistry } = await import('../src/tasks/registry.js');
+      try {
+        const out = await handleStartBuild({
+          platform: 'ios',
+          workspacePath: '/nope/X.xcworkspace',
+          scheme: 'X',
+        });
+        expect(out.taskId).toMatch(/^[0-9a-f-]{36}$/);
+        expect(out.kind).toBe('build');
+        expect(out.status).toBe('running');
+        expect(taskRegistry.get(out.taskId)).toBeDefined();
+        // Cancel so the runner doesn't actually shell xcodebuild against /nope/.
+        taskRegistry.cancel(out.taskId, 'test-teardown');
+      } finally {
+        taskRegistry._clearForTests();
+      }
+    });
+  });
 });
