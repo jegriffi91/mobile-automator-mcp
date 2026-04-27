@@ -328,7 +328,7 @@ export async function handleAuditState(_input: AuditStateInput): Promise<AuditSt
     const reachable = await client.healthCheck();
     let totalRules = 0;
     let mcaTaggedRules = 0;
-    let proxymanOrphans: string[] = [];
+    const proxymanOrphans: string[] = [];
     const rulesByTagPrefix: Record<string, number> = {};
     if (reachable) {
         try {
@@ -354,7 +354,6 @@ export async function handleAuditState(_input: AuditStateInput): Promise<AuditSt
     }
 
     const driverIdSet = new Set(driverIds);
-    const pollerIdSet = new Set(pollerIds);
 
     const sessionsWithoutDriver = allSessions
         .filter((s) => s.status === 'recording' && !driverIdSet.has(s.id))
@@ -378,6 +377,4 @@ export async function handleAuditState(_input: AuditStateInput): Promise<AuditSt
             pollersWithoutSession,
         },
     };
-    // (driverIdSet / pollerIdSet kept above for clarity even if pollerIdSet
-    // currently isn't read — ESLint will flag if it goes unused.)
 }
