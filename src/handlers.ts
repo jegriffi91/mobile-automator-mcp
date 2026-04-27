@@ -152,24 +152,11 @@ function createPollingNotifier(): PollingNotifier | undefined {
     };
 }
 
-// ── Per-session driver instances ──
-const activeDrivers: Map<string, AutomationDriver> = new Map();
-
-// ── Per-session mock-rule ledger (sessionId → mockId → Proxyman rule ID) ──
-//
-// Backs handleSetMockResponse / handleClearMockResponses, plus session-end
-// cleanup in handleStopAndCompile. We treat Proxyman as the source of truth
-// (re-listing on cleanup so externally-deleted rules don't leak), but the
-// ledger gives us O(1) lookup by mockId for partial clears.
-const sessionMocks: Map<string, Map<string, string>> = new Map();
-
-// ── Standalone mock ledger (mockId → Proxyman rule ID) ──
-//
-// Tracks mocks installed without a sessionId. These persist until explicitly
-// cleared via clear_mock_responses({ mockId }) or { allStandalone: true }.
-// Useful for agents mocking outside any recording session — the original use
-// case was 30-min agent loops where session-driven cleanup didn't apply.
-const standaloneMocks: Map<string, string> = new Map();
+// Per-session driver registry, plus per-session and standalone mock ledgers,
+// now live on SessionManager (sessionManager.{setActiveDriver, addSessionMock,
+// addStandaloneMock, ...}). Centralising state on the manager makes cleanup
+// from runHandler-driven rollback paths and the new admin tools (Phase 1 step 6)
+// possible without re-exporting the maps.
 
 const STANDALONE_TAG_PREFIX = 'mca:standalone';
 
@@ -244,7 +231,7 @@ export async function handleStartRecording(
     // Await baseline result (likely already settled while driver was starting)
     await baselinePromise;
 
-    activeDrivers.set(sessionId, driver);
+    sessionManager.setActiveDriver(sessionId, driver);
 
     // Start polling — driver provides the hierarchy reader
     const notifier = createPollingNotifier();
@@ -540,7 +527,7 @@ export async function handleStopAndCompile(
         await sessionManager.stopPolling(input.sessionId);
 
         // Stop and clean up the automation driver
-        const driver = activeDrivers.get(input.sessionId);
+        const driver = sessionManager.getActiveDriver(input.sessionId);
         if (driver) {
             try {
                 await driver.uninstallDriver(session.platform, undefined);
@@ -548,7 +535,7 @@ export async function handleStopAndCompile(
             } catch (err) {
                 console.error('[MCP] stop_and_compile_test: driver cleanup failed (non-fatal)', err);
             }
-            activeDrivers.delete(input.sessionId);
+            sessionManager.removeActiveDriver(input.sessionId);
         }
 
         // Bulk-delete any Proxyman scripting rules this session installed.
@@ -585,7 +572,7 @@ export async function handleGetUIHierarchy(
     let driver: AutomationDriver;
 
     if (input.sessionId) {
-        const sessionDriver = activeDrivers.get(input.sessionId);
+        const sessionDriver = sessionManager.getActiveDriver(input.sessionId);
         if (!sessionDriver) {
             throw new Error(
                 `No active driver for session ${input.sessionId}. ` +
@@ -701,7 +688,7 @@ export async function handleExecuteUIAction(
     console.error(`[MCP] execute_ui_action: ${input.action} on "${targetDesc}"`);
 
     // Get the driver for this session
-    const driver = activeDrivers.get(input.sessionId);
+    const driver = sessionManager.getActiveDriver(input.sessionId);
     if (!driver) {
         throw new Error(`No active driver for session ${input.sessionId}. Was start_recording_session called?`);
     }
@@ -1505,7 +1492,7 @@ export async function handleRunTest(
     console.error(`[MCP] run_test: running ${input.yamlPath}`);
 
     // Fail fast if a recording session owns the XCTest driver on port 7001.
-    assertNoActiveSessions(activeDrivers, 'run_test');
+    assertNoActiveSessions(sessionManager.listActiveDrivers(), 'run_test');
 
     // Create a CLI-only driver for test execution (no daemon needed). Forward
     // driverCooldownMs so callers can tune the port-7001 TIME_WAIT drain when
@@ -1840,7 +1827,7 @@ export async function handleListFlows(input: ListFlowsInput): Promise<ListFlowsO
 
 export async function handleRunFlow(input: RunFlowInput): Promise<RunFlowOutput> {
     // Fail fast (with the run_flow name) before delegating into run_test.
-    assertNoActiveSessions(activeDrivers, 'run_flow');
+    assertNoActiveSessions(sessionManager.listActiveDrivers(), 'run_flow');
 
     const flowsDir = resolveFlowsDir(input.flowsDir);
     console.error(`[MCP] run_flow: resolving "${input.name}" in ${flowsDir}`);
@@ -2268,12 +2255,8 @@ export async function handleSetMockResponse(
     }
 
     if (isSessionScoped) {
-        let perSession = sessionMocks.get(input.sessionId!);
-        if (!perSession) {
-            perSession = new Map();
-            sessionMocks.set(input.sessionId!, perSession);
-        }
-        perSession.set(mockId, proxymanRuleId);
+        sessionManager.addSessionMock(input.sessionId!, mockId, proxymanRuleId);
+        const totalSessionMocks = sessionManager.listSessionMocks(input.sessionId!).length;
         console.error(
             `[MCP] set_mock_response: session=${input.sessionId} mockId=${mockId} ruleId=${proxymanRuleId} url="${url}" ` +
             `mode=${input.mock.staticResponse ? 'static' : 'jsonPatch'}`,
@@ -2283,10 +2266,10 @@ export async function handleSetMockResponse(
             proxymanRuleId,
             ruleName,
             scope: 'session',
-            totalSessionMocks: perSession.size,
+            totalSessionMocks,
         };
     } else {
-        standaloneMocks.set(mockId, proxymanRuleId);
+        sessionManager.addStandaloneMock(mockId, proxymanRuleId);
         console.error(
             `[MCP] set_mock_response: standalone mockId=${mockId} ruleId=${proxymanRuleId} url="${url}" ` +
             `mode=${input.mock.staticResponse ? 'static' : 'jsonPatch'}`,
@@ -2296,7 +2279,7 @@ export async function handleSetMockResponse(
             proxymanRuleId,
             ruleName,
             scope: 'standalone',
-            totalStandaloneMocks: standaloneMocks.size,
+            totalStandaloneMocks: sessionManager.standaloneMockCount(),
         };
     }
 }
@@ -2314,14 +2297,14 @@ export async function handleClearMockResponses(
 
     // ── Session scope ──
     if (input.sessionId) {
-        const perSession = sessionMocks.get(input.sessionId);
-        if (!perSession || perSession.size === 0) {
+        const entries = sessionManager.listSessionMocks(input.sessionId);
+        if (entries.length === 0) {
             return { removed: 0, remaining: 0, scope: 'session' };
         }
 
         let removed = 0;
         if (input.mockId) {
-            const ruleId = perSession.get(input.mockId);
+            const ruleId = sessionManager.getSessionMockRule(input.sessionId, input.mockId);
             if (ruleId) {
                 try {
                     await client.deleteRule(ruleId, 'scripting');
@@ -2329,49 +2312,49 @@ export async function handleClearMockResponses(
                 } catch (err) {
                     console.error(`[MCP] clear_mock_responses: delete failed for rule ${ruleId} (continuing)`, err);
                 }
-                perSession.delete(input.mockId);
+                sessionManager.removeSessionMock(input.sessionId, input.mockId);
             }
         } else {
-            for (const [mockId, ruleId] of perSession.entries()) {
+            for (const { mockId, ruleId } of entries) {
                 try {
                     await client.deleteRule(ruleId, 'scripting');
                     removed++;
                 } catch (err) {
                     console.error(`[MCP] clear_mock_responses: delete failed for rule ${ruleId} (continuing)`, err);
                 }
-                perSession.delete(mockId);
+                sessionManager.removeSessionMock(input.sessionId, mockId);
             }
         }
 
-        if (perSession.size === 0) sessionMocks.delete(input.sessionId);
+        const remaining = sessionManager.listSessionMocks(input.sessionId).length;
         console.error(
-            `[MCP] clear_mock_responses: session=${input.sessionId} removed=${removed} remaining=${perSession.size}`,
+            `[MCP] clear_mock_responses: session=${input.sessionId} removed=${removed} remaining=${remaining}`,
         );
-        return { removed, remaining: perSession.size, scope: 'session' };
+        return { removed, remaining, scope: 'session' };
     }
 
     // ── Standalone all ──
     if (input.allStandalone) {
         let removed = 0;
-        for (const [mockId, ruleId] of standaloneMocks.entries()) {
+        for (const { mockId, ruleId } of sessionManager.listStandaloneMocks()) {
             try {
                 await client.deleteRule(ruleId, 'scripting');
                 removed++;
             } catch (err) {
                 console.error(`[MCP] clear_mock_responses: delete failed for rule ${ruleId} (continuing)`, err);
             }
-            standaloneMocks.delete(mockId);
+            sessionManager.removeStandaloneMock(mockId);
         }
         console.error(`[MCP] clear_mock_responses: cleared ${removed} standalone mocks`);
-        return { removed, remaining: standaloneMocks.size, scope: 'standalone-all' };
+        return { removed, remaining: sessionManager.standaloneMockCount(), scope: 'standalone-all' };
     }
 
     // ── Standalone one (mockId only) ──
     // Schema-validated: at least one of sessionId / mockId / allStandalone is set.
     // We've eliminated sessionId and allStandalone above, so mockId must be present.
-    const ruleId = standaloneMocks.get(input.mockId!);
+    const ruleId = sessionManager.getStandaloneMockRule(input.mockId!);
     if (!ruleId) {
-        return { removed: 0, remaining: standaloneMocks.size, scope: 'standalone-one' };
+        return { removed: 0, remaining: sessionManager.standaloneMockCount(), scope: 'standalone-one' };
     }
     let removed = 0;
     try {
@@ -2380,9 +2363,9 @@ export async function handleClearMockResponses(
     } catch (err) {
         console.error(`[MCP] clear_mock_responses: delete failed for rule ${ruleId} (continuing)`, err);
     }
-    standaloneMocks.delete(input.mockId!);
+    sessionManager.removeStandaloneMock(input.mockId!);
     console.error(`[MCP] clear_mock_responses: standalone mockId=${input.mockId} removed=${removed}`);
-    return { removed, remaining: standaloneMocks.size, scope: 'standalone-one' };
+    return { removed, remaining: sessionManager.standaloneMockCount(), scope: 'standalone-one' };
 }
 
 /**
@@ -2392,14 +2375,14 @@ export async function handleClearMockResponses(
  * mid-session).
  */
 async function cleanupProxymanRulesForSession(sessionId: string): Promise<void> {
-    const ledgerEntry = sessionMocks.get(sessionId);
-    if (!ledgerEntry || ledgerEntry.size === 0) return;
+    const ledgerEntries = sessionManager.listSessionMocks(sessionId);
+    if (ledgerEntries.length === 0) return;
 
     const client = _proxymanClientFactory();
     if (!client.isConnected()) {
         // Connection was never established this session — nothing to clean up
         // remotely. Still drop the local ledger.
-        sessionMocks.delete(sessionId);
+        sessionManager.clearSessionMocks(sessionId);
         return;
     }
 
@@ -2410,7 +2393,7 @@ async function cleanupProxymanRulesForSession(sessionId: string): Promise<void> 
     } catch (err) {
         // Fall back to the local ledger if Proxyman is unreachable.
         console.error('[MCP] cleanupProxymanRulesForSession: list_rules failed, falling back to ledger', err);
-        toDelete = [...ledgerEntry.values()];
+        toDelete = ledgerEntries.map((e) => e.ruleId);
     }
 
     for (const id of toDelete) {
@@ -2420,7 +2403,7 @@ async function cleanupProxymanRulesForSession(sessionId: string): Promise<void> 
             console.error(`[MCP] cleanupProxymanRulesForSession: delete ${id} failed (continuing)`, err);
         }
     }
-    sessionMocks.delete(sessionId);
+    sessionManager.clearSessionMocks(sessionId);
 
     if (toDelete.length > 0) {
         console.error(

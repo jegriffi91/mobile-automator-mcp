@@ -26,6 +26,7 @@ export class SessionDatabase {
                 status TEXT NOT NULL,
                 startedAt TEXT NOT NULL,
                 stoppedAt TEXT,
+                abortedReason TEXT,
                 proxymanBaseline INTEGER,
                 filterDomains TEXT,
                 captureMode TEXT,
@@ -91,7 +92,7 @@ export class SessionDatabase {
      */
     insertSession(session: Session): void {
         const db = this.getDb();
-        const stmt = db.prepare(`INSERT INTO sessions (id, appBundleId, platform, status, startedAt, stoppedAt, proxymanBaseline, filterDomains, captureMode, pollingIntervalMs, settleTimeoutMs, trackEventPaths) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+        const stmt = db.prepare(`INSERT INTO sessions (id, appBundleId, platform, status, startedAt, stoppedAt, abortedReason, proxymanBaseline, filterDomains, captureMode, pollingIntervalMs, settleTimeoutMs, trackEventPaths) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
         stmt.run([
             session.id,
             session.appBundleId,
@@ -99,6 +100,7 @@ export class SessionDatabase {
             session.status,
             session.startedAt,
             session.stoppedAt || null,
+            session.abortedReason || null,
             session.proxymanBaseline ?? null,
             session.filterDomains ? JSON.stringify(session.filterDomains) : null,
             session.captureMode || null,
@@ -107,6 +109,68 @@ export class SessionDatabase {
             session.trackEventPaths ? JSON.stringify(session.trackEventPaths) : null,
         ]);
         stmt.free();
+    }
+
+    /**
+     * Mark a session as aborted with a reason. Sets stoppedAt to now()
+     * if not already set.
+     */
+    markAborted(sessionId: string, reason: string): void {
+        const db = this.getDb();
+        const stoppedAt = new Date().toISOString();
+        const stmt = db.prepare(
+            `UPDATE sessions SET status = 'aborted', abortedReason = ?, stoppedAt = COALESCE(stoppedAt, ?) WHERE id = ?`,
+        );
+        stmt.run([reason, stoppedAt, sessionId]);
+        stmt.free();
+    }
+
+    /**
+     * List sessions with status in ('recording','compiling').
+     */
+    listActiveSessions(): Session[] {
+        const db = this.getDb();
+        const stmt = db.prepare(
+            `SELECT * FROM sessions WHERE status IN ('recording','compiling') ORDER BY startedAt ASC`,
+        );
+        const results: Session[] = [];
+        while (stmt.step()) {
+            const row = stmt.getAsObject();
+            results.push(this.rowToSession(row));
+        }
+        stmt.free();
+        return results;
+    }
+
+    /** List all sessions (no status filter). Used by audit_state. */
+    listAllSessions(): Session[] {
+        const db = this.getDb();
+        const stmt = db.prepare(`SELECT * FROM sessions ORDER BY startedAt ASC`);
+        const results: Session[] = [];
+        while (stmt.step()) {
+            const row = stmt.getAsObject();
+            results.push(this.rowToSession(row));
+        }
+        stmt.free();
+        return results;
+    }
+
+    private rowToSession(row: Record<string, unknown>): Session {
+        return {
+            id: row.id as string,
+            appBundleId: row.appBundleId as string,
+            platform: row.platform as MobilePlatform,
+            status: row.status as SessionStatus,
+            startedAt: row.startedAt as string,
+            stoppedAt: (row.stoppedAt as string) || undefined,
+            abortedReason: (row.abortedReason as string) || undefined,
+            proxymanBaseline: row.proxymanBaseline != null ? (row.proxymanBaseline as number) : undefined,
+            filterDomains: row.filterDomains ? JSON.parse(row.filterDomains as string) : undefined,
+            captureMode: (row.captureMode as CaptureMode) || undefined,
+            pollingIntervalMs: row.pollingIntervalMs != null ? (row.pollingIntervalMs as number) : undefined,
+            settleTimeoutMs: row.settleTimeoutMs != null ? (row.settleTimeoutMs as number) : undefined,
+            trackEventPaths: row.trackEventPaths ? JSON.parse(row.trackEventPaths as string) : undefined,
+        };
     }
 
     /**
@@ -149,20 +213,7 @@ export class SessionDatabase {
         if (stmt.step()) {
             const row = stmt.getAsObject();
             stmt.free();
-            return {
-                id: row.id as string,
-                appBundleId: row.appBundleId as string,
-                platform: row.platform as MobilePlatform,
-                status: row.status as SessionStatus,
-                startedAt: row.startedAt as string,
-                stoppedAt: (row.stoppedAt as string) || undefined,
-                proxymanBaseline: row.proxymanBaseline != null ? (row.proxymanBaseline as number) : undefined,
-                filterDomains: row.filterDomains ? JSON.parse(row.filterDomains as string) : undefined,
-                captureMode: (row.captureMode as CaptureMode) || undefined,
-                pollingIntervalMs: row.pollingIntervalMs != null ? (row.pollingIntervalMs as number) : undefined,
-                settleTimeoutMs: row.settleTimeoutMs != null ? (row.settleTimeoutMs as number) : undefined,
-                trackEventPaths: row.trackEventPaths ? JSON.parse(row.trackEventPaths as string) : undefined,
-            };
+            return this.rowToSession(row);
         }
         stmt.free();
         return null;
