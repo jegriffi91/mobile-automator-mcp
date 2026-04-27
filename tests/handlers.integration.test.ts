@@ -844,4 +844,78 @@ describe('Handler Integration Tests', () => {
       await handleStopAndCompile({ sessionId: result.sessionId });
     });
   });
+
+  // ── Phase 1 Step 4: cleanup-on-failure regression tests ──
+  describe('cleanup accumulator (Phase 1)', () => {
+    it('handleStartRecording: poller failure rolls back driver registration and aborts session', async () => {
+      // Force startPolling to throw — exercises the rollback path on the
+      // poller cleanup action.
+      const origCreateTreeReader = mockDriverFns.createTreeReader;
+      mockDriverFns.createTreeReader = vi.fn(() => {
+        throw new Error('poller-startup-failed');
+      }) as never;
+
+      try {
+        await expect(
+          handleStartRecording({ appBundleId: 'com.test.app', platform: 'ios' }),
+        ).rejects.toThrow(/poller-startup-failed/);
+
+        // No session left in activeDrivers
+        expect(sessionManager.listActiveDrivers()).toEqual([]);
+        // No active poller
+        expect(sessionManager.listActivePollers()).toEqual([]);
+        // No live (non-aborted) recording sessions in DB
+        const active = sessionManager.listActiveSessions();
+        expect(active).toEqual([]);
+      } finally {
+        mockDriverFns.createTreeReader = origCreateTreeReader;
+      }
+    });
+
+    it('handleSetMockResponse: rollback on post-create failure deletes the new Proxyman rule', async () => {
+      const mockProxymanClient = {
+        isConnected: vi.fn().mockReturnValue(true),
+        toggleTool: vi.fn().mockResolvedValue(undefined),
+        createScriptingRule: vi.fn().mockResolvedValue('NEW-RULE-ID'),
+        deleteRule: vi.fn().mockResolvedValue(undefined),
+        listRules: vi.fn().mockResolvedValue([]),
+      };
+      const restore = _setProxymanMcpClientFactory(() => mockProxymanClient as never);
+
+      try {
+        const start = await handleStartRecording({
+          appBundleId: 'com.test.app',
+          platform: 'ios',
+        });
+
+        // Stub addSessionMock to throw so the rollback registered after
+        // createScriptingRule() runs.
+        const origAdd = sessionManager.addSessionMock.bind(sessionManager);
+        const spy = vi
+          .spyOn(sessionManager, 'addSessionMock')
+          .mockImplementation(() => {
+            throw new Error('ledger-write-failed');
+          });
+
+        await expect(
+          handleSetMockResponse({
+            sessionId: start.sessionId,
+            mock: {
+              matcher: { url: 'https://api.example.com/users' },
+              staticResponse: { status: 200, body: { ok: true } },
+            },
+          }),
+        ).rejects.toThrow(/ledger-write-failed/);
+
+        expect(mockProxymanClient.deleteRule).toHaveBeenCalledWith('NEW-RULE-ID', 'scripting');
+
+        spy.mockRestore();
+        // Restore so handleStopAndCompile can clean state
+        sessionManager.addSessionMock = origAdd as never;
+        await handleStopAndCompile({ sessionId: start.sessionId });
+      } finally {
+        _setProxymanMcpClientFactory(restore);
+      }
+    });
+  });
 });
