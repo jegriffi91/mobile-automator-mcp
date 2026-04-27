@@ -8,7 +8,7 @@
 
 // ----- Session -----
 
-export type SessionStatus = 'idle' | 'recording' | 'compiling' | 'done';
+export type SessionStatus = 'idle' | 'recording' | 'compiling' | 'done' | 'aborted';
 export type MobilePlatform = 'ios' | 'android';
 export type CaptureMode = 'event-triggered' | 'polling';
 
@@ -19,6 +19,8 @@ export interface Session {
     status: SessionStatus;
     startedAt: string;
     stoppedAt?: string;
+    /** Reason a session was force-cleaned or aborted (force_cleanup_session, timeout, etc). */
+    abortedReason?: string;
     /** Proxyman entry count at recording start — used to scope HAR export */
     proxymanBaseline?: number;
     /** Domain filter for Proxyman traffic isolation (e.g., ["localhost.proxyman.io:3031"]) */

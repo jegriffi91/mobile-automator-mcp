@@ -71,7 +71,7 @@ Verify it's running:
 
 ```bash
 curl http://localhost:3000/health
-# {"ok":true,"tools":18}
+# {"ok":true,"tools":34}
 ```
 
 Then call any tool via JSON-RPC:
@@ -83,7 +83,17 @@ curl -X POST http://localhost:3000/message \
 ```
 
 For a full tool reference, session lifecycle patterns, and common workflows see [`.github/skills/generate_mcp_curls/SKILL.md`](.github/skills/generate_mcp_curls/SKILL.md).  
-To regenerate boilerplate curl commands for all 18 tools: `npx tsx .github/skills/generate_mcp_curls/generate.ts`
+To regenerate boilerplate curl commands for all 34 tools: `npx tsx .github/skills/generate_mcp_curls/generate.ts`
+
+#### Phase-1 admin tools
+
+When something looks stuck, five admin tools provide visibility and recovery without restarting the server:
+
+- `audit_state` — single-shot snapshot of sessions, drivers, pollers, and Proxyman rules with an orphans report
+- `list_active_sessions` — read-only inventory with driver/poller liveness and mock counts
+- `list_active_mocks` — Proxyman rules tagged `mca:` plus drift between Proxyman and the local ledger
+- `force_cleanup_session` — destructive: stop poller/driver, delete tagged Proxyman rules, mark session aborted (never throws)
+- `force_cleanup_mocks` — destructive bulk delete of `mca:`-tagged Proxyman rules by scope (`all`, `session`, `standalone`)
 
 ### Option B — Register with an MCP Client (once org-approved)
 

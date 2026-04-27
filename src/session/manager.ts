@@ -18,13 +18,20 @@ import type { AutomationDriver } from '../maestro/driver.js';
 
 const VALID_TRANSITIONS: Record<SessionStatus, SessionStatus[]> = {
     idle: ['recording'],
-    recording: ['compiling'],
-    compiling: ['done'],
+    recording: ['compiling', 'aborted'],
+    compiling: ['done', 'aborted'],
     done: [],
+    // Aborted is terminal — same as 'done'.
+    aborted: [],
 };
 
 export class SessionManager {
     private db: SessionDatabase;
+
+    // ── Per-session driver / mock state, formerly module-level in handlers.ts ──
+    private activeDrivers: Map<string, AutomationDriver> = new Map();
+    private sessionMocks: Map<string, Map<string, string>> = new Map();
+    private standaloneMocks: Map<string, string> = new Map();
 
     constructor(db?: SessionDatabase) {
         this.db = db || new SessionDatabase();
@@ -251,5 +258,152 @@ export class SessionManager {
             this.activePollers.delete(sessionId);
             console.error(`[SessionManager] stopPolling: stopped passive capture for ${sessionId}`);
         }
+    }
+
+    /** List session IDs that currently have an active poller. */
+    listActivePollers(): string[] {
+        return [...this.activePollers.keys()];
+    }
+
+    // ── Active driver registry ──
+
+    setActiveDriver(sessionId: string, driver: AutomationDriver): void {
+        this.activeDrivers.set(sessionId, driver);
+    }
+
+    getActiveDriver(sessionId: string): AutomationDriver | undefined {
+        return this.activeDrivers.get(sessionId);
+    }
+
+    removeActiveDriver(sessionId: string): boolean {
+        return this.activeDrivers.delete(sessionId);
+    }
+
+    listActiveDrivers(): string[] {
+        return [...this.activeDrivers.keys()];
+    }
+
+    // ── Per-session mock ledger ──
+
+    addSessionMock(sessionId: string, mockId: string, ruleId: string): void {
+        let perSession = this.sessionMocks.get(sessionId);
+        if (!perSession) {
+            perSession = new Map();
+            this.sessionMocks.set(sessionId, perSession);
+        }
+        perSession.set(mockId, ruleId);
+    }
+
+    getSessionMockRule(sessionId: string, mockId: string): string | undefined {
+        return this.sessionMocks.get(sessionId)?.get(mockId);
+    }
+
+    removeSessionMock(sessionId: string, mockId: string): boolean {
+        const perSession = this.sessionMocks.get(sessionId);
+        if (!perSession) return false;
+        const removed = perSession.delete(mockId);
+        if (perSession.size === 0) this.sessionMocks.delete(sessionId);
+        return removed;
+    }
+
+    listSessionMocks(sessionId: string): { mockId: string; ruleId: string }[] {
+        const perSession = this.sessionMocks.get(sessionId);
+        if (!perSession) return [];
+        return [...perSession.entries()].map(([mockId, ruleId]) => ({ mockId, ruleId }));
+    }
+
+    clearSessionMocks(sessionId: string): void {
+        this.sessionMocks.delete(sessionId);
+    }
+
+    /** Session IDs that have at least one mock entry. */
+    listSessionMockSessionIds(): string[] {
+        return [...this.sessionMocks.keys()];
+    }
+
+    // ── Standalone mock ledger ──
+
+    addStandaloneMock(mockId: string, ruleId: string): void {
+        this.standaloneMocks.set(mockId, ruleId);
+    }
+
+    getStandaloneMockRule(mockId: string): string | undefined {
+        return this.standaloneMocks.get(mockId);
+    }
+
+    removeStandaloneMock(mockId: string): boolean {
+        return this.standaloneMocks.delete(mockId);
+    }
+
+    listStandaloneMocks(): { mockId: string; ruleId: string }[] {
+        return [...this.standaloneMocks.entries()].map(([mockId, ruleId]) => ({ mockId, ruleId }));
+    }
+
+    clearStandaloneMocks(): void {
+        this.standaloneMocks.clear();
+    }
+
+    standaloneMockCount(): number {
+        return this.standaloneMocks.size;
+    }
+
+    // ── Aborted-session helpers ──
+
+    listActiveSessions(): Session[] {
+        return this.db.listActiveSessions();
+    }
+
+    listAllSessions(): Session[] {
+        return this.db.listAllSessions();
+    }
+
+    /**
+     * Mark a session aborted with a reason. Idempotent — if the session is
+     * already terminal ('done' or 'aborted'), this is a no-op.
+     */
+    async markAborted(sessionId: string, reason: string): Promise<void> {
+        const session = this.db.getSession(sessionId);
+        if (!session) return;
+        if (session.status === 'done' || session.status === 'aborted') return;
+        this.db.markAborted(sessionId, reason);
+        console.error(`[SessionManager] markAborted: ${sessionId} → aborted (${reason})`);
+    }
+
+    /**
+     * Force-clean session-side state: stop poller, stop driver, remove from
+     * registries. Used by force_cleanup_session and orphan rollback paths.
+     * Never throws — failures are caught and surfaced via console.error.
+     */
+    async forceCleanup(
+        sessionId: string,
+        _reason: string,
+    ): Promise<{ pollerStopped: boolean; driverRemoved: boolean }> {
+        let pollerStopped = false;
+        let driverRemoved = false;
+
+        const inferrer = this.activePollers.get(sessionId);
+        if (inferrer) {
+            try {
+                inferrer.stop();
+                pollerStopped = true;
+            } catch (err) {
+                console.error(`[SessionManager] forceCleanup: poller stop failed for ${sessionId}`, err);
+            }
+            this.activePollers.delete(sessionId);
+        }
+
+        const driver = this.activeDrivers.get(sessionId);
+        if (driver) {
+            try {
+                await driver.stop();
+                driverRemoved = true;
+            } catch (err) {
+                console.error(`[SessionManager] forceCleanup: driver stop failed for ${sessionId}`, err);
+                driverRemoved = true; // we still removed the registration
+            }
+            this.activeDrivers.delete(sessionId);
+        }
+
+        return { pollerStopped, driverRemoved };
     }
 }

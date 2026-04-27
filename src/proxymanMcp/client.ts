@@ -124,24 +124,57 @@ export class ProxymanMcpClient {
      * Generic tool call returning the unwrapped text payload. Throws
      * ProxymanMcpError on tool error. Auto-reconnects once if the underlying
      * connection died.
+     *
+     * If `signal` is provided and aborts before/during the call, the local
+     * promise rejects immediately. The MCP SDK's stdio transport doesn't
+     * currently expose a per-call cancellation primitive, so an in-flight
+     * Proxyman tool call may continue server-side until it completes — but
+     * this side will no longer await it.
      */
-    async callTool(name: string, args: Record<string, unknown> = {}): Promise<string> {
+    async callTool(
+        name: string,
+        args: Record<string, unknown> = {},
+        signal?: AbortSignal,
+    ): Promise<string> {
         await this.connect();
         const client = this.client!;
-        let resp;
-        try {
-            resp = await client.callTool({ name, arguments: args });
-        } catch (err) {
-            // Transport-level failure — try one reconnect.
-            await this.close();
-            await this.connect();
-            resp = await this.client!.callTool({ name, arguments: args });
+        const doCall = async (): Promise<string> => {
+            let resp;
+            try {
+                resp = await client.callTool({ name, arguments: args });
+            } catch (err) {
+                // Transport-level failure — try one reconnect.
+                await this.close();
+                await this.connect();
+                resp = await this.client!.callTool({ name, arguments: args });
+            }
+            if (resp.isError) {
+                const text = extractText(resp);
+                throw new ProxymanMcpError(text, name);
+            }
+            return extractText(resp);
+        };
+
+        if (!signal) return doCall();
+        if (signal.aborted) {
+            throw new ProxymanMcpError(`callTool(${name}) aborted before sending`, name);
         }
-        if (resp.isError) {
-            const text = extractText(resp);
-            throw new ProxymanMcpError(text, name);
-        }
-        return extractText(resp);
+        return new Promise<string>((resolve, reject) => {
+            const onAbort = () => {
+                reject(new ProxymanMcpError(`callTool(${name}) aborted`, name));
+            };
+            signal.addEventListener('abort', onAbort, { once: true });
+            doCall().then(
+                (v) => {
+                    signal.removeEventListener('abort', onAbort);
+                    resolve(v);
+                },
+                (e) => {
+                    signal.removeEventListener('abort', onAbort);
+                    reject(e);
+                },
+            );
+        });
     }
 
     // ── Typed wrappers ──
@@ -190,6 +223,69 @@ export class ProxymanMcpClient {
     async listRules(ruleType: ProxymanRuleType | 'all' = 'all'): Promise<ProxymanRuleSummary[]> {
         const text = await this.callTool('list_rules', { rule_type: ruleType });
         return parseRuleList(text);
+    }
+
+    /**
+     * List rules whose `name` starts with the given tag prefix. Used by the
+     * admin tools to scope cleanup to rules this server installed (we tag
+     * them `mca:<sessionId>:...` and `mca:standalone:...`).
+     */
+    async listRulesByTagPrefix(
+        prefix: string,
+        ruleType: ProxymanRuleType | 'all' = 'scripting',
+    ): Promise<ProxymanRuleSummary[]> {
+        const all = await this.listRules(ruleType);
+        return all.filter((r) => r.name.startsWith(prefix));
+    }
+
+    /**
+     * Best-effort bulk delete by tag prefix. Continues on individual delete
+     * failures. Never throws — returns a structured report so callers
+     * (admin tools, force_cleanup_*) can surface partial success.
+     */
+    async deleteRulesByTagPrefix(
+        prefix: string,
+        ruleType: ProxymanRuleType | 'all' = 'scripting',
+    ): Promise<{ deleted: string[]; failed: { id: string; error: string }[] }> {
+        let rules: ProxymanRuleSummary[];
+        try {
+            rules = await this.listRulesByTagPrefix(prefix, ruleType);
+        } catch (err) {
+            return { deleted: [], failed: [{ id: '*list*', error: (err as Error).message }] };
+        }
+
+        const deleted: string[] = [];
+        const failed: { id: string; error: string }[] = [];
+        for (const rule of rules) {
+            const target: ProxymanRuleType =
+                ruleType === 'all' ? (rule.ruleType as ProxymanRuleType) : ruleType;
+            try {
+                await this.deleteRule(rule.id, target);
+                deleted.push(rule.id);
+            } catch (err) {
+                failed.push({ id: rule.id, error: (err as Error).message });
+            }
+        }
+        return { deleted, failed };
+    }
+
+    /**
+     * Quick reachability probe. Returns false (rather than throwing) when
+     * Proxyman MCP is unreachable or slow. Used by the admin tools to
+     * surface a clean `proxymanReachable: false` rather than crashing.
+     */
+    async healthCheck(timeoutMs = 2000): Promise<boolean> {
+        try {
+            await Promise.race([
+                this.getProxyStatus(),
+                new Promise<never>((_, reject) =>
+                    setTimeout(() => reject(new Error('healthCheck timeout')), timeoutMs).unref(),
+                ),
+            ]);
+            return true;
+        } catch {
+            return false;
+        }
     }
 }
 

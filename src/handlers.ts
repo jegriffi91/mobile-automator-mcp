@@ -15,6 +15,7 @@ import * as fs from 'fs/promises';
 import * as path from 'path';
 import * as os from 'os';
 import { sessionManager } from './session/index.js';
+import { runHandler } from './cleanup.js';
 import { DriverFactory, type AutomationDriver } from './maestro/driver.js';
 import { HierarchyParser } from './maestro/index.js';
 import { proxymanWrapper, PayloadValidator } from './proxyman/index.js';
@@ -152,24 +153,11 @@ function createPollingNotifier(): PollingNotifier | undefined {
     };
 }
 
-// ── Per-session driver instances ──
-const activeDrivers: Map<string, AutomationDriver> = new Map();
-
-// ── Per-session mock-rule ledger (sessionId → mockId → Proxyman rule ID) ──
-//
-// Backs handleSetMockResponse / handleClearMockResponses, plus session-end
-// cleanup in handleStopAndCompile. We treat Proxyman as the source of truth
-// (re-listing on cleanup so externally-deleted rules don't leak), but the
-// ledger gives us O(1) lookup by mockId for partial clears.
-const sessionMocks: Map<string, Map<string, string>> = new Map();
-
-// ── Standalone mock ledger (mockId → Proxyman rule ID) ──
-//
-// Tracks mocks installed without a sessionId. These persist until explicitly
-// cleared via clear_mock_responses({ mockId }) or { allStandalone: true }.
-// Useful for agents mocking outside any recording session — the original use
-// case was 30-min agent loops where session-driven cleanup didn't apply.
-const standaloneMocks: Map<string, string> = new Map();
+// Per-session driver registry, plus per-session and standalone mock ledgers,
+// now live on SessionManager (sessionManager.{setActiveDriver, addSessionMock,
+// addStandaloneMock, ...}). Centralising state on the manager makes cleanup
+// from runHandler-driven rollback paths and the new admin tools (Phase 1 step 6)
+// possible without re-exporting the maps.
 
 const STANDALONE_TAG_PREFIX = 'mca:standalone';
 
@@ -197,95 +185,115 @@ export async function handleStartRecording(
         `[MCP] start_recording_session: starting session ${sessionId} for ${input.appBundleId} on ${input.platform}`
     );
 
-    // Create driver with optional timeout overrides
-    const driver = await DriverFactory.create(input.timeouts);
+    return runHandler({ name: `start_recording_session(${sessionId})` }, async (cleanup) => {
+        // Create driver with optional timeout overrides
+        const driver = await DriverFactory.create(input.timeouts);
 
-    const validation = await driver.validateSimulator(input.platform);
-    if (!validation.booted) {
-        throw new Error(`No booted ${input.platform} simulator found. Please boot a device first.`);
-    }
+        const validation = await driver.validateSimulator(input.platform);
+        if (!validation.booted) {
+            throw new Error(`No booted ${input.platform} simulator found. Please boot a device first.`);
+        }
 
-    // Fast-fail if Java or Maestro isn't available
-    await driver.validateSetup();
+        // Fast-fail if Java or Maestro isn't available
+        await driver.validateSetup();
 
-    // Uninstall the stale Maestro driver AND wait for the simulator to release
-    // port 7001 — otherwise the first `maestro` command in this session can hit
-    // ConnectException because the previous run's XCTRunner is still draining.
-    await driver.ensureCleanDriverState(input.platform, validation.deviceId);
+        // Uninstall the stale Maestro driver AND wait for the simulator to release
+        // port 7001 — otherwise the first `maestro` command in this session can hit
+        // ConnectException because the previous run's XCTRunner is still draining.
+        await driver.ensureCleanDriverState(input.platform, validation.deviceId);
 
-    await sessionManager.create(
-        sessionId,
-        input.appBundleId,
-        input.platform,
-        input.filterDomains,
-        input.captureMode,
-        input.pollingIntervalMs,
-        input.settleTimeoutMs,
-        input.trackEventPaths,
-    );
+        await sessionManager.create(
+            sessionId,
+            input.appBundleId,
+            input.platform,
+            input.filterDomains,
+            input.captureMode,
+            input.pollingIntervalMs,
+            input.settleTimeoutMs,
+            input.trackEventPaths,
+        );
+        cleanup.add('mark session aborted', () =>
+            sessionManager.markAborted(sessionId, 'start_recording_session aborted'),
+        );
 
-    // Start driver and Proxyman baseline concurrently — baseline is non-critical
-    // and should not block Maestro startup even if Proxyman resolution is slow
-    let baselineCaptured = false;
-    const baselinePromise = proxymanWrapper.snapshotBaseline(input.filterDomains)
-        .then(async (baseline) => {
-            await sessionManager.updateBaseline(sessionId, baseline);
-            baselineCaptured = true;
-            return baseline;
-        })
-        .catch((error) => {
-            console.error('[MCP] start_recording_session: Proxyman baseline snapshot failed (Proxyman may not be running)', error);
-            return null; // Non-fatal: we'll still capture all traffic at compile time
+        // Start driver and Proxyman baseline concurrently — baseline is non-critical
+        // and should not block Maestro startup even if Proxyman resolution is slow
+        let baselineCaptured = false;
+        const baselinePromise = proxymanWrapper.snapshotBaseline(input.filterDomains)
+            .then(async (baseline) => {
+                await sessionManager.updateBaseline(sessionId, baseline);
+                baselineCaptured = true;
+                return baseline;
+            })
+            .catch((error) => {
+                console.error('[MCP] start_recording_session: Proxyman baseline snapshot failed (Proxyman may not be running)', error);
+                return null; // Non-fatal: we'll still capture all traffic at compile time
+            });
+        cleanup.add('await baseline promise', async () => {
+            await baselinePromise.catch(() => {});
         });
 
-    await driver.start(validation.deviceId);
-    const driverReady = true;
+        await driver.start(validation.deviceId);
+        const driverReady = true;
+        cleanup.add('stop driver', () => driver.stop().catch(() => {}));
 
-    // Await baseline result (likely already settled while driver was starting)
-    await baselinePromise;
+        // Await baseline result (likely already settled while driver was starting)
+        await baselinePromise;
 
-    activeDrivers.set(sessionId, driver);
+        sessionManager.setActiveDriver(sessionId, driver);
+        cleanup.add('remove from activeDrivers', () => {
+            sessionManager.removeActiveDriver(sessionId);
+        });
 
-    // Start polling — driver provides the hierarchy reader
-    const notifier = createPollingNotifier();
-    await sessionManager.startPolling(sessionId, input.platform, input.appBundleId, driver, notifier);
-    const pollerStarted = true;
+        // Start polling — driver provides the hierarchy reader
+        const notifier = createPollingNotifier();
+        await sessionManager.startPolling(sessionId, input.platform, input.appBundleId, driver, notifier);
+        const pollerStarted = true;
+        cleanup.add('stop poller', () => sessionManager.stopPolling(sessionId));
 
-    // Best-effort: ask Proxyman to enable SSL Proxying for each filterDomain so
-    // any later set_mock_response can transparently mock HTTPS traffic. This
-    // only matters when the user's app talks to HTTPS backends, but the cost
-    // when it doesn't is negligible. Skipped silently if Proxyman MCP isn't
-    // available — the rest of the session works without it.
-    if (input.filterDomains && input.filterDomains.length > 0) {
-        const proxymanClient = _proxymanClientFactory();
-        for (const domain of input.filterDomains) {
-            // Strip any port suffix — enable_ssl_proxying takes hosts only.
-            const hostOnly = domain.split(':')[0];
-            try {
-                await proxymanClient.enableSslProxying(hostOnly);
-            } catch (err) {
-                console.error(
-                    `[MCP] start_recording_session: enable_ssl_proxying("${hostOnly}") failed (non-fatal)`,
-                    err,
-                );
-                break; // Don't keep trying if Proxyman MCP isn't reachable
+        // Best-effort: ask Proxyman to enable SSL Proxying for each filterDomain so
+        // any later set_mock_response can transparently mock HTTPS traffic. This
+        // only matters when the user's app talks to HTTPS backends, but the cost
+        // when it doesn't is negligible. Skipped silently if Proxyman MCP isn't
+        // available — the rest of the session works without it.
+        if (input.filterDomains && input.filterDomains.length > 0) {
+            const proxymanClient = _proxymanClientFactory();
+            for (const domain of input.filterDomains) {
+                // Strip any port suffix — enable_ssl_proxying takes hosts only.
+                const hostOnly = domain.split(':')[0];
+                try {
+                    await proxymanClient.enableSslProxying(hostOnly);
+                } catch (err) {
+                    console.error(
+                        `[MCP] start_recording_session: enable_ssl_proxying("${hostOnly}") failed (non-fatal)`,
+                        err,
+                    );
+                    break; // Don't keep trying if Proxyman MCP isn't reachable
+                }
             }
         }
-    }
 
-    const readinessMsg = baselineCaptured
-        ? 'All systems ready'
-        : 'Ready (Proxyman baseline not available — network correlation may be less precise)';
+        const readinessMsg = baselineCaptured
+            ? 'All systems ready'
+            : 'Ready (Proxyman baseline not available — network correlation may be less precise)';
 
-    return {
-        sessionId,
-        message: `Recording session ${sessionId} started for ${input.appBundleId}. Device ID: ${validation.deviceId ?? 'unknown'}. ${readinessMsg}. Use this session ID for subsequent tool calls.`,
-        readiness: {
-            driverReady,
-            baselineCaptured,
-            pollerStarted,
-        },
-    };
+        // Success: live session keeps its driver/poller/baseline/session row.
+        cleanup.forget('stop poller');
+        cleanup.forget('remove from activeDrivers');
+        cleanup.forget('stop driver');
+        cleanup.forget('await baseline promise');
+        cleanup.forget('mark session aborted');
+
+        return {
+            sessionId,
+            message: `Recording session ${sessionId} started for ${input.appBundleId}. Device ID: ${validation.deviceId ?? 'unknown'}. ${readinessMsg}. Use this session ID for subsequent tool calls.`,
+            readiness: {
+                driverReady,
+                baselineCaptured,
+                pollerStarted,
+            },
+        };
+    });
 }
 
 // ---- stop_and_compile_test ----
@@ -540,7 +548,7 @@ export async function handleStopAndCompile(
         await sessionManager.stopPolling(input.sessionId);
 
         // Stop and clean up the automation driver
-        const driver = activeDrivers.get(input.sessionId);
+        const driver = sessionManager.getActiveDriver(input.sessionId);
         if (driver) {
             try {
                 await driver.uninstallDriver(session.platform, undefined);
@@ -548,7 +556,7 @@ export async function handleStopAndCompile(
             } catch (err) {
                 console.error('[MCP] stop_and_compile_test: driver cleanup failed (non-fatal)', err);
             }
-            activeDrivers.delete(input.sessionId);
+            sessionManager.removeActiveDriver(input.sessionId);
         }
 
         // Bulk-delete any Proxyman scripting rules this session installed.
@@ -585,7 +593,7 @@ export async function handleGetUIHierarchy(
     let driver: AutomationDriver;
 
     if (input.sessionId) {
-        const sessionDriver = activeDrivers.get(input.sessionId);
+        const sessionDriver = sessionManager.getActiveDriver(input.sessionId);
         if (!sessionDriver) {
             throw new Error(
                 `No active driver for session ${input.sessionId}. ` +
@@ -701,7 +709,7 @@ export async function handleExecuteUIAction(
     console.error(`[MCP] execute_ui_action: ${input.action} on "${targetDesc}"`);
 
     // Get the driver for this session
-    const driver = activeDrivers.get(input.sessionId);
+    const driver = sessionManager.getActiveDriver(input.sessionId);
     if (!driver) {
         throw new Error(`No active driver for session ${input.sessionId}. Was start_recording_session called?`);
     }
@@ -1505,7 +1513,7 @@ export async function handleRunTest(
     console.error(`[MCP] run_test: running ${input.yamlPath}`);
 
     // Fail fast if a recording session owns the XCTest driver on port 7001.
-    assertNoActiveSessions(activeDrivers, 'run_test');
+    assertNoActiveSessions(sessionManager.listActiveDrivers(), 'run_test');
 
     // Create a CLI-only driver for test execution (no daemon needed). Forward
     // driverCooldownMs so callers can tune the port-7001 TIME_WAIT drain when
@@ -1840,7 +1848,7 @@ export async function handleListFlows(input: ListFlowsInput): Promise<ListFlowsO
 
 export async function handleRunFlow(input: RunFlowInput): Promise<RunFlowOutput> {
     // Fail fast (with the run_flow name) before delegating into run_test.
-    assertNoActiveSessions(activeDrivers, 'run_flow');
+    assertNoActiveSessions(sessionManager.listActiveDrivers(), 'run_flow');
 
     const flowsDir = resolveFlowsDir(input.flowsDir);
     console.error(`[MCP] run_flow: resolving "${input.name}" in ${flowsDir}`);
@@ -1877,51 +1885,69 @@ export async function handleRunFlow(input: RunFlowInput): Promise<RunFlowOutput>
 export async function handleBuildApp(input: BuildAppInput): Promise<BuildAppOutput> {
     console.error(`[MCP] build_app: platform=${input.platform}`);
 
-    if (input.platform === 'ios') {
-        if (!input.scheme) {
-            throw new Error('iOS build requires "scheme"');
-        }
-        if (!input.workspacePath && !input.projectPath) {
-            throw new Error('iOS build requires "workspacePath" or "projectPath"');
-        }
-        const result = await buildIosApp({
-            workspacePath: input.workspacePath,
-            projectPath: input.projectPath,
-            scheme: input.scheme,
-            configuration: input.configuration,
-            destination: input.destination,
-            derivedDataPath: input.derivedDataPath,
-            timeoutMs: input.timeoutMs,
-        });
-        return {
-            passed: result.passed,
-            platform: 'ios',
-            appPath: result.appPath,
-            bundleId: result.bundleId,
-            derivedDataPath: result.derivedDataPath,
-            durationMs: result.durationMs,
-            output: result.output,
-        };
-    }
+    // Decision A (Phase 1 plan): on a runHandler timeout/abort, do NOT delete
+    // derivedDataPath. Partial xcodebuild trees are useful for debugging the
+    // failure, and a wholesale rm -rf on someone's build artifacts is a
+    // bigger blast radius than the leak it would prevent.
 
-    if (!input.projectPath) {
-        throw new Error('Android build requires "projectPath" (Gradle project root)');
-    }
-    const result = await buildAndroidApp({
-        projectPath: input.projectPath,
-        module: input.module,
-        variant: input.variant,
-        timeoutMs: input.timeoutMs,
-    });
-    return {
-        passed: result.passed,
-        platform: 'android',
-        appPath: result.apkPath,
-        module: result.module,
-        variant: result.variant,
-        durationMs: result.durationMs,
-        output: result.output,
-    };
+    // Layer the runHandler timeout *5s above* the inner build timeout so the
+    // inner timeout fires first when both are armed; the outer is only the
+    // safety net for genuinely hung child processes.
+    const innerTimeout = input.timeoutMs;
+    const outerTimeout = innerTimeout != null ? innerTimeout + 5_000 : undefined;
+
+    return runHandler(
+        { name: `build_app(${input.platform})`, timeoutMs: outerTimeout },
+        async (cleanup) => {
+            if (input.platform === 'ios') {
+                if (!input.scheme) {
+                    throw new Error('iOS build requires "scheme"');
+                }
+                if (!input.workspacePath && !input.projectPath) {
+                    throw new Error('iOS build requires "workspacePath" or "projectPath"');
+                }
+                const result = await buildIosApp({
+                    workspacePath: input.workspacePath,
+                    projectPath: input.projectPath,
+                    scheme: input.scheme,
+                    configuration: input.configuration,
+                    destination: input.destination,
+                    derivedDataPath: input.derivedDataPath,
+                    timeoutMs: innerTimeout,
+                    signal: cleanup.signal,
+                });
+                return {
+                    passed: result.passed,
+                    platform: 'ios' as const,
+                    appPath: result.appPath,
+                    bundleId: result.bundleId,
+                    derivedDataPath: result.derivedDataPath,
+                    durationMs: result.durationMs,
+                    output: result.output,
+                };
+            }
+
+            if (!input.projectPath) {
+                throw new Error('Android build requires "projectPath" (Gradle project root)');
+            }
+            const result = await buildAndroidApp({
+                projectPath: input.projectPath,
+                module: input.module,
+                variant: input.variant,
+                timeoutMs: innerTimeout,
+                signal: cleanup.signal,
+            });
+            return {
+                passed: result.passed,
+                platform: 'android' as const,
+                appPath: result.apkPath,
+                module: result.module,
+                variant: result.variant,
+                durationMs: result.durationMs,
+                output: result.output,
+            };
+        },
+    );
 }
 
 // ---- install_app ----
@@ -2236,69 +2262,81 @@ export async function handleSetMockResponse(
 
     const client = _proxymanClientFactory();
 
-    // Defensive: ensure the Scripting tool master toggle is on. Otherwise the
-    // rule installs successfully but no-ops on traffic — exact behavior we
-    // chased down in the spike.
-    try {
-        await client.toggleTool('scripting', true);
-    } catch (err) {
-        // Non-fatal: surface the full Proxyman error if the next step fails too.
-        console.error('[MCP] set_mock_response: toggle_tool(scripting,on) failed (non-fatal):', err);
-    }
+    return runHandler({ name: `set_mock_response(${mockId})` }, async (cleanup) => {
+        // Defensive: ensure the Scripting tool master toggle is on. Otherwise the
+        // rule installs successfully but no-ops on traffic — exact behavior we
+        // chased down in the spike.
+        try {
+            await client.toggleTool('scripting', true);
+        } catch (err) {
+            // Non-fatal: surface the full Proxyman error if the next step fails too.
+            console.error('[MCP] set_mock_response: toggle_tool(scripting,on) failed (non-fatal):', err);
+        }
 
-    let proxymanRuleId: string;
-    try {
-        proxymanRuleId = await client.createScriptingRule({
-            name: ruleName,
-            url,
-            scriptContent,
-            method: input.mock.matcher.method,
-            enableRequest: false,
-            enableResponse: true,
-            graphqlQueryName: input.mock.matcher.graphqlQueryName,
+        let proxymanRuleId: string;
+        try {
+            proxymanRuleId = await client.createScriptingRule({
+                name: ruleName,
+                url,
+                scriptContent,
+                method: input.mock.matcher.method,
+                enableRequest: false,
+                enableResponse: true,
+                graphqlQueryName: input.mock.matcher.graphqlQueryName,
+            });
+        } catch (err) {
+            if (err instanceof ProxymanMcpError) {
+                throw new Error(
+                    `Proxyman MCP rejected the rule: ${err.message}. ` +
+                    `Is Proxyman running with MCP enabled (Settings → MCP)?`,
+                );
+            }
+            throw err;
+        }
+
+        // Roll back the freshly-created Proxyman rule if any subsequent step
+        // (ledger update, response shaping) throws. forget()'d on success.
+        cleanup.add('delete proxyman rule on rollback', async () => {
+            try {
+                await client.deleteRule(proxymanRuleId, 'scripting');
+            } catch (err) {
+                console.error(`[MCP] set_mock_response rollback: deleteRule(${proxymanRuleId}) failed`, err);
+            }
         });
-    } catch (err) {
-        if (err instanceof ProxymanMcpError) {
-            throw new Error(
-                `Proxyman MCP rejected the rule: ${err.message}. ` +
-                `Is Proxyman running with MCP enabled (Settings → MCP)?`,
-            );
-        }
-        throw err;
-    }
 
-    if (isSessionScoped) {
-        let perSession = sessionMocks.get(input.sessionId!);
-        if (!perSession) {
-            perSession = new Map();
-            sessionMocks.set(input.sessionId!, perSession);
+        let result: SetMockResponseOutput;
+        if (isSessionScoped) {
+            sessionManager.addSessionMock(input.sessionId!, mockId, proxymanRuleId);
+            const totalSessionMocks = sessionManager.listSessionMocks(input.sessionId!).length;
+            console.error(
+                `[MCP] set_mock_response: session=${input.sessionId} mockId=${mockId} ruleId=${proxymanRuleId} url="${url}" ` +
+                `mode=${input.mock.staticResponse ? 'static' : 'jsonPatch'}`,
+            );
+            result = {
+                mockId,
+                proxymanRuleId,
+                ruleName,
+                scope: 'session',
+                totalSessionMocks,
+            };
+        } else {
+            sessionManager.addStandaloneMock(mockId, proxymanRuleId);
+            console.error(
+                `[MCP] set_mock_response: standalone mockId=${mockId} ruleId=${proxymanRuleId} url="${url}" ` +
+                `mode=${input.mock.staticResponse ? 'static' : 'jsonPatch'}`,
+            );
+            result = {
+                mockId,
+                proxymanRuleId,
+                ruleName,
+                scope: 'standalone',
+                totalStandaloneMocks: sessionManager.standaloneMockCount(),
+            };
         }
-        perSession.set(mockId, proxymanRuleId);
-        console.error(
-            `[MCP] set_mock_response: session=${input.sessionId} mockId=${mockId} ruleId=${proxymanRuleId} url="${url}" ` +
-            `mode=${input.mock.staticResponse ? 'static' : 'jsonPatch'}`,
-        );
-        return {
-            mockId,
-            proxymanRuleId,
-            ruleName,
-            scope: 'session',
-            totalSessionMocks: perSession.size,
-        };
-    } else {
-        standaloneMocks.set(mockId, proxymanRuleId);
-        console.error(
-            `[MCP] set_mock_response: standalone mockId=${mockId} ruleId=${proxymanRuleId} url="${url}" ` +
-            `mode=${input.mock.staticResponse ? 'static' : 'jsonPatch'}`,
-        );
-        return {
-            mockId,
-            proxymanRuleId,
-            ruleName,
-            scope: 'standalone',
-            totalStandaloneMocks: standaloneMocks.size,
-        };
-    }
+
+        cleanup.forget('delete proxyman rule on rollback');
+        return result;
+    });
 }
 
 // ---- clear_mock_responses (Proxyman MCP gateway) ----
@@ -2310,79 +2348,81 @@ export async function handleSetMockResponse(
 export async function handleClearMockResponses(
     input: ClearMockResponsesInput,
 ): Promise<ClearMockResponsesOutput> {
-    const client = _proxymanClientFactory();
+    return runHandler({ name: 'clear_mock_responses' }, async () => {
+        const client = _proxymanClientFactory();
 
-    // ── Session scope ──
-    if (input.sessionId) {
-        const perSession = sessionMocks.get(input.sessionId);
-        if (!perSession || perSession.size === 0) {
-            return { removed: 0, remaining: 0, scope: 'session' };
+        // ── Session scope ──
+        if (input.sessionId) {
+            const entries = sessionManager.listSessionMocks(input.sessionId);
+            if (entries.length === 0) {
+                return { removed: 0, remaining: 0, scope: 'session' as const };
+            }
+
+            let removed = 0;
+            if (input.mockId) {
+                const ruleId = sessionManager.getSessionMockRule(input.sessionId, input.mockId);
+                if (ruleId) {
+                    try {
+                        await client.deleteRule(ruleId, 'scripting');
+                        // Only drop the ledger entry on a confirmed delete — keeps
+                        // local truth aligned with Proxyman so retries are useful.
+                        sessionManager.removeSessionMock(input.sessionId, input.mockId);
+                        removed = 1;
+                    } catch (err) {
+                        console.error(`[MCP] clear_mock_responses: delete failed for rule ${ruleId} (ledger preserved for retry)`, err);
+                    }
+                }
+            } else {
+                for (const { mockId, ruleId } of entries) {
+                    try {
+                        await client.deleteRule(ruleId, 'scripting');
+                        sessionManager.removeSessionMock(input.sessionId, mockId);
+                        removed++;
+                    } catch (err) {
+                        console.error(`[MCP] clear_mock_responses: delete failed for rule ${ruleId} (ledger preserved for retry)`, err);
+                    }
+                }
+            }
+
+            const remaining = sessionManager.listSessionMocks(input.sessionId).length;
+            console.error(
+                `[MCP] clear_mock_responses: session=${input.sessionId} removed=${removed} remaining=${remaining}`,
+            );
+            return { removed, remaining, scope: 'session' as const };
         }
 
-        let removed = 0;
-        if (input.mockId) {
-            const ruleId = perSession.get(input.mockId);
-            if (ruleId) {
+        // ── Standalone all ──
+        if (input.allStandalone) {
+            let removed = 0;
+            for (const { mockId, ruleId } of sessionManager.listStandaloneMocks()) {
                 try {
                     await client.deleteRule(ruleId, 'scripting');
-                    removed = 1;
-                } catch (err) {
-                    console.error(`[MCP] clear_mock_responses: delete failed for rule ${ruleId} (continuing)`, err);
-                }
-                perSession.delete(input.mockId);
-            }
-        } else {
-            for (const [mockId, ruleId] of perSession.entries()) {
-                try {
-                    await client.deleteRule(ruleId, 'scripting');
+                    sessionManager.removeStandaloneMock(mockId);
                     removed++;
                 } catch (err) {
-                    console.error(`[MCP] clear_mock_responses: delete failed for rule ${ruleId} (continuing)`, err);
+                    console.error(`[MCP] clear_mock_responses: delete failed for rule ${ruleId} (ledger preserved for retry)`, err);
                 }
-                perSession.delete(mockId);
             }
+            console.error(`[MCP] clear_mock_responses: cleared ${removed} standalone mocks`);
+            return { removed, remaining: sessionManager.standaloneMockCount(), scope: 'standalone-all' as const };
         }
 
-        if (perSession.size === 0) sessionMocks.delete(input.sessionId);
-        console.error(
-            `[MCP] clear_mock_responses: session=${input.sessionId} removed=${removed} remaining=${perSession.size}`,
-        );
-        return { removed, remaining: perSession.size, scope: 'session' };
-    }
-
-    // ── Standalone all ──
-    if (input.allStandalone) {
+        // ── Standalone one (mockId only) ──
+        const ruleId = sessionManager.getStandaloneMockRule(input.mockId!);
+        if (!ruleId) {
+            return { removed: 0, remaining: sessionManager.standaloneMockCount(), scope: 'standalone-one' as const };
+        }
         let removed = 0;
-        for (const [mockId, ruleId] of standaloneMocks.entries()) {
-            try {
-                await client.deleteRule(ruleId, 'scripting');
-                removed++;
-            } catch (err) {
-                console.error(`[MCP] clear_mock_responses: delete failed for rule ${ruleId} (continuing)`, err);
-            }
-            standaloneMocks.delete(mockId);
+        try {
+            await client.deleteRule(ruleId, 'scripting');
+            sessionManager.removeStandaloneMock(input.mockId!);
+            removed = 1;
+        } catch (err) {
+            console.error(`[MCP] clear_mock_responses: delete failed for rule ${ruleId} (ledger preserved for retry)`, err);
         }
-        console.error(`[MCP] clear_mock_responses: cleared ${removed} standalone mocks`);
-        return { removed, remaining: standaloneMocks.size, scope: 'standalone-all' };
-    }
-
-    // ── Standalone one (mockId only) ──
-    // Schema-validated: at least one of sessionId / mockId / allStandalone is set.
-    // We've eliminated sessionId and allStandalone above, so mockId must be present.
-    const ruleId = standaloneMocks.get(input.mockId!);
-    if (!ruleId) {
-        return { removed: 0, remaining: standaloneMocks.size, scope: 'standalone-one' };
-    }
-    let removed = 0;
-    try {
-        await client.deleteRule(ruleId, 'scripting');
-        removed = 1;
-    } catch (err) {
-        console.error(`[MCP] clear_mock_responses: delete failed for rule ${ruleId} (continuing)`, err);
-    }
-    standaloneMocks.delete(input.mockId!);
-    console.error(`[MCP] clear_mock_responses: standalone mockId=${input.mockId} removed=${removed}`);
-    return { removed, remaining: standaloneMocks.size, scope: 'standalone-one' };
+        console.error(`[MCP] clear_mock_responses: standalone mockId=${input.mockId} removed=${removed}`);
+        return { removed, remaining: sessionManager.standaloneMockCount(), scope: 'standalone-one' as const };
+    });
 }
 
 /**
@@ -2392,41 +2432,55 @@ export async function handleClearMockResponses(
  * mid-session).
  */
 async function cleanupProxymanRulesForSession(sessionId: string): Promise<void> {
-    const ledgerEntry = sessionMocks.get(sessionId);
-    if (!ledgerEntry || ledgerEntry.size === 0) return;
+    const ledgerEntries = sessionManager.listSessionMocks(sessionId);
+    if (ledgerEntries.length === 0) return;
 
     const client = _proxymanClientFactory();
     if (!client.isConnected()) {
         // Connection was never established this session — nothing to clean up
         // remotely. Still drop the local ledger.
-        sessionMocks.delete(sessionId);
+        sessionManager.clearSessionMocks(sessionId);
         return;
     }
 
-    let toDelete: string[] = [];
-    try {
-        const rules = await client.listRules('scripting');
-        toDelete = rules.filter((r) => isOurRuleForSession(r.name, sessionId)).map((r) => r.id);
-    } catch (err) {
-        // Fall back to the local ledger if Proxyman is unreachable.
-        console.error('[MCP] cleanupProxymanRulesForSession: list_rules failed, falling back to ledger', err);
-        toDelete = [...ledgerEntry.values()];
-    }
-
-    for (const id of toDelete) {
-        try {
-            await client.deleteRule(id, 'scripting');
-        } catch (err) {
-            console.error(`[MCP] cleanupProxymanRulesForSession: delete ${id} failed (continuing)`, err);
+    // Tag-prefix delete is the source of truth — picks up any rules created
+    // outside this ledger (e.g. via direct Proxyman API, or after a previous
+    // crash). Falls back to the ledger if list_rules fails.
+    const prefix = `mca:${sessionId}:`;
+    const result = await client.deleteRulesByTagPrefix(prefix, 'scripting');
+    if (result.failed.some((f) => f.id === '*list*')) {
+        console.error(
+            `[MCP] cleanupProxymanRulesForSession: list_rules failed, falling back to ledger`,
+            result.failed,
+        );
+        for (const { ruleId } of ledgerEntries) {
+            try {
+                await client.deleteRule(ruleId, 'scripting');
+            } catch (err) {
+                console.error(
+                    `[MCP] cleanupProxymanRulesForSession: ledger-fallback delete ${ruleId} failed (continuing)`,
+                    err,
+                );
+            }
+        }
+    } else {
+        if (result.failed.length > 0) {
+            console.error(
+                `[MCP] cleanupProxymanRulesForSession: ${result.failed.length} rule delete(s) failed (continuing)`,
+                result.failed,
+            );
         }
     }
-    sessionMocks.delete(sessionId);
+    sessionManager.clearSessionMocks(sessionId);
 
-    if (toDelete.length > 0) {
+    if (result.deleted.length > 0) {
         console.error(
-            `[MCP] cleanupProxymanRulesForSession: cleaned ${toDelete.length} rule(s) for session ${sessionId}`,
+            `[MCP] cleanupProxymanRulesForSession: cleaned ${result.deleted.length} rule(s) for session ${sessionId}`,
         );
     }
+    // Reference isOurRuleForSession to keep the helper alive for any future
+    // ledger-only diagnostic paths; the prefix delete already filters by name.
+    void isOurRuleForSession;
 }
 
 // ---- run_feature_test ----

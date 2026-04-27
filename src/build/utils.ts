@@ -4,10 +4,74 @@
 
 import * as fs from 'fs/promises';
 import * as path from 'path';
-import { execFile } from 'child_process';
+import { execFile, type ExecFileOptions } from 'child_process';
 import { promisify } from 'util';
 
 const execFileAsync = promisify(execFile);
+
+/**
+ * Run execFile with optional AbortSignal support.
+ *
+ * On abort: send SIGTERM, then SIGKILL after 5s if still alive. We don't use
+ * `detached: true` / process-group kill — that's a behavioral change to spawn
+ * semantics that could regress in subtle ways (orphaned children, terminal
+ * control, etc). Long-running tools like xcodebuild are well-behaved enough
+ * that SIGTERM-then-SIGKILL on the leader process suffices in practice.
+ */
+export async function execFileWithAbort(
+    file: string,
+    args: string[],
+    options: ExecFileOptions & { signal?: AbortSignal },
+): Promise<{ stdout: string; stderr: string }> {
+    const { signal, ...rest } = options;
+    return new Promise((resolve, reject) => {
+        const child = execFile(file, args, rest, (error, stdout, stderr) => {
+            if (signal) {
+                signal.removeEventListener('abort', onAbort);
+            }
+            if (killTimer) clearTimeout(killTimer);
+            if (error) {
+                const e = error as NodeJS.ErrnoException & {
+                    stdout?: string;
+                    stderr?: string;
+                };
+                e.stdout = typeof stdout === 'string' ? stdout : stdout?.toString() ?? '';
+                e.stderr = typeof stderr === 'string' ? stderr : stderr?.toString() ?? '';
+                reject(e);
+                return;
+            }
+            resolve({
+                stdout: typeof stdout === 'string' ? stdout : stdout.toString(),
+                stderr: typeof stderr === 'string' ? stderr : stderr.toString(),
+            });
+        });
+
+        let killTimer: NodeJS.Timeout | undefined;
+        const onAbort = () => {
+            try {
+                child.kill('SIGTERM');
+            } catch {
+                // already exited
+            }
+            killTimer = setTimeout(() => {
+                try {
+                    child.kill('SIGKILL');
+                } catch {
+                    // gone
+                }
+            }, 5000);
+            if (killTimer.unref) killTimer.unref();
+        };
+
+        if (signal) {
+            if (signal.aborted) {
+                onAbort();
+            } else {
+                signal.addEventListener('abort', onAbort, { once: true });
+            }
+        }
+    });
+}
 
 /** Find all .app bundles directly inside `dir` (non-recursive). */
 export async function findAppBundles(dir: string): Promise<string[]> {

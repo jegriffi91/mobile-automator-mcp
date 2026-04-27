@@ -37,6 +37,14 @@ import {
   SetMockResponseOutputSchema,
   ClearMockResponsesInputSchema,
   ClearMockResponsesOutputSchema,
+  ListActiveSessionsOutputSchema,
+  ListActiveMocksInputSchema,
+  ListActiveMocksOutputSchema,
+  ForceCleanupSessionInputSchema,
+  ForceCleanupSessionOutputSchema,
+  ForceCleanupMocksInputSchema,
+  ForceCleanupMocksOutputSchema,
+  AuditStateOutputSchema,
 } from './schemas.js';
 
 describe('Schema Conformance', () => {
@@ -982,6 +990,149 @@ describe('Schema Conformance', () => {
     it('output accepts standalone-all scope', () => {
       expect(
         ClearMockResponsesOutputSchema.safeParse({ removed: 5, remaining: 0, scope: 'standalone-all' }).success,
+      ).toBe(true);
+    });
+  });
+
+  // ── Phase 1 admin tools ──────────────────────────────────────────────────
+  describe('Admin tool schemas (Phase 1)', () => {
+    it('ListActiveSessionsOutputSchema accepts a populated inventory', () => {
+      const result = ListActiveSessionsOutputSchema.safeParse({
+        sessions: [
+          {
+            sessionId: 's-1',
+            appBundleId: 'com.x',
+            platform: 'ios',
+            status: 'recording',
+            startedAt: '2026-04-27T00:00:00Z',
+            driverActive: true,
+            pollerActive: true,
+            pollerHealth: { pollCount: 10, successCount: 9, errorCount: 1, lastPollAt: '2026-04-27T00:00:05Z' },
+            mockCount: 2,
+          },
+          {
+            sessionId: 's-2',
+            appBundleId: 'com.y',
+            platform: 'android',
+            status: 'aborted',
+            startedAt: '2026-04-27T00:00:00Z',
+            stoppedAt: '2026-04-27T00:01:00Z',
+            abortedReason: 'manual cleanup',
+            driverActive: false,
+            pollerActive: false,
+            pollerHealth: null,
+            mockCount: 0,
+          },
+        ],
+        totalSessions: 2,
+        totalActiveDrivers: 1,
+        totalActivePollers: 1,
+      });
+      expect(result.success).toBe(true);
+    });
+
+    it('ListActiveMocksInputSchema accepts empty input and a sessionId filter', () => {
+      expect(ListActiveMocksInputSchema.safeParse({}).success).toBe(true);
+      expect(ListActiveMocksInputSchema.safeParse({ sessionId: 'sess-1' }).success).toBe(true);
+    });
+
+    it('ListActiveMocksOutputSchema accepts a drift-detected response', () => {
+      const result = ListActiveMocksOutputSchema.safeParse({
+        proxymanReachable: true,
+        rules: [
+          {
+            ruleId: 'A',
+            name: 'mca:s-1:m1',
+            url: '*',
+            enabled: true,
+            scope: 'session',
+            sessionId: 's-1',
+            mockId: 'm1',
+            inLocalLedger: true,
+          },
+          {
+            ruleId: 'B',
+            name: 'mca:standalone:m2',
+            url: '*',
+            enabled: true,
+            scope: 'standalone',
+            mockId: 'm2',
+            inLocalLedger: false,
+          },
+          {
+            ruleId: 'C',
+            name: 'OtherToolRule',
+            url: '*',
+            enabled: true,
+            scope: 'unknown',
+            inLocalLedger: false,
+          },
+        ],
+        drift: { rulesNotInLedger: ['B', 'C'], ledgerNotInProxyman: [] },
+      });
+      expect(result.success).toBe(true);
+    });
+
+    it('ForceCleanupSessionInputSchema applies the default reason', () => {
+      const result = ForceCleanupSessionInputSchema.safeParse({ sessionId: 'x' });
+      expect(result.success).toBe(true);
+      if (result.success) expect(result.data.reason).toBe('manual force-cleanup');
+    });
+
+    it('ForceCleanupSessionOutputSchema accepts a success result', () => {
+      expect(
+        ForceCleanupSessionOutputSchema.safeParse({
+          sessionId: 's-1',
+          pollerStopped: true,
+          driverRemoved: true,
+          proxymanRulesDeleted: 3,
+          proxymanReachable: true,
+          sessionMarkedAborted: true,
+          errors: [],
+        }).success,
+      ).toBe(true);
+    });
+
+    it('ForceCleanupMocksInputSchema rejects scope=session without sessionId', () => {
+      expect(ForceCleanupMocksInputSchema.safeParse({ scope: 'session' }).success).toBe(false);
+      expect(
+        ForceCleanupMocksInputSchema.safeParse({ scope: 'session', sessionId: 's' }).success,
+      ).toBe(true);
+      expect(ForceCleanupMocksInputSchema.safeParse({ scope: 'all' }).success).toBe(true);
+      expect(ForceCleanupMocksInputSchema.safeParse({ scope: 'standalone' }).success).toBe(true);
+    });
+
+    it('ForceCleanupMocksOutputSchema accepts a partial-failure result', () => {
+      expect(
+        ForceCleanupMocksOutputSchema.safeParse({
+          scope: 'all',
+          proxymanReachable: true,
+          rulesDeleted: 2,
+          ledgerEntriesCleared: 4,
+          errors: ['deleteRule(R3): denied'],
+        }).success,
+      ).toBe(true);
+    });
+
+    it('AuditStateOutputSchema accepts a full snapshot', () => {
+      expect(
+        AuditStateOutputSchema.safeParse({
+          generatedAt: '2026-04-27T00:00:00Z',
+          sessions: { total: 2, byStatus: { recording: 1, done: 1 } },
+          drivers: { active: 1, sessionIds: ['s-1'] },
+          pollers: { active: 1, sessionIds: ['s-1'] },
+          proxyman: {
+            reachable: true,
+            totalRules: 5,
+            mcaTaggedRules: 3,
+            rulesByTagPrefix: { 'mca:s-1:': 2, 'mca:standalone': 1 },
+          },
+          orphans: {
+            proxymanRulesWithoutSession: ['ORPHAN-1'],
+            sessionsWithoutDriver: [],
+            pollersWithoutSession: [],
+          },
+        }).success,
       ).toBe(true);
     });
   });

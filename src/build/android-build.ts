@@ -7,13 +7,9 @@
  * in this iteration — start your emulator manually.
  */
 
-import { execFile } from 'child_process';
-import { promisify } from 'util';
 import * as path from 'path';
 import * as fs from 'fs/promises';
-import { findApkFiles, truncateOutput } from './utils.js';
-
-const execFileAsync = promisify(execFile);
+import { findApkFiles, truncateOutput, execFileWithAbort } from './utils.js';
 
 const DEFAULT_BUILD_TIMEOUT_MS = 15 * 60 * 1000;
 const DEFAULT_INSTALL_TIMEOUT_MS = 2 * 60 * 1000;
@@ -27,6 +23,8 @@ export interface AndroidBuildOptions {
     variant?: string;
     /** Per-build timeout in ms. Default: 15 minutes. */
     timeoutMs?: number;
+    /** Optional AbortSignal — on abort, SIGTERM gradle, SIGKILL after 5s. */
+    signal?: AbortSignal;
 }
 
 export interface AndroidBuildResult {
@@ -64,16 +62,20 @@ export async function buildAndroidApp(
     let output = '';
     let passed = false;
     try {
-        const { stdout, stderr } = await execFileAsync(gradlew, [task], {
+        const { stdout, stderr } = await execFileWithAbort(gradlew, [task], {
             cwd: options.projectPath,
             maxBuffer: 50 * 1024 * 1024,
             timeout: options.timeoutMs ?? DEFAULT_BUILD_TIMEOUT_MS,
+            signal: options.signal,
         });
         output = [stdout, stderr].filter(Boolean).join('\n');
         passed = true;
     } catch (error: unknown) {
         const e = error as { stdout?: string; stderr?: string; message?: string };
         output = [e.stdout, e.stderr, e.message].filter(Boolean).join('\n');
+        if (options.signal?.aborted) {
+            output = `[aborted] ${output}`;
+        }
         passed = false;
     }
 
@@ -104,6 +106,7 @@ export async function buildAndroidApp(
 export interface AndroidInstallOptions {
     deviceUdid: string;
     apkPath: string;
+    signal?: AbortSignal;
 }
 
 export interface AndroidInstallResult {
@@ -125,16 +128,19 @@ export async function installAndroidApp(
     let output = '';
     let passed = false;
     try {
-        const { stdout, stderr } = await execFileAsync(
+        const { stdout, stderr } = await execFileWithAbort(
             'adb',
             ['-s', options.deviceUdid, 'install', '-r', options.apkPath],
-            { timeout: DEFAULT_INSTALL_TIMEOUT_MS },
+            { timeout: DEFAULT_INSTALL_TIMEOUT_MS, signal: options.signal },
         );
         output = [stdout, stderr].filter(Boolean).join('\n');
         passed = !/Failure/i.test(output);
     } catch (error: unknown) {
         const e = error as { stdout?: string; stderr?: string; message?: string };
         output = [e.stdout, e.stderr, e.message].filter(Boolean).join('\n');
+        if (options.signal?.aborted) {
+            output = `[aborted] ${output}`;
+        }
         passed = false;
     }
 
@@ -148,6 +154,7 @@ export async function installAndroidApp(
 export interface AndroidUninstallOptions {
     deviceUdid: string;
     packageName: string;
+    signal?: AbortSignal;
 }
 
 export interface AndroidUninstallResult {
@@ -163,16 +170,19 @@ export async function uninstallAndroidApp(
     let output = '';
     let passed = false;
     try {
-        const { stdout, stderr } = await execFileAsync(
+        const { stdout, stderr } = await execFileWithAbort(
             'adb',
             ['-s', options.deviceUdid, 'uninstall', options.packageName],
-            { timeout: DEFAULT_INSTALL_TIMEOUT_MS },
+            { timeout: DEFAULT_INSTALL_TIMEOUT_MS, signal: options.signal },
         );
         output = [stdout, stderr].filter(Boolean).join('\n');
         passed = /Success/i.test(output);
     } catch (error: unknown) {
         const e = error as { stdout?: string; stderr?: string; message?: string };
         output = [e.stdout, e.stderr, e.message].filter(Boolean).join('\n');
+        if (options.signal?.aborted) {
+            output = `[aborted] ${output}`;
+        }
         passed = false;
     }
     return {

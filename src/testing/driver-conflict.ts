@@ -12,21 +12,20 @@
  * with a clear pointer instead.
  */
 
-import type { AutomationDriver } from '../maestro/driver.js';
-
 /**
  * Throws a descriptive error if any recording sessions are currently active.
  *
- * @param activeDrivers - The per-session driver map from handlers.ts
+ * @param activeSessionIds - List of session IDs with active drivers (from
+ *   SessionManager.listActiveDrivers()).
  * @param toolName - Name of the calling tool (for the error message)
  */
 export function assertNoActiveSessions(
-    activeDrivers: Map<string, AutomationDriver>,
+    activeSessionIds: readonly string[],
     toolName: string,
 ): void {
-    if (activeDrivers.size === 0) return;
+    if (activeSessionIds.length === 0) return;
 
-    const sessionIds = [...activeDrivers.keys()];
+    const sessionIds = [...activeSessionIds];
     throw new Error(
         `Cannot run '${toolName}' while a recording session is active ` +
         `(sessions: ${sessionIds.join(', ')}). ` +
