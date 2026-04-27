@@ -115,6 +115,7 @@ import {
     handleClearMockResponses,
     setMcpServer,
 } from './handlers.js';
+import { taskRegistry } from './tasks/registry.js';
 
 import {
     handleListActiveSessions,
@@ -1029,6 +1030,10 @@ server.registerTool(
 async function main() {
     await sessionManager.initialize();
     console.error('[mobile-automator-mcp] Session Database initialized');
+
+    // Start the periodic prune of finished tasks (TTL via MCA_TASK_TTL_MS,
+    // default 1h). Tests don't call this so they stay deterministic.
+    taskRegistry.startPruneTimer();
 
     if (process.env.MCP_TRANSPORT === 'http') {
         const { startHttpBridge } = await import('./httpBridge.js');
