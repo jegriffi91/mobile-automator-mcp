@@ -10,6 +10,7 @@
 import * as path from 'path';
 import * as fs from 'fs/promises';
 import { findApkFiles, truncateOutput, execFileWithAbort } from './utils.js';
+import { spawnStream } from './stream.js';
 
 const DEFAULT_BUILD_TIMEOUT_MS = 15 * 60 * 1000;
 const DEFAULT_INSTALL_TIMEOUT_MS = 2 * 60 * 1000;
@@ -25,6 +26,12 @@ export interface AndroidBuildOptions {
     timeoutMs?: number;
     /** Optional AbortSignal — on abort, SIGTERM gradle, SIGKILL after 5s. */
     signal?: AbortSignal;
+    /**
+     * If provided, output streams line-by-line through this callback (also
+     * captured into the result). When absent, output is buffered until process
+     * exit (legacy path).
+     */
+    onLine?: (line: string, stream: 'stdout' | 'stderr') => void;
 }
 
 export interface AndroidBuildResult {
@@ -61,22 +68,42 @@ export async function buildAndroidApp(
     const start = Date.now();
     let output = '';
     let passed = false;
-    try {
-        const { stdout, stderr } = await execFileWithAbort(gradlew, [task], {
-            cwd: options.projectPath,
-            maxBuffer: 50 * 1024 * 1024,
-            timeout: options.timeoutMs ?? DEFAULT_BUILD_TIMEOUT_MS,
-            signal: options.signal,
-        });
-        output = [stdout, stderr].filter(Boolean).join('\n');
-        passed = true;
-    } catch (error: unknown) {
-        const e = error as { stdout?: string; stderr?: string; message?: string };
-        output = [e.stdout, e.stderr, e.message].filter(Boolean).join('\n');
-        if (options.signal?.aborted) {
-            output = `[aborted] ${output}`;
+    if (options.onLine) {
+        try {
+            const result = await spawnStream(gradlew, [task], {
+                cwd: options.projectPath,
+                maxBufferBytes: 50 * 1024 * 1024,
+                timeout: options.timeoutMs ?? DEFAULT_BUILD_TIMEOUT_MS,
+                signal: options.signal,
+                onLine: options.onLine,
+            });
+            output = [result.stdout, result.stderr].filter(Boolean).join('\n');
+            passed = result.code === 0 && !result.timedOut && !result.aborted;
+            if (result.aborted) output = `[aborted] ${output}`;
+            else if (result.timedOut) output = `[timed-out] ${output}`;
+        } catch (error: unknown) {
+            const e = error as { message?: string };
+            output = e.message ?? String(error);
+            passed = false;
         }
-        passed = false;
+    } else {
+        try {
+            const { stdout, stderr } = await execFileWithAbort(gradlew, [task], {
+                cwd: options.projectPath,
+                maxBuffer: 50 * 1024 * 1024,
+                timeout: options.timeoutMs ?? DEFAULT_BUILD_TIMEOUT_MS,
+                signal: options.signal,
+            });
+            output = [stdout, stderr].filter(Boolean).join('\n');
+            passed = true;
+        } catch (error: unknown) {
+            const e = error as { stdout?: string; stderr?: string; message?: string };
+            output = [e.stdout, e.stderr, e.message].filter(Boolean).join('\n');
+            if (options.signal?.aborted) {
+                output = `[aborted] ${output}`;
+            }
+            passed = false;
+        }
     }
 
     let apkPath: string | undefined;
