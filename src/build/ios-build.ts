@@ -14,6 +14,7 @@ import {
     findAppBundles,
     extractIosBundleId,
     truncateOutput,
+    execFileWithAbort,
 } from './utils.js';
 
 const execFileAsync = promisify(execFile);
@@ -37,6 +38,8 @@ export interface IosBuildOptions {
     derivedDataPath?: string;
     /** Per-build timeout in ms. Default: 15 minutes. */
     timeoutMs?: number;
+    /** Optional AbortSignal — on abort, SIGTERM xcodebuild, SIGKILL after 5s. */
+    signal?: AbortSignal;
 }
 
 export interface IosBuildResult {
@@ -75,15 +78,19 @@ export async function buildIosApp(options: IosBuildOptions): Promise<IosBuildRes
     let stdoutStderr = '';
     let passed = false;
     try {
-        const { stdout, stderr } = await execFileAsync('xcodebuild', args, {
+        const { stdout, stderr } = await execFileWithAbort('xcodebuild', args, {
             maxBuffer: 50 * 1024 * 1024,
             timeout: options.timeoutMs ?? DEFAULT_BUILD_TIMEOUT_MS,
+            signal: options.signal,
         });
         stdoutStderr = [stdout, stderr].filter(Boolean).join('\n');
         passed = true;
     } catch (error: unknown) {
-        const e = error as { stdout?: string; stderr?: string; message?: string };
+        const e = error as { stdout?: string; stderr?: string; message?: string; name?: string };
         stdoutStderr = [e.stdout, e.stderr, e.message].filter(Boolean).join('\n');
+        if (options.signal?.aborted) {
+            stdoutStderr = `[aborted] ${stdoutStderr}`;
+        }
         passed = false;
     }
     const durationMs = Date.now() - start;
@@ -121,6 +128,7 @@ export async function buildIosApp(options: IosBuildOptions): Promise<IosBuildRes
 export interface IosInstallOptions {
     deviceUdid: string;
     appPath: string;
+    signal?: AbortSignal;
 }
 
 export interface IosInstallResult {
@@ -141,16 +149,19 @@ export async function installIosApp(options: IosInstallOptions): Promise<IosInst
     let output = '';
     let passed = false;
     try {
-        const { stdout, stderr } = await execFileAsync(
+        const { stdout, stderr } = await execFileWithAbort(
             'xcrun',
             ['simctl', 'install', options.deviceUdid, options.appPath],
-            { timeout: DEFAULT_INSTALL_TIMEOUT_MS },
+            { timeout: DEFAULT_INSTALL_TIMEOUT_MS, signal: options.signal },
         );
         output = [stdout, stderr].filter(Boolean).join('\n');
         passed = true;
     } catch (error: unknown) {
         const e = error as { stdout?: string; stderr?: string; message?: string };
         output = [e.stdout, e.stderr, e.message].filter(Boolean).join('\n');
+        if (options.signal?.aborted) {
+            output = `[aborted] ${output}`;
+        }
         passed = false;
     }
 
@@ -214,6 +225,7 @@ export interface IosBootOptions {
     openSimulatorApp?: boolean;
     /** Wait up to this many ms for the device to reach Booted state. Default: 120s. */
     timeoutMs?: number;
+    signal?: AbortSignal;
 }
 
 export interface IosBootResult {
@@ -253,20 +265,20 @@ export async function bootIosSimulator(options: IosBootOptions): Promise<IosBoot
 
     try {
         if (!alreadyBooted) {
-            const { stdout, stderr } = await execFileAsync(
+            const { stdout, stderr } = await execFileWithAbort(
                 'xcrun',
                 ['simctl', 'boot', options.deviceUdid],
-                { timeout: options.timeoutMs ?? DEFAULT_BOOT_TIMEOUT_MS },
+                { timeout: options.timeoutMs ?? DEFAULT_BOOT_TIMEOUT_MS, signal: options.signal },
             );
             chunks.push(stdout, stderr);
         }
 
         if (options.openSimulatorApp !== false) {
             try {
-                const { stdout, stderr } = await execFileAsync(
+                const { stdout, stderr } = await execFileWithAbort(
                     'open',
                     ['-a', 'Simulator'],
-                    { timeout: 15_000 },
+                    { timeout: 15_000, signal: options.signal },
                 );
                 chunks.push(stdout, stderr);
             } catch (err: unknown) {
@@ -276,10 +288,10 @@ export async function bootIosSimulator(options: IosBootOptions): Promise<IosBoot
         }
 
         try {
-            const { stdout, stderr } = await execFileAsync(
+            const { stdout, stderr } = await execFileWithAbort(
                 'xcrun',
                 ['simctl', 'bootstatus', options.deviceUdid, '-b'],
-                { timeout: options.timeoutMs ?? DEFAULT_BOOT_TIMEOUT_MS },
+                { timeout: options.timeoutMs ?? DEFAULT_BOOT_TIMEOUT_MS, signal: options.signal },
             );
             chunks.push(stdout, stderr);
         } catch (err: unknown) {
@@ -291,6 +303,9 @@ export async function bootIosSimulator(options: IosBootOptions): Promise<IosBoot
     } catch (error: unknown) {
         const e = error as { stdout?: string; stderr?: string; message?: string };
         chunks.push(e.stdout ?? '', e.stderr ?? '', e.message ?? '');
+        if (options.signal?.aborted) {
+            chunks.push('[aborted]');
+        }
         passed = false;
     }
 

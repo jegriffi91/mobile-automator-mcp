@@ -124,24 +124,57 @@ export class ProxymanMcpClient {
      * Generic tool call returning the unwrapped text payload. Throws
      * ProxymanMcpError on tool error. Auto-reconnects once if the underlying
      * connection died.
+     *
+     * If `signal` is provided and aborts before/during the call, the local
+     * promise rejects immediately. The MCP SDK's stdio transport doesn't
+     * currently expose a per-call cancellation primitive, so an in-flight
+     * Proxyman tool call may continue server-side until it completes — but
+     * this side will no longer await it.
      */
-    async callTool(name: string, args: Record<string, unknown> = {}): Promise<string> {
+    async callTool(
+        name: string,
+        args: Record<string, unknown> = {},
+        signal?: AbortSignal,
+    ): Promise<string> {
         await this.connect();
         const client = this.client!;
-        let resp;
-        try {
-            resp = await client.callTool({ name, arguments: args });
-        } catch (err) {
-            // Transport-level failure — try one reconnect.
-            await this.close();
-            await this.connect();
-            resp = await this.client!.callTool({ name, arguments: args });
+        const doCall = async (): Promise<string> => {
+            let resp;
+            try {
+                resp = await client.callTool({ name, arguments: args });
+            } catch (err) {
+                // Transport-level failure — try one reconnect.
+                await this.close();
+                await this.connect();
+                resp = await this.client!.callTool({ name, arguments: args });
+            }
+            if (resp.isError) {
+                const text = extractText(resp);
+                throw new ProxymanMcpError(text, name);
+            }
+            return extractText(resp);
+        };
+
+        if (!signal) return doCall();
+        if (signal.aborted) {
+            throw new ProxymanMcpError(`callTool(${name}) aborted before sending`, name);
         }
-        if (resp.isError) {
-            const text = extractText(resp);
-            throw new ProxymanMcpError(text, name);
-        }
-        return extractText(resp);
+        return new Promise<string>((resolve, reject) => {
+            const onAbort = () => {
+                reject(new ProxymanMcpError(`callTool(${name}) aborted`, name));
+            };
+            signal.addEventListener('abort', onAbort, { once: true });
+            doCall().then(
+                (v) => {
+                    signal.removeEventListener('abort', onAbort);
+                    resolve(v);
+                },
+                (e) => {
+                    signal.removeEventListener('abort', onAbort);
+                    reject(e);
+                },
+            );
+        });
     }
 
     // ── Typed wrappers ──

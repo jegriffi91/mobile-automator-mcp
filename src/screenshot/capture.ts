@@ -9,13 +9,10 @@
  */
 
 import { execFile } from 'child_process';
-import { promisify } from 'util';
 import * as path from 'path';
 import * as os from 'os';
 import * as fs from 'fs/promises';
-import { truncateOutput } from '../build/utils.js';
-
-const execFileAsync = promisify(execFile);
+import { truncateOutput, execFileWithAbort } from '../build/utils.js';
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 const ADB_MAX_BUFFER = 50 * 1024 * 1024;
@@ -27,6 +24,8 @@ export interface ScreenshotOptions {
     outputPath?: string;
     /** Per-capture timeout in ms. Default: 30s. */
     timeoutMs?: number;
+    /** Optional AbortSignal — on abort, SIGTERM the capture, SIGKILL after 5s. */
+    signal?: AbortSignal;
 }
 
 export interface ScreenshotResult {
@@ -44,6 +43,52 @@ function defaultOutputPath(): string {
 
 async function ensureParentDir(filePath: string): Promise<void> {
     await fs.mkdir(path.dirname(filePath), { recursive: true });
+}
+
+/**
+ * Buffer-mode adb screencap with optional abort. Mirrors execFileWithAbort
+ * but returns Buffer stdout/stderr — needed because adb screencap writes
+ * a binary PNG on stdout.
+ */
+function execAdbScreencap(
+    deviceUdid: string,
+    timeoutMs: number,
+    signal?: AbortSignal,
+): Promise<{ stdout: Buffer; stderr: Buffer }> {
+    return new Promise((resolve, reject) => {
+        const child = execFile(
+            'adb',
+            ['-s', deviceUdid, 'exec-out', 'screencap', '-p'],
+            { encoding: 'buffer', timeout: timeoutMs, maxBuffer: ADB_MAX_BUFFER },
+            (error, stdout, stderr) => {
+                if (signal) signal.removeEventListener('abort', onAbort);
+                if (killTimer) clearTimeout(killTimer);
+                if (error) {
+                    const e = error as NodeJS.ErrnoException & {
+                        stdout?: Buffer;
+                        stderr?: Buffer;
+                    };
+                    e.stdout = stdout as Buffer;
+                    e.stderr = stderr as Buffer;
+                    reject(e);
+                    return;
+                }
+                resolve({ stdout: stdout as Buffer, stderr: stderr as Buffer });
+            },
+        );
+        let killTimer: NodeJS.Timeout | undefined;
+        const onAbort = () => {
+            try { child.kill('SIGTERM'); } catch { /* gone */ }
+            killTimer = setTimeout(() => {
+                try { child.kill('SIGKILL'); } catch { /* gone */ }
+            }, 5000);
+            if (killTimer.unref) killTimer.unref();
+        };
+        if (signal) {
+            if (signal.aborted) onAbort();
+            else signal.addEventListener('abort', onAbort, { once: true });
+        }
+    });
 }
 
 async function statSizeOrUndefined(filePath: string): Promise<number | undefined> {
@@ -64,16 +109,19 @@ export async function takeIosScreenshot(options: ScreenshotOptions): Promise<Scr
     let passed = false;
 
     try {
-        const { stdout, stderr } = await execFileAsync(
+        const { stdout, stderr } = await execFileWithAbort(
             'xcrun',
             ['simctl', 'io', options.deviceUdid, 'screenshot', imagePath],
-            { timeout: options.timeoutMs ?? DEFAULT_TIMEOUT_MS },
+            { timeout: options.timeoutMs ?? DEFAULT_TIMEOUT_MS, signal: options.signal },
         );
         chunks.push(stdout, stderr);
         passed = true;
     } catch (error: unknown) {
         const e = error as { stdout?: string; stderr?: string; message?: string };
         chunks.push(e.stdout ?? '', e.stderr ?? '', e.message ?? '');
+        if (options.signal?.aborted) {
+            chunks.push('[aborted]');
+        }
         passed = false;
     }
 
@@ -101,14 +149,10 @@ export async function takeAndroidScreenshot(options: ScreenshotOptions): Promise
     let passed = false;
 
     try {
-        const { stdout, stderr } = await execFileAsync(
-            'adb',
-            ['-s', options.deviceUdid, 'exec-out', 'screencap', '-p'],
-            {
-                encoding: 'buffer',
-                timeout: options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
-                maxBuffer: ADB_MAX_BUFFER,
-            },
+        const { stdout, stderr } = await execAdbScreencap(
+            options.deviceUdid,
+            options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+            options.signal,
         );
         await fs.writeFile(imagePath, stdout);
         const stderrText = stderr.toString('utf8');
@@ -118,6 +162,9 @@ export async function takeAndroidScreenshot(options: ScreenshotOptions): Promise
         const e = error as { stdout?: Buffer | string; stderr?: Buffer | string; message?: string };
         const stderrText = typeof e.stderr === 'string' ? e.stderr : e.stderr?.toString('utf8') ?? '';
         chunks.push(stderrText, e.message ?? '');
+        if (options.signal?.aborted) {
+            chunks.push('[aborted]');
+        }
         passed = false;
     }
 
