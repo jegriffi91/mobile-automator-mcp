@@ -224,6 +224,69 @@ export class ProxymanMcpClient {
         const text = await this.callTool('list_rules', { rule_type: ruleType });
         return parseRuleList(text);
     }
+
+    /**
+     * List rules whose `name` starts with the given tag prefix. Used by the
+     * admin tools to scope cleanup to rules this server installed (we tag
+     * them `mca:<sessionId>:...` and `mca:standalone:...`).
+     */
+    async listRulesByTagPrefix(
+        prefix: string,
+        ruleType: ProxymanRuleType | 'all' = 'scripting',
+    ): Promise<ProxymanRuleSummary[]> {
+        const all = await this.listRules(ruleType);
+        return all.filter((r) => r.name.startsWith(prefix));
+    }
+
+    /**
+     * Best-effort bulk delete by tag prefix. Continues on individual delete
+     * failures. Never throws — returns a structured report so callers
+     * (admin tools, force_cleanup_*) can surface partial success.
+     */
+    async deleteRulesByTagPrefix(
+        prefix: string,
+        ruleType: ProxymanRuleType | 'all' = 'scripting',
+    ): Promise<{ deleted: string[]; failed: { id: string; error: string }[] }> {
+        let rules: ProxymanRuleSummary[];
+        try {
+            rules = await this.listRulesByTagPrefix(prefix, ruleType);
+        } catch (err) {
+            return { deleted: [], failed: [{ id: '*list*', error: (err as Error).message }] };
+        }
+
+        const deleted: string[] = [];
+        const failed: { id: string; error: string }[] = [];
+        for (const rule of rules) {
+            const target: ProxymanRuleType =
+                ruleType === 'all' ? (rule.ruleType as ProxymanRuleType) : ruleType;
+            try {
+                await this.deleteRule(rule.id, target);
+                deleted.push(rule.id);
+            } catch (err) {
+                failed.push({ id: rule.id, error: (err as Error).message });
+            }
+        }
+        return { deleted, failed };
+    }
+
+    /**
+     * Quick reachability probe. Returns false (rather than throwing) when
+     * Proxyman MCP is unreachable or slow. Used by the admin tools to
+     * surface a clean `proxymanReachable: false` rather than crashing.
+     */
+    async healthCheck(timeoutMs = 2000): Promise<boolean> {
+        try {
+            await Promise.race([
+                this.getProxyStatus(),
+                new Promise<never>((_, reject) =>
+                    setTimeout(() => reject(new Error('healthCheck timeout')), timeoutMs).unref(),
+                ),
+            ]);
+            return true;
+        } catch {
+            return false;
+        }
+    }
 }
 
 // ── Plain-text parsers (Proxyman returns formatted text, not JSON) ──

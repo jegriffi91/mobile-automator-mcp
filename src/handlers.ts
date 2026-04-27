@@ -2443,30 +2443,44 @@ async function cleanupProxymanRulesForSession(sessionId: string): Promise<void> 
         return;
     }
 
-    let toDelete: string[] = [];
-    try {
-        const rules = await client.listRules('scripting');
-        toDelete = rules.filter((r) => isOurRuleForSession(r.name, sessionId)).map((r) => r.id);
-    } catch (err) {
-        // Fall back to the local ledger if Proxyman is unreachable.
-        console.error('[MCP] cleanupProxymanRulesForSession: list_rules failed, falling back to ledger', err);
-        toDelete = ledgerEntries.map((e) => e.ruleId);
-    }
-
-    for (const id of toDelete) {
-        try {
-            await client.deleteRule(id, 'scripting');
-        } catch (err) {
-            console.error(`[MCP] cleanupProxymanRulesForSession: delete ${id} failed (continuing)`, err);
+    // Tag-prefix delete is the source of truth — picks up any rules created
+    // outside this ledger (e.g. via direct Proxyman API, or after a previous
+    // crash). Falls back to the ledger if list_rules fails.
+    const prefix = `mca:${sessionId}:`;
+    const result = await client.deleteRulesByTagPrefix(prefix, 'scripting');
+    if (result.failed.some((f) => f.id === '*list*')) {
+        console.error(
+            `[MCP] cleanupProxymanRulesForSession: list_rules failed, falling back to ledger`,
+            result.failed,
+        );
+        for (const { ruleId } of ledgerEntries) {
+            try {
+                await client.deleteRule(ruleId, 'scripting');
+            } catch (err) {
+                console.error(
+                    `[MCP] cleanupProxymanRulesForSession: ledger-fallback delete ${ruleId} failed (continuing)`,
+                    err,
+                );
+            }
+        }
+    } else {
+        if (result.failed.length > 0) {
+            console.error(
+                `[MCP] cleanupProxymanRulesForSession: ${result.failed.length} rule delete(s) failed (continuing)`,
+                result.failed,
+            );
         }
     }
     sessionManager.clearSessionMocks(sessionId);
 
-    if (toDelete.length > 0) {
+    if (result.deleted.length > 0) {
         console.error(
-            `[MCP] cleanupProxymanRulesForSession: cleaned ${toDelete.length} rule(s) for session ${sessionId}`,
+            `[MCP] cleanupProxymanRulesForSession: cleaned ${result.deleted.length} rule(s) for session ${sessionId}`,
         );
     }
+    // Reference isOurRuleForSession to keep the helper alive for any future
+    // ledger-only diagnostic paths; the prefix delete already filters by name.
+    void isOurRuleForSession;
 }
 
 // ---- run_feature_test ----

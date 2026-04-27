@@ -470,7 +470,36 @@ describe('Handler Integration Tests', () => {
         ),
         deleteRule: vi.fn().mockResolvedValue(undefined),
         listRules: vi.fn().mockResolvedValue([]),
+        // Phase-1 admin/cleanup additions
+        listRulesByTagPrefix: vi.fn(),
+        deleteRulesByTagPrefix: vi.fn(),
+        healthCheck: vi.fn().mockResolvedValue(true),
       };
+      // Make tag-prefix delete drive its result from listRules+deleteRule so
+      // existing tests that stub listRules/deleteRule still work.
+      mockProxymanClient.listRulesByTagPrefix.mockImplementation(async (prefix: string) => {
+        const all = await mockProxymanClient.listRules();
+        return all.filter((r: { name: string }) => r.name.startsWith(prefix));
+      });
+      mockProxymanClient.deleteRulesByTagPrefix.mockImplementation(async (prefix: string) => {
+        let rules: { id: string; name: string }[] = [];
+        try {
+          rules = await mockProxymanClient.listRulesByTagPrefix(prefix);
+        } catch (err) {
+          return { deleted: [], failed: [{ id: '*list*', error: (err as Error).message }] };
+        }
+        const deleted: string[] = [];
+        const failed: { id: string; error: string }[] = [];
+        for (const r of rules) {
+          try {
+            await mockProxymanClient.deleteRule(r.id, 'scripting');
+            deleted.push(r.id);
+          } catch (err) {
+            failed.push({ id: r.id, error: (err as Error).message });
+          }
+        }
+        return { deleted, failed };
+      });
       restoreFactory = _setProxymanMcpClientFactory(() => mockProxymanClient as never);
       const start = await handleStartRecording({
         appBundleId: 'com.test.app',

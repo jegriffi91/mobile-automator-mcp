@@ -5,8 +5,8 @@
  * surface that's brittle to Proxyman's output format.
  */
 
-import { describe, it, expect } from 'vitest';
-import { parseRuleId, parseRuleList } from './client.js';
+import { describe, it, expect, vi } from 'vitest';
+import { parseRuleId, parseRuleList, ProxymanMcpClient, type ProxymanRuleSummary } from './client.js';
 
 describe('parseRuleId', () => {
     it('extracts the ID from a successful create response', () => {
@@ -67,5 +67,72 @@ describe('parseRuleList', () => {
         const rules = parseRuleList(text);
         expect(rules).toHaveLength(1);
         expect(rules[0].name).toBe('mca:abc-def-123:mock-deadbeef');
+    });
+});
+
+describe('listRulesByTagPrefix / deleteRulesByTagPrefix / healthCheck', () => {
+    function makeClient(rules: ProxymanRuleSummary[], opts: {
+        listThrows?: Error;
+        deleteThrowsForId?: string;
+    } = {}) {
+        const client = new ProxymanMcpClient('/dev/null');
+        const listSpy = vi.spyOn(client, 'listRules').mockImplementation(async () => {
+            if (opts.listThrows) throw opts.listThrows;
+            return rules;
+        });
+        const deleteSpy = vi.spyOn(client, 'deleteRule').mockImplementation(async (id: string) => {
+            if (opts.deleteThrowsForId === id) throw new Error(`delete-${id}-failed`);
+        });
+        return { client, listSpy, deleteSpy };
+    }
+
+    it('listRulesByTagPrefix filters by name prefix', async () => {
+        const { client } = makeClient([
+            { id: '1', name: 'mca:abc:m1', url: '*', enabled: true, ruleType: 'scripting' },
+            { id: '2', name: 'mca:xyz:m1', url: '*', enabled: true, ruleType: 'scripting' },
+            { id: '3', name: 'unrelated', url: '*', enabled: true, ruleType: 'scripting' },
+        ]);
+        const out = await client.listRulesByTagPrefix('mca:abc:');
+        expect(out.map((r) => r.id)).toEqual(['1']);
+    });
+
+    it('deleteRulesByTagPrefix returns deleted/failed structured result', async () => {
+        const { client } = makeClient(
+            [
+                { id: '1', name: 'mca:abc:m1', url: '*', enabled: true, ruleType: 'scripting' },
+                { id: '2', name: 'mca:abc:m2', url: '*', enabled: true, ruleType: 'scripting' },
+            ],
+            { deleteThrowsForId: '2' },
+        );
+        const result = await client.deleteRulesByTagPrefix('mca:abc:');
+        expect(result.deleted).toEqual(['1']);
+        expect(result.failed).toEqual([{ id: '2', error: expect.stringContaining('delete-2-failed') }]);
+    });
+
+    it('deleteRulesByTagPrefix surfaces list_rules failure as *list* entry', async () => {
+        const { client } = makeClient([], { listThrows: new Error('list-broken') });
+        const result = await client.deleteRulesByTagPrefix('mca:abc:');
+        expect(result.deleted).toEqual([]);
+        expect(result.failed).toEqual([{ id: '*list*', error: 'list-broken' }]);
+    });
+
+    it('healthCheck returns true when getProxyStatus resolves', async () => {
+        const client = new ProxymanMcpClient('/dev/null');
+        vi.spyOn(client, 'getProxyStatus').mockResolvedValue('Recording: Active');
+        await expect(client.healthCheck(50)).resolves.toBe(true);
+    });
+
+    it('healthCheck returns false when getProxyStatus rejects', async () => {
+        const client = new ProxymanMcpClient('/dev/null');
+        vi.spyOn(client, 'getProxyStatus').mockRejectedValue(new Error('not running'));
+        await expect(client.healthCheck(50)).resolves.toBe(false);
+    });
+
+    it('healthCheck returns false when getProxyStatus exceeds timeout', async () => {
+        const client = new ProxymanMcpClient('/dev/null');
+        vi.spyOn(client, 'getProxyStatus').mockImplementation(
+            () => new Promise(() => {}), // hangs forever
+        );
+        await expect(client.healthCheck(20)).resolves.toBe(false);
     });
 });
