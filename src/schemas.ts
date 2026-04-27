@@ -1669,6 +1669,121 @@ export type ClearMockResponsesInput = z.infer<typeof ClearMockResponsesInputSche
 export type ClearMockResponsesOutput = z.infer<typeof ClearMockResponsesOutputSchema>;
 
 // ──────────────────────────────────────────────
+// Admin tools (Phase 1: orphan cleanup + visibility)
+// ──────────────────────────────────────────────
+
+const SessionStatusSchema = z.enum(['idle', 'recording', 'compiling', 'done', 'aborted']);
+
+export const ListActiveSessionsInputSchema = z.object({});
+
+export const ListActiveSessionsOutputSchema = z.object({
+    sessions: z.array(
+        z.object({
+            sessionId: z.string(),
+            appBundleId: z.string(),
+            platform: z.enum(['ios', 'android']),
+            status: SessionStatusSchema,
+            startedAt: z.string(),
+            stoppedAt: z.string().optional(),
+            abortedReason: z.string().optional(),
+            driverActive: z.boolean(),
+            pollerActive: z.boolean(),
+            pollerHealth: z
+                .object({
+                    pollCount: z.number(),
+                    successCount: z.number(),
+                    errorCount: z.number(),
+                    lastPollAt: z.string().optional(),
+                })
+                .nullable(),
+            mockCount: z.number(),
+        }),
+    ),
+    totalSessions: z.number(),
+    totalActiveDrivers: z.number(),
+    totalActivePollers: z.number(),
+});
+
+export const ListActiveMocksInputSchema = z.object({
+    sessionId: z.string().optional(),
+});
+
+export const ListActiveMocksOutputSchema = z.object({
+    proxymanReachable: z.boolean(),
+    rules: z.array(
+        z.object({
+            ruleId: z.string(),
+            name: z.string(),
+            url: z.string(),
+            enabled: z.boolean(),
+            scope: z.enum(['session', 'standalone', 'unknown']),
+            sessionId: z.string().optional(),
+            mockId: z.string().optional(),
+            inLocalLedger: z.boolean(),
+        }),
+    ),
+    drift: z.object({
+        rulesNotInLedger: z.array(z.string()),
+        ledgerNotInProxyman: z.array(z.string()),
+    }),
+});
+
+export const ForceCleanupSessionInputSchema = z.object({
+    sessionId: z.string(),
+    reason: z.string().optional().default('manual force-cleanup'),
+});
+
+export const ForceCleanupSessionOutputSchema = z.object({
+    sessionId: z.string(),
+    pollerStopped: z.boolean(),
+    driverRemoved: z.boolean(),
+    proxymanRulesDeleted: z.number(),
+    proxymanReachable: z.boolean(),
+    sessionMarkedAborted: z.boolean(),
+    errors: z.array(z.string()),
+});
+
+export const ForceCleanupMocksInputSchema = z
+    .object({
+        scope: z.enum(['all', 'session', 'standalone']),
+        sessionId: z.string().optional(),
+    })
+    .refine((d) => d.scope !== 'session' || !!d.sessionId, {
+        message: 'sessionId required when scope=session',
+    });
+
+export const ForceCleanupMocksOutputSchema = z.object({
+    scope: z.enum(['all', 'session', 'standalone']),
+    proxymanReachable: z.boolean(),
+    rulesDeleted: z.number(),
+    ledgerEntriesCleared: z.number(),
+    errors: z.array(z.string()),
+});
+
+export const AuditStateInputSchema = z.object({});
+
+export const AuditStateOutputSchema = z.object({
+    generatedAt: z.string(),
+    sessions: z.object({
+        total: z.number(),
+        byStatus: z.record(z.string(), z.number()),
+    }),
+    drivers: z.object({ active: z.number(), sessionIds: z.array(z.string()) }),
+    pollers: z.object({ active: z.number(), sessionIds: z.array(z.string()) }),
+    proxyman: z.object({
+        reachable: z.boolean(),
+        totalRules: z.number(),
+        mcaTaggedRules: z.number(),
+        rulesByTagPrefix: z.record(z.string(), z.number()),
+    }),
+    orphans: z.object({
+        proxymanRulesWithoutSession: z.array(z.string()),
+        sessionsWithoutDriver: z.array(z.string()),
+        pollersWithoutSession: z.array(z.string()),
+    }),
+});
+
+// ──────────────────────────────────────────────
 // Tool name constants
 // ──────────────────────────────────────────────
 
@@ -1702,4 +1817,9 @@ export const TOOL_NAMES = {
     RUN_FEATURE_TEST: 'run_feature_test',
     SET_MOCK_RESPONSE: 'set_mock_response',
     CLEAR_MOCK_RESPONSES: 'clear_mock_responses',
+    LIST_ACTIVE_SESSIONS: 'list_active_sessions',
+    LIST_ACTIVE_MOCKS: 'list_active_mocks',
+    FORCE_CLEANUP_SESSION: 'force_cleanup_session',
+    FORCE_CLEANUP_MOCKS: 'force_cleanup_mocks',
+    AUDIT_STATE: 'audit_state',
 } as const;

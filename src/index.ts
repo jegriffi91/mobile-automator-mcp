@@ -70,6 +70,16 @@ import {
     SetMockResponseOutputSchema,
     ClearMockResponsesInputSchema,
     ClearMockResponsesOutputSchema,
+    ListActiveSessionsInputSchema,
+    ListActiveSessionsOutputSchema,
+    ListActiveMocksInputSchema,
+    ListActiveMocksOutputSchema,
+    ForceCleanupSessionInputSchema,
+    ForceCleanupSessionOutputSchema,
+    ForceCleanupMocksInputSchema,
+    ForceCleanupMocksOutputSchema,
+    AuditStateInputSchema,
+    AuditStateOutputSchema,
     TOOL_NAMES,
 } from './schemas.js';
 
@@ -105,6 +115,14 @@ import {
     handleClearMockResponses,
     setMcpServer,
 } from './handlers.js';
+
+import {
+    handleListActiveSessions,
+    handleListActiveMocks,
+    handleForceCleanupSession,
+    handleForceCleanupMocks,
+    handleAuditState,
+} from './admin/index.js';
 
 import { sessionManager } from './session/index.js';
 
@@ -867,6 +885,136 @@ server.registerTool(
     },
     async (args) => {
         const result = await handleClearMockResponses(args);
+        return {
+            content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
+            structuredContent: result,
+        };
+    }
+);
+
+// ── 22. list_active_sessions (admin) ──
+server.registerTool(
+    TOOL_NAMES.LIST_ACTIVE_SESSIONS,
+    {
+        title: 'List Active Sessions',
+        description:
+            'Inventory of recording sessions, with driver/poller liveness and mock count per session. Read-only — use this to find orphaned state before deciding whether to call force_cleanup_session.',
+        inputSchema: ListActiveSessionsInputSchema,
+        outputSchema: ListActiveSessionsOutputSchema,
+        annotations: {
+            title: 'List Active Sessions',
+            readOnlyHint: true,
+            destructiveHint: false,
+            idempotentHint: true,
+            openWorldHint: false,
+        },
+    },
+    async (args) => {
+        const result = await handleListActiveSessions(args);
+        return {
+            content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
+            structuredContent: result,
+        };
+    }
+);
+
+// ── 23. list_active_mocks (admin) ──
+server.registerTool(
+    TOOL_NAMES.LIST_ACTIVE_MOCKS,
+    {
+        title: 'List Active Mocks',
+        description:
+            'Inspect Proxyman scripting rules tagged "mca:". Reports drift between the local ledger and Proxyman state (rules-not-in-ledger, ledger-not-in-Proxyman) so the caller can spot leaks. Returns proxymanReachable=false instead of throwing when Proxyman MCP is unavailable.',
+        inputSchema: ListActiveMocksInputSchema,
+        outputSchema: ListActiveMocksOutputSchema,
+        annotations: {
+            title: 'List Active Mocks',
+            readOnlyHint: true,
+            destructiveHint: false,
+            idempotentHint: true,
+            openWorldHint: true,
+        },
+    },
+    async (args) => {
+        const result = await handleListActiveMocks(args);
+        return {
+            content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
+            structuredContent: result,
+        };
+    }
+);
+
+// ── 24. force_cleanup_session (admin, destructive) ──
+server.registerTool(
+    TOOL_NAMES.FORCE_CLEANUP_SESSION,
+    {
+        title: 'Force-Cleanup Session',
+        description:
+            'Tear down a stuck session: stop polling, stop the driver, delete its tagged Proxyman rules, mark the session aborted. Never throws — partial-failure detail comes back in the errors[] array. Does NOT kill the simulator (only state we created).',
+        inputSchema: ForceCleanupSessionInputSchema,
+        outputSchema: ForceCleanupSessionOutputSchema,
+        annotations: {
+            title: 'Force-Cleanup Session',
+            readOnlyHint: false,
+            destructiveHint: true,
+            idempotentHint: true,
+            openWorldHint: true,
+        },
+    },
+    async (args) => {
+        const result = await handleForceCleanupSession(args);
+        return {
+            content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
+            structuredContent: result,
+        };
+    }
+);
+
+// ── 25. force_cleanup_mocks (admin, destructive) ──
+server.registerTool(
+    TOOL_NAMES.FORCE_CLEANUP_MOCKS,
+    {
+        title: 'Force-Cleanup Mocks',
+        description:
+            'Bulk delete Proxyman scripting rules by scope: "all" (everything tagged mca:), "session" (one session, requires sessionId), or "standalone". Local ledgers are reconciled. Never throws — failures surface in errors[].',
+        inputSchema: ForceCleanupMocksInputSchema,
+        outputSchema: ForceCleanupMocksOutputSchema,
+        annotations: {
+            title: 'Force-Cleanup Mocks',
+            readOnlyHint: false,
+            destructiveHint: true,
+            idempotentHint: true,
+            openWorldHint: true,
+        },
+    },
+    async (args) => {
+        const result = await handleForceCleanupMocks(args);
+        return {
+            content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
+            structuredContent: result,
+        };
+    }
+);
+
+// ── 26. audit_state (admin, read-only) ──
+server.registerTool(
+    TOOL_NAMES.AUDIT_STATE,
+    {
+        title: 'Audit State',
+        description:
+            'Single-shot snapshot of session/driver/poller/Proxyman state, plus a small orphans report (Proxyman rules without a known session, sessions in recording without a driver, pollers without a session). Use as the entry point when something looks wrong.',
+        inputSchema: AuditStateInputSchema,
+        outputSchema: AuditStateOutputSchema,
+        annotations: {
+            title: 'Audit State',
+            readOnlyHint: true,
+            destructiveHint: false,
+            idempotentHint: true,
+            openWorldHint: true,
+        },
+    },
+    async (args) => {
+        const result = await handleAuditState(args);
         return {
             content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
             structuredContent: result,
