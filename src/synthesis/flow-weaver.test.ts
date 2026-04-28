@@ -9,7 +9,10 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import * as os from 'os';
-import { parseMaestroDebugOutput } from './flow-weaver.js';
+import { parseMaestroDebugOutput, weaveFlowExecutions } from './flow-weaver.js';
+import type { FlowStep } from './flow-weaver.js';
+import type { FlowExecutionRecord } from '../types.js';
+import type { PollRecord } from '../session/touch-inferrer.js';
 
 const FIXTURE = path.join(
     process.cwd(),
@@ -192,4 +195,197 @@ beforeEach(() => {
 });
 afterEach(() => {
     console.error = originalErr;
+});
+
+// ── weaveFlowExecutions ──
+
+function boundary(
+    boundaryKind: 'flow_start' | 'flow_end',
+    flowName: string,
+    timestamp: string,
+): PollRecord {
+    return {
+        timestamp,
+        durationMs: 0,
+        result: 'flow_boundary',
+        boundaryKind,
+        inferredTarget: flowName,
+    };
+}
+
+function pollOk(timestamp: string): PollRecord {
+    return {
+        timestamp,
+        durationMs: 50,
+        result: 'equal',
+    };
+}
+
+function makeStep(seq: number, kind: string, target?: string): FlowStep {
+    return {
+        sequenceNumber: seq,
+        timestamp: new Date(1746121231000 + seq * 100).toISOString(),
+        kind,
+        ...(target !== undefined ? { target } : {}),
+        durationMs: 10,
+        status: 'COMPLETED',
+        raw: {},
+    };
+}
+
+describe('weaveFlowExecutions', () => {
+    it('zero flows → empty result, no warnings', () => {
+        const result = weaveFlowExecutions({
+            pollRecords: [pollOk('2026-04-28T10:00:00.000Z')],
+            flowExecutions: [],
+            parsedSteps: new Map(),
+        });
+        expect(result.woven).toEqual([]);
+        expect(result.warnings).toEqual([]);
+        expect(result.yamlBlocks).toEqual([]);
+        expect(result.pollRecords).toHaveLength(1);
+    });
+
+    it('one matched flow → woven entry with steps; boundaries stripped', () => {
+        const startedAt = '2026-04-28T10:00:00.000Z';
+        const endedAt = '2026-04-28T10:00:05.000Z';
+        const polls: PollRecord[] = [
+            pollOk('2026-04-28T09:59:59.000Z'),
+            boundary('flow_start', 'login', startedAt),
+            boundary('flow_end', 'login', endedAt),
+            pollOk('2026-04-28T10:00:06.000Z'),
+        ];
+        const exec: FlowExecutionRecord = {
+            flowName: 'login',
+            startedAt,
+            endedAt,
+            durationMs: 5000,
+            output: '',
+            succeeded: true,
+            flowPath: '/abs/login.yaml',
+        };
+        const steps = [makeStep(0, 'tapOnElement', 'Login')];
+        const result = weaveFlowExecutions({
+            pollRecords: polls,
+            flowExecutions: [exec],
+            parsedSteps: new Map([[`login|${startedAt}`, steps]]),
+        });
+        expect(result.warnings).toEqual([]);
+        expect(result.woven).toHaveLength(1);
+        expect(result.woven[0].flowName).toBe('login');
+        expect(result.woven[0].flowPath).toBe('/abs/login.yaml');
+        expect(result.woven[0].steps).toHaveLength(1);
+        expect(result.pollRecords.every((r) => r.result !== 'flow_boundary')).toBe(true);
+        expect(result.yamlBlocks).toHaveLength(1);
+        expect(result.yamlBlocks[0].flowName).toBe('login');
+    });
+
+    it('flow with missing parsedSteps → empty steps + warning', () => {
+        const startedAt = '2026-04-28T10:00:00.000Z';
+        const endedAt = '2026-04-28T10:00:05.000Z';
+        const polls = [
+            boundary('flow_start', 'login', startedAt),
+            boundary('flow_end', 'login', endedAt),
+        ];
+        const exec: FlowExecutionRecord = {
+            flowName: 'login',
+            startedAt,
+            endedAt,
+            durationMs: 5000,
+            output: '',
+            succeeded: true,
+        };
+        const result = weaveFlowExecutions({
+            pollRecords: polls,
+            flowExecutions: [exec],
+            parsedSteps: new Map(),
+        });
+        expect(result.woven).toHaveLength(1);
+        expect(result.woven[0].steps).toEqual([]);
+        expect(result.warnings.some((w) => w.includes('no parsed steps'))).toBe(true);
+    });
+
+    it('orphan flow_start → warning, no woven entry', () => {
+        const result = weaveFlowExecutions({
+            pollRecords: [boundary('flow_start', 'lonely', '2026-04-28T10:00:00.000Z')],
+            flowExecutions: [],
+            parsedSteps: new Map(),
+        });
+        expect(result.woven).toEqual([]);
+        expect(result.warnings.some((w) => w.includes('orphan flow_start'))).toBe(true);
+    });
+
+    it('orphan flow_end → warning, no woven entry', () => {
+        const result = weaveFlowExecutions({
+            pollRecords: [boundary('flow_end', 'orphan', '2026-04-28T10:00:00.000Z')],
+            flowExecutions: [],
+            parsedSteps: new Map(),
+        });
+        expect(result.woven).toEqual([]);
+        expect(result.warnings.some((w) => w.includes('orphan flow_end'))).toBe(true);
+    });
+
+    it('two flows → two woven entries in chronological order', () => {
+        const t1Start = '2026-04-28T10:00:00.000Z';
+        const t1End = '2026-04-28T10:00:01.000Z';
+        const t2Start = '2026-04-28T10:00:05.000Z';
+        const t2End = '2026-04-28T10:00:06.000Z';
+        const polls = [
+            boundary('flow_start', 'a', t1Start),
+            boundary('flow_end', 'a', t1End),
+            boundary('flow_start', 'b', t2Start),
+            boundary('flow_end', 'b', t2End),
+        ];
+        const execs: FlowExecutionRecord[] = [
+            {
+                flowName: 'a',
+                startedAt: t1Start,
+                endedAt: t1End,
+                durationMs: 1000,
+                output: '',
+                succeeded: true,
+            },
+            {
+                flowName: 'b',
+                startedAt: t2Start,
+                endedAt: t2End,
+                durationMs: 1000,
+                output: '',
+                succeeded: true,
+            },
+        ];
+        const result = weaveFlowExecutions({
+            pollRecords: polls,
+            flowExecutions: execs,
+            parsedSteps: new Map([
+                [`a|${t1Start}`, [makeStep(0, 'tapOnElement', 'A')]],
+                [`b|${t2Start}`, [makeStep(0, 'tapOnElement', 'B')]],
+            ]),
+        });
+        expect(result.woven.map((w) => w.flowName)).toEqual(['a', 'b']);
+    });
+
+    it('cancelled flow → cancelled propagates to yaml block', () => {
+        const startedAt = '2026-04-28T10:00:00.000Z';
+        const endedAt = '2026-04-28T10:00:05.000Z';
+        const polls = [
+            boundary('flow_start', 'login', startedAt),
+            boundary('flow_end', 'login', endedAt),
+        ];
+        const exec: FlowExecutionRecord = {
+            flowName: 'login',
+            startedAt,
+            endedAt,
+            durationMs: 5000,
+            output: '',
+            succeeded: false,
+            cancelled: true,
+        };
+        const result = weaveFlowExecutions({
+            pollRecords: polls,
+            flowExecutions: [exec],
+            parsedSteps: new Map([[`login|${startedAt}`, []]]),
+        });
+        expect(result.yamlBlocks[0].cancelled).toBe(true);
+    });
 });

@@ -17,6 +17,8 @@
 
 import * as fs from 'fs/promises';
 import * as path from 'path';
+import type { FlowExecutionRecord } from '../types.js';
+import type { PollRecord } from '../session/touch-inferrer.js';
 
 // ── Public types ──
 
@@ -193,4 +195,212 @@ function extractTarget(body: unknown): string | undefined {
     }
 
     return undefined;
+}
+
+// ── Weaver: pair boundaries with FlowExecutionRecord + parsed steps ──
+
+/**
+ * A flow execution that has been reconciled with its boundary markers and
+ * (optionally) its parsed step stream. The compile pipeline consumes these
+ * to splice flow events into the timeline and emit `runFlow:` directives.
+ */
+export interface WovenFlowExecution {
+    flowName: string;
+    flowPath?: string;
+    startedAt: string;
+    endedAt: string;
+    durationMs: number;
+    succeeded: boolean;
+    cancelled?: boolean;
+    /** Parsed steps from the Maestro --debug-output. Empty when artifacts unavailable. */
+    steps: FlowStep[];
+    /** Per-flow warnings (missing artifacts, mismatched timestamps, etc). */
+    warnings?: string[];
+}
+
+/**
+ * Compact representation used by YamlGenerator to emit a `runFlow:` line
+ * (with summary comments) at the right chronological position.
+ */
+export interface RunFlowYamlBlock {
+    timestamp: string;
+    endTimestamp: string;
+    flowName: string;
+    flowPath?: string;
+    succeeded: boolean;
+    cancelled?: boolean;
+    steps: FlowStep[];
+}
+
+export interface WeaveResult {
+    woven: WovenFlowExecution[];
+    /** pollRecords with `flow_boundary` entries removed — woven entries replace them. */
+    pollRecords: PollRecord[];
+    yamlBlocks: RunFlowYamlBlock[];
+    /** Top-level warnings (orphan boundaries, missing executions). */
+    warnings: string[];
+}
+
+/**
+ * Maximum tolerance (ms) when matching a flow_start boundary timestamp to a
+ * FlowExecutionRecord's startedAt. The two sources are produced milliseconds
+ * apart on the same machine, but small clock drift can occur.
+ */
+const FLOW_MATCH_TOLERANCE_MS = 1000;
+
+/**
+ * Reconcile pollRecords + flowExecutions + parsedSteps into a single woven
+ * representation. Pure function — no I/O, no side effects.
+ *
+ * Algorithm:
+ *   1. Walk pollRecords in order. Pair each `flow_start` with the next
+ *      `flow_end` whose `inferredTarget` matches the same flowName.
+ *   2. For each pair, find the matching FlowExecutionRecord (flowName +
+ *      startedAt within tolerance). Missing → degraded woven entry +
+ *      warning.
+ *   3. Look up parsedSteps by `${flowName}|${startedAt}` exact key. Missing
+ *      → empty steps + warning.
+ *   4. Emit pollRecords with `flow_boundary` entries stripped.
+ */
+export function weaveFlowExecutions(args: {
+    pollRecords: readonly PollRecord[];
+    flowExecutions: readonly FlowExecutionRecord[];
+    parsedSteps: ReadonlyMap<string, FlowStep[]>;
+}): WeaveResult {
+    const { pollRecords, flowExecutions, parsedSteps } = args;
+    const warnings: string[] = [];
+    const woven: WovenFlowExecution[] = [];
+
+    // Pair flow_start → flow_end markers in order. Orphans → warning.
+    interface BoundaryPair {
+        flowName: string;
+        startTs: string;
+        endTs: string;
+    }
+    const pairs: BoundaryPair[] = [];
+    let pendingStart: PollRecord | null = null;
+    for (const r of pollRecords) {
+        if (r.result !== 'flow_boundary') continue;
+        if (r.boundaryKind === 'flow_start') {
+            if (pendingStart) {
+                warnings.push(
+                    `orphan flow_start (target=${pendingStart.inferredTarget ?? 'unknown'}) ` +
+                        `superseded by another flow_start at ${r.timestamp}`,
+                );
+            }
+            pendingStart = r;
+        } else if (r.boundaryKind === 'flow_end') {
+            if (!pendingStart) {
+                warnings.push(`orphan flow_end at ${r.timestamp} (no preceding flow_start)`);
+                continue;
+            }
+            if (
+                pendingStart.inferredTarget &&
+                r.inferredTarget &&
+                pendingStart.inferredTarget !== r.inferredTarget
+            ) {
+                warnings.push(
+                    `mismatched flow boundary: start=${pendingStart.inferredTarget} ` +
+                        `end=${r.inferredTarget}`,
+                );
+                pendingStart = null;
+                continue;
+            }
+            pairs.push({
+                flowName: pendingStart.inferredTarget ?? r.inferredTarget ?? 'unknown',
+                startTs: pendingStart.timestamp,
+                endTs: r.timestamp,
+            });
+            pendingStart = null;
+        }
+    }
+    if (pendingStart) {
+        warnings.push(
+            `orphan flow_start (target=${pendingStart.inferredTarget ?? 'unknown'}) ` +
+                `at ${pendingStart.timestamp} — no matching flow_end`,
+        );
+    }
+
+    // Match each pair to a FlowExecutionRecord. Index executions by flowName
+    // for O(1) lookup; pair on first remaining match within tolerance.
+    const remaining = new Map<string, FlowExecutionRecord[]>();
+    for (const e of flowExecutions) {
+        const list = remaining.get(e.flowName) ?? [];
+        list.push(e);
+        remaining.set(e.flowName, list);
+    }
+
+    for (const pair of pairs) {
+        const candidates = remaining.get(pair.flowName) ?? [];
+        const startMs = Date.parse(pair.startTs);
+        const idx = candidates.findIndex(
+            (e) => Math.abs(Date.parse(e.startedAt) - startMs) <= FLOW_MATCH_TOLERANCE_MS,
+        );
+        if (idx === -1) {
+            warnings.push(
+                `no FlowExecutionRecord for "${pair.flowName}" at ${pair.startTs} ` +
+                    `(within ${FLOW_MATCH_TOLERANCE_MS}ms)`,
+            );
+            woven.push({
+                flowName: pair.flowName,
+                startedAt: pair.startTs,
+                endedAt: pair.endTs,
+                durationMs: Date.parse(pair.endTs) - Date.parse(pair.startTs),
+                succeeded: false,
+                steps: [],
+                warnings: ['missing FlowExecutionRecord'],
+            });
+            continue;
+        }
+        const exec = candidates[idx];
+        candidates.splice(idx, 1);
+
+        const stepKey = `${exec.flowName}|${exec.startedAt}`;
+        const steps = parsedSteps.get(stepKey);
+        const localWarnings: string[] = [];
+        if (!steps) {
+            localWarnings.push(
+                `no parsed steps for "${exec.flowName}" (key=${stepKey}) — ` +
+                    `debugOutputDir likely missing or unparseable`,
+            );
+            warnings.push(localWarnings[0]);
+        }
+
+        woven.push({
+            flowName: exec.flowName,
+            ...(exec.flowPath !== undefined ? { flowPath: exec.flowPath } : {}),
+            startedAt: exec.startedAt,
+            endedAt: exec.endedAt,
+            durationMs: exec.durationMs,
+            succeeded: exec.succeeded,
+            ...(exec.cancelled !== undefined ? { cancelled: exec.cancelled } : {}),
+            steps: steps ?? [],
+            ...(localWarnings.length > 0 ? { warnings: localWarnings } : {}),
+        });
+    }
+
+    // Sort woven by chronological start.
+    woven.sort((a, b) => Date.parse(a.startedAt) - Date.parse(b.startedAt));
+
+    // Emit yaml blocks parallel to woven.
+    const yamlBlocks: RunFlowYamlBlock[] = woven.map((w) => ({
+        timestamp: w.startedAt,
+        endTimestamp: w.endedAt,
+        flowName: w.flowName,
+        ...(w.flowPath !== undefined ? { flowPath: w.flowPath } : {}),
+        succeeded: w.succeeded,
+        ...(w.cancelled !== undefined ? { cancelled: w.cancelled } : {}),
+        steps: w.steps,
+    }));
+
+    // Strip flow_boundary records from the returned stream — the woven
+    // entries take ownership of that range.
+    const filteredRecords = pollRecords.filter((r) => r.result !== 'flow_boundary');
+
+    return {
+        woven,
+        pollRecords: filteredRecords,
+        yamlBlocks,
+        warnings,
+    };
 }
