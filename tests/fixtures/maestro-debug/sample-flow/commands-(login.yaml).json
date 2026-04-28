@@ -1,0 +1,14 @@
+[
+  {
+    "command": { "tapOnElementCommand": { "selector": { "textRegex": "Login" } } },
+    "metadata": { "status": "COMPLETED", "timestamp": 1746121231000, "duration": 432, "sequenceNumber": 0 }
+  },
+  {
+    "command": { "inputTextCommand": { "text": "test@example.com" } },
+    "metadata": { "status": "COMPLETED", "timestamp": 1746121231500, "duration": 220, "sequenceNumber": 1 }
+  },
+  {
+    "command": { "assertVisibleCommand": { "selector": { "textRegex": "Welcome" } } },
+    "metadata": { "status": "FAILED", "timestamp": 1746121232000, "duration": 5000, "sequenceNumber": 2, "error": "Element not found" }
+  }
+]
