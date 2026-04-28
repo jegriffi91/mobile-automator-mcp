@@ -200,6 +200,20 @@ export function _setCancelDeadlineMsForTests(ms: number): number {
 export const OUTER_BUILD_GRACE_MS = 30_000;
 
 /**
+ * Watchdog ceiling for run_test/run_flow when routed through TaskRegistry.
+ * RunTestInputSchema has no `timeoutMs` field; the inner Maestro test
+ * timeout is configured via DriverFactory's TimeoutConfig.testRunMs (default
+ * 120s). This outer cap protects against wedged orchestration (driver setup,
+ * stub server start/stop, profiling) on top of the inner subprocess timeout.
+ *
+ * 10 minutes is intentionally generous — flows that run >5min should be the
+ * exception; longer-running flows configure higher driver.testRunMs and the
+ * watchdog scales via RUN_TEST_GRACE_MS at the call site.
+ */
+export const DEFAULT_RUN_TEST_TIMEOUT_MS = 10 * 60_000;
+export const RUN_TEST_GRACE_MS = 30_000;
+
+/**
  * Phase 4 feature flag — when enabled, run_test/run_flow pause an active
  * recording session for the duration of the flow and resume it afterward.
  * When disabled (default), the legacy assertNoActiveSessions guard fires
@@ -1804,11 +1818,33 @@ async function allocateFlowDebugDir(sessionId: string, seq: number): Promise<str
 }
 
 // ---- run_test ----
+/**
+ * Synchronous run_test entry point — kept for backwards compatibility but now
+ * delegates to TaskRegistry so sync and async (start_test) flow runs share a
+ * single code path. On success returns the structured RunTestOutput; on
+ * failure or cancellation throws with a structured error.
+ */
 export async function handleRunTest(
     input: RunTestInput
 ): Promise<RunTestOutput> {
     console.error(`[MCP] run_test: running ${input.yamlPath}`);
+    const watchdogMs = DEFAULT_RUN_TEST_TIMEOUT_MS + RUN_TEST_GRACE_MS;
+    const task = await taskRegistry.run<RunTestOutput>(
+        { kind: 'test', timeoutMs: watchdogMs },
+        (ctx) => runTestTaskRunner(input, ctx.signal),
+    );
+    if (task.status === 'done' && task.result) return task.result;
+    if (task.status === 'cancelled') {
+        throw new Error(`run_test cancelled: ${task.error ?? 'aborted'}`);
+    }
+    throw new Error(task.error || 'run_test failed');
+}
 
+/** Shared between handleRunTest and handleStartTest. */
+async function runTestTaskRunner(
+    input: RunTestInput,
+    parentSignal: AbortSignal,
+): Promise<RunTestOutput> {
     return executeFlowWithPause(
         input.yamlPath,
         async (signal, debugOutputDir) => {
@@ -1828,6 +1864,7 @@ export async function handleRunTest(
                 flowPath: input.yamlPath,
             };
         },
+        parentSignal,
     );
 }
 
@@ -2183,9 +2220,25 @@ export async function handleListFlows(input: ListFlowsInput): Promise<ListFlowsO
 }
 
 export async function handleRunFlow(input: RunFlowInput): Promise<RunFlowOutput> {
-    const flowsDir = resolveFlowsDir(input.flowsDir);
-    console.error(`[MCP] run_flow: resolving "${input.name}" in ${flowsDir}`);
+    console.error(`[MCP] run_flow: resolving "${input.name}"`);
+    const watchdogMs = DEFAULT_RUN_TEST_TIMEOUT_MS + RUN_TEST_GRACE_MS;
+    const task = await taskRegistry.run<RunFlowOutput>(
+        { kind: 'flow', timeoutMs: watchdogMs },
+        (ctx) => runFlowTaskRunner(input, ctx.signal),
+    );
+    if (task.status === 'done' && task.result) return task.result;
+    if (task.status === 'cancelled') {
+        throw new Error(`run_flow cancelled: ${task.error ?? 'aborted'}`);
+    }
+    throw new Error(task.error || 'run_flow failed');
+}
 
+/** Shared between handleRunFlow and handleStartFlow. */
+async function runFlowTaskRunner(
+    input: RunFlowInput,
+    parentSignal: AbortSignal,
+): Promise<RunFlowOutput> {
+    const flowsDir = resolveFlowsDir(input.flowsDir);
     const flow = await FlowRegistry.resolve(flowsDir, input.name);
     const appliedParams = FlowRegistry.applyParams(flow, input.params);
 
@@ -2220,6 +2273,7 @@ export async function handleRunFlow(input: RunFlowInput): Promise<RunFlowOutput>
                 flowPath: flow.path,
             };
         },
+        parentSignal,
     );
 
     return {
@@ -2403,6 +2457,22 @@ export async function handleGetTaskResult(
             taskId: task.taskId,
             status: task.status,
             result: { kind: 'build', build: task.result },
+        };
+    }
+    if (task.kind === 'test') {
+        return {
+            taskId: task.taskId,
+            status: task.status,
+            result: { kind: 'test', test: task.result as unknown as RunTestOutput },
+            cancelReason: task.cancelReason,
+        };
+    }
+    if (task.kind === 'flow') {
+        return {
+            taskId: task.taskId,
+            status: task.status,
+            result: { kind: 'flow', flow: task.result as unknown as RunFlowOutput },
+            cancelReason: task.cancelReason,
         };
     }
     // Other kinds (unit_tests etc) aren't wired into the discriminated union yet.
