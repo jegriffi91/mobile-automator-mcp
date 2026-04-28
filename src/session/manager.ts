@@ -10,11 +10,21 @@
  *   • getInteractions() / getNetworkEvents(): query session logs
  */
 
-import type { Session, SessionStatus, UIInteraction, NetworkEvent, MobilePlatform, HierarchySnapshot, CaptureMode } from '../types.js';
+import type {
+    Session,
+    SessionStatus,
+    UIInteraction,
+    NetworkEvent,
+    MobilePlatform,
+    HierarchySnapshot,
+    CaptureMode,
+    TimeoutConfig,
+    FlowExecutionRecord,
+} from '../types.js';
 import { SessionDatabase } from './database.js';
 import { TouchInferrer } from './touch-inferrer.js';
 import type { PollingStatus, PollingNotifier, PollRecord } from './touch-inferrer.js';
-import type { AutomationDriver } from '../maestro/driver.js';
+import { DriverFactory, type AutomationDriver } from '../maestro/driver.js';
 
 const VALID_TRANSITIONS: Record<SessionStatus, SessionStatus[]> = {
     idle: ['recording'],
@@ -32,6 +42,19 @@ export class SessionManager {
     private activeDrivers: Map<string, AutomationDriver> = new Map();
     private sessionMocks: Map<string, Map<string, string>> = new Map();
     private standaloneMocks: Map<string, string> = new Map();
+
+    // ── Phase 4 pause/resume state ──
+    /** Sessions whose driver/poller have been torn down for a flow run. */
+    private readonly pausedSessions = new Set<string>();
+    /** PollRecords captured at pause time, restored to the resumed inferrer. */
+    private readonly pausedRecords = new Map<string, PollRecord[]>();
+    /** Per-session FlowExecutionRecord history, populated by resumeSession. */
+    private readonly flowExecutions = new Map<string, FlowExecutionRecord[]>();
+    /** Per-session in-memory runtime needed to recreate the driver on resume. */
+    private readonly sessionRuntime = new Map<
+        string,
+        { deviceId?: string; driverTimeouts?: Partial<TimeoutConfig> }
+    >();
 
     constructor(db?: SessionDatabase) {
         this.db = db || new SessionDatabase();
@@ -97,10 +120,34 @@ export class SessionManager {
     }
 
     /**
-     * Get a session state.
+     * Get a session state, including in-memory Phase 4 runtime fields
+     * (deviceId, driverTimeouts, flowExecutions) when present.
      */
     async getSession(sessionId: string): Promise<Session | null> {
-        return this.db.getSession(sessionId);
+        const session = this.db.getSession(sessionId);
+        if (!session) return null;
+        const runtime = this.sessionRuntime.get(sessionId);
+        const flowExecs = this.flowExecutions.get(sessionId);
+        return {
+            ...session,
+            ...(runtime?.deviceId !== undefined ? { deviceId: runtime.deviceId } : {}),
+            ...(runtime?.driverTimeouts !== undefined
+                ? { driverTimeouts: runtime.driverTimeouts }
+                : {}),
+            ...(flowExecs ? { flowExecutions: [...flowExecs] } : {}),
+        };
+    }
+
+    /**
+     * Phase 4: capture per-session runtime needed to recreate the driver on
+     * resume (deviceId, timeout overrides supplied at start_recording_session).
+     * In-memory only — not persisted to SQLite.
+     */
+    setSessionRuntime(
+        sessionId: string,
+        runtime: { deviceId?: string; driverTimeouts?: Partial<TimeoutConfig> },
+    ): void {
+        this.sessionRuntime.set(sessionId, runtime);
     }
 
     /**
@@ -373,6 +420,9 @@ export class SessionManager {
      * Force-clean session-side state: stop poller, stop driver, remove from
      * registries. Used by force_cleanup_session and orphan rollback paths.
      * Never throws — failures are caught and surfaced via console.error.
+     *
+     * Phase 4: also drops paused-session state so a paused session can be
+     * cleaned up cleanly even though it has no active driver/poller.
      */
     async forceCleanup(
         sessionId: string,
@@ -404,6 +454,182 @@ export class SessionManager {
             this.activeDrivers.delete(sessionId);
         }
 
+        // Phase 4: clear paused-session bookkeeping. Safe even if absent.
+        this.pausedSessions.delete(sessionId);
+        this.pausedRecords.delete(sessionId);
+        this.flowExecutions.delete(sessionId);
+        this.sessionRuntime.delete(sessionId);
+
         return { pollerStopped, driverRemoved };
+    }
+
+    // ── Phase 4: pause/resume ──
+
+    /**
+     * Pause a recording session for the duration of an external flow run.
+     *
+     * Inserts a 'flow_start' boundary marker into the inferrer's records,
+     * snapshots them, stops the poller, and tears down the daemon driver
+     * so port 7001 is released for `maestro test`. Throws if the session
+     * is not currently driving a recording.
+     *
+     * Behavior on driver.stop() failure: logged and ignored — the registry
+     * is still cleared so resume can recreate the driver fresh.
+     */
+    async pauseSession(
+        sessionId: string,
+        flowName: string,
+    ): Promise<{ pausedAt: string }> {
+        if (this.pausedSessions.has(sessionId)) {
+            throw new Error(`Session ${sessionId} is already paused`);
+        }
+        if (!this.activeDrivers.has(sessionId)) {
+            throw new Error(`Cannot pause: session ${sessionId} has no active driver`);
+        }
+        const pausedAt = new Date().toISOString();
+
+        const inferrer = this.activePollers.get(sessionId);
+        if (inferrer) {
+            // Insert the boundary marker BEFORE we stop polling so it lands
+            // in the records we then snapshot.
+            inferrer.addExternalRecord({
+                timestamp: pausedAt,
+                durationMs: 0,
+                result: 'flow_boundary',
+                boundaryKind: 'flow_start',
+                inferredTarget: flowName,
+            });
+            this.pausedRecords.set(sessionId, [...inferrer.getPollRecords()]);
+            await this.stopPolling(sessionId);
+        }
+
+        const driver = this.activeDrivers.get(sessionId);
+        if (driver) {
+            await driver.stop().catch((err) => {
+                console.error(
+                    `[SessionManager] pauseSession: driver.stop failed for ${sessionId} (non-fatal)`,
+                    err,
+                );
+            });
+            this.removeActiveDriver(sessionId);
+        }
+
+        this.pausedSessions.add(sessionId);
+        console.error(`[SessionManager] pauseSession: ${sessionId} paused for "${flowName}"`);
+        return { pausedAt };
+    }
+
+    /**
+     * Resume a previously-paused recording session.
+     *
+     * Idempotent: if the session is not paused, returns immediately with the
+     * current timestamp. This lets cleanup-stack callers invoke resume
+     * unconditionally on the error path.
+     *
+     * On success: recreates the daemon driver, restarts polling, seeds the
+     * fresh inferrer with pre-pause records, inserts a 'flow_end' boundary
+     * marker, and appends a FlowExecutionRecord. On failure to recreate the
+     * driver: marks the session aborted via the existing markAborted path
+     * and rethrows with flow context so the caller can surface it.
+     */
+    async resumeSession(
+        sessionId: string,
+        deviceId: string,
+        platform: MobilePlatform,
+        appBundleId: string,
+        flowName: string,
+        flowOutput: string,
+        flowSucceeded: boolean,
+        flowStartedAt: string,
+        notifier?: PollingNotifier,
+    ): Promise<{ resumedAt: string }> {
+        if (!this.pausedSessions.has(sessionId)) {
+            return { resumedAt: new Date().toISOString() };
+        }
+        const session = this.db.getSession(sessionId);
+        if (!session) {
+            this.pausedSessions.delete(sessionId);
+            this.pausedRecords.delete(sessionId);
+            throw new Error(`Cannot resume: session ${sessionId} not found`);
+        }
+
+        const runtime = this.sessionRuntime.get(sessionId);
+        let driver: AutomationDriver;
+        try {
+            driver = await DriverFactory.create(runtime?.driverTimeouts);
+            await driver.start(deviceId);
+        } catch (err) {
+            await this.markAborted(
+                sessionId,
+                `resume failed: ${(err as Error).message}`,
+            );
+            this.pausedSessions.delete(sessionId);
+            this.pausedRecords.delete(sessionId);
+            throw new Error(
+                `Recording session aborted: failed to resume after flow "${flowName}": ${(err as Error).message}`,
+            );
+        }
+
+        this.setActiveDriver(sessionId, driver);
+
+        // startPolling instantiates the inferrer and calls start() (which
+        // kicks off an async baseline poll). To preserve the pre-pause
+        // records, seed BEFORE start() is invoked. We inline an equivalent
+        // of startPolling here so the seed happens before start() runs.
+        const seed = this.pausedRecords.get(sessionId) ?? [];
+        const sessionRow = this.db.getSession(sessionId);
+        const pollingIntervalMs = sessionRow?.pollingIntervalMs ?? 500;
+        const logger = (interaction: UIInteraction) => this.logInteraction(interaction);
+        const hierarchyReader = driver.createTreeReader();
+        const inferrer = new TouchInferrer(
+            logger,
+            hierarchyReader,
+            { pollingIntervalMs },
+            notifier,
+        );
+        if (seed.length > 0) {
+            inferrer.seedPollRecords(seed);
+        }
+        inferrer.start(sessionId);
+        this.activePollers.set(sessionId, inferrer);
+        this.pausedRecords.delete(sessionId);
+
+        const resumedAt = new Date().toISOString();
+        inferrer.addExternalRecord({
+            timestamp: resumedAt,
+            durationMs: Date.parse(resumedAt) - Date.parse(flowStartedAt),
+            result: 'flow_boundary',
+            boundaryKind: 'flow_end',
+            inferredTarget: flowName,
+        });
+
+        // Record the flow execution for compile-time consumption.
+        const execs = this.flowExecutions.get(sessionId) ?? [];
+        execs.push({
+            flowName,
+            startedAt: flowStartedAt,
+            endedAt: resumedAt,
+            durationMs: Date.parse(resumedAt) - Date.parse(flowStartedAt),
+            output: flowOutput,
+            succeeded: flowSucceeded,
+        });
+        this.flowExecutions.set(sessionId, execs);
+
+        this.pausedSessions.delete(sessionId);
+        console.error(
+            `[SessionManager] resumeSession: ${sessionId} resumed after "${flowName}" (` +
+                `succeeded=${flowSucceeded}, platform=${platform}, app=${appBundleId})`,
+        );
+        return { resumedAt };
+    }
+
+    /** Whether the session is currently paused (Phase 4). */
+    isSessionPaused(sessionId: string): boolean {
+        return this.pausedSessions.has(sessionId);
+    }
+
+    /** Per-session flow execution history (Phase 4). Empty array if none. */
+    getFlowExecutions(sessionId: string): readonly FlowExecutionRecord[] {
+        return this.flowExecutions.get(sessionId) ?? [];
     }
 }
