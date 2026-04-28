@@ -150,8 +150,16 @@ class TaskRegistryImpl implements TaskRegistry {
     ): Promise<void> {
         try {
             const result = await run(ctx);
-            task.result = result;
-            task.status = 'done';
+            if (task._controller.signal.aborted) {
+                // Cancellation was requested but the runner ignored the abort
+                // signal and returned a value anyway. Preserve the cancellation
+                // intent — don't surface result, matching failure-path semantics.
+                task.status = 'cancelled';
+                task.error = 'cancelled (runner returned after abort signaled)';
+            } else {
+                task.result = result;
+                task.status = 'done';
+            }
         } catch (err) {
             // Run cleanups on any error.
             try {

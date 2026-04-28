@@ -91,6 +91,24 @@ describe('TaskRegistry', () => {
         expect(cleanupRan).toBe(true);
     });
 
+    it('cancellation wins over runner success when runner ignores abort signal', async () => {
+        // Runner that ignores ctx.signal entirely and returns a value.
+        const task = taskRegistry.start({ kind: 'build' }, async () => {
+            await new Promise((r) => setTimeout(r, 20));
+            return 42;
+        });
+        await Promise.resolve();
+        expect(taskRegistry.cancel(task.taskId, 'user-cancel')).toBe(true);
+        // Wait for terminal
+        for (let i = 0; i < 50; i++) {
+            if (task.status !== 'running' && task.status !== 'cancelling') break;
+            await new Promise((r) => setTimeout(r, 5));
+        }
+        expect(task.status).toBe('cancelled');
+        expect(task.result).toBeUndefined();
+        expect(task.error).toMatch(/cancelled/);
+    });
+
     it('cancel() on terminal task returns false', async () => {
         const task = await taskRegistry.run({ kind: 'build' }, async () => 'done');
         expect(taskRegistry.cancel(task.taskId)).toBe(false);
