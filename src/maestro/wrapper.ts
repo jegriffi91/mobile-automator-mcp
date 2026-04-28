@@ -20,6 +20,7 @@ import { DEFAULT_TIMEOUTS } from '../types.js';
 import { resolveMaestroBin, getExecEnv } from './env.js';
 import { withRetry, isTransientMaestroError } from './retry.js';
 import { execFileWithAbort } from '../build/utils.js';
+import { spawnStream } from '../build/stream.js';
 
 /**
  * Port the iOS XCTest driver (XCUITest / WebDriverAgent) listens on. This is
@@ -511,6 +512,7 @@ export class MaestroWrapper {
         env?: Record<string, string>,
         debugOutput?: string,
         signal?: AbortSignal,
+        onLine?: (line: string, stream: 'stdout' | 'stderr') => void,
     ): Promise<{ passed: boolean; output: string; durationMs: number }> {
         const start = Date.now();
         const envArgs = Object.entries(env ?? {}).flatMap(([k, v]) => ['-e', `${k}=${v}`]);
@@ -520,6 +522,36 @@ export class MaestroWrapper {
         }
         runArgs.push(yamlPath);
 
+        if (onLine) {
+            // Streaming path: line-by-line via spawnStream.
+            try {
+                const result = await spawnStream(
+                    this.maestroBin,
+                    this.buildArgs(runArgs),
+                    {
+                        env: getExecEnv(),
+                        maxBufferBytes: 10 * 1024 * 1024, // 10MB buffer for verbose output
+                        timeout: this.timeouts.testRunMs,
+                        signal,
+                        onLine,
+                    },
+                );
+                const durationMs = Date.now() - start;
+                let output = [result.stdout, result.stderr].filter(Boolean).join('\n');
+                if (result.aborted) output = `[aborted] ${output}`;
+                else if (result.timedOut) output = `[timed-out] ${output}`;
+                const passed = result.code === 0 && !result.timedOut && !result.aborted;
+                console.error(`[MaestroWrapper] runTest: ${passed ? 'PASSED' : 'FAILED'} in ${durationMs}ms — ${yamlPath}`);
+                return { passed, output, durationMs };
+            } catch (error: any) {
+                const durationMs = Date.now() - start;
+                const output = error.message ?? String(error);
+                console.error(`[MaestroWrapper] runTest: FAILED in ${durationMs}ms — ${yamlPath}`);
+                return { passed: false, output, durationMs };
+            }
+        }
+
+        // Buffered path (legacy): no streaming, keep existing behaviour verbatim.
         try {
             const { stdout, stderr } = await execFileWithAbort(
                 this.maestroBin,
