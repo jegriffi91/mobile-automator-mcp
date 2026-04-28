@@ -124,6 +124,10 @@ import type {
     ClearMockResponsesOutput,
     StartBuildInput,
     StartBuildOutput,
+    StartTestInput,
+    StartTestOutput,
+    StartFlowInput,
+    StartFlowOutput,
     PollTaskStatusInput,
     PollTaskStatusOutput,
     GetTaskResultInput,
@@ -2382,6 +2386,46 @@ export async function handleStartBuild(input: StartBuildInput): Promise<StartBui
     return {
         taskId: task.taskId,
         kind: 'build',
+        status: task.status,
+        startedAt: task.startedAt,
+    };
+}
+
+/**
+ * Schedule a Maestro YAML test asynchronously. Returns a taskId immediately
+ * so the agent can poll for status via poll_task_status without hitting the
+ * MCP transport timeout. cancel_task SIGTERMs the Maestro CLI (Phase 4
+ * plumbing) and runs resume cleanup if pause/resume bracketing was active.
+ */
+export async function handleStartTest(input: StartTestInput): Promise<StartTestOutput> {
+    console.error(`[MCP] start_test: yamlPath=${input.yamlPath}`);
+    const watchdogMs = DEFAULT_RUN_TEST_TIMEOUT_MS + RUN_TEST_GRACE_MS;
+    const task = taskRegistry.start<RunTestOutput>(
+        { kind: 'test', timeoutMs: watchdogMs },
+        (ctx) => runTestTaskRunner(input, ctx.signal),
+    );
+    return {
+        taskId: task.taskId,
+        kind: 'test',
+        status: task.status,
+        startedAt: task.startedAt,
+    };
+}
+
+/**
+ * Schedule a named Maestro flow asynchronously. Mirrors handleStartTest but
+ * resolves <flowsDir>/<name>.yaml + manifest params before scheduling.
+ */
+export async function handleStartFlow(input: StartFlowInput): Promise<StartFlowOutput> {
+    console.error(`[MCP] start_flow: name=${input.name}`);
+    const watchdogMs = DEFAULT_RUN_TEST_TIMEOUT_MS + RUN_TEST_GRACE_MS;
+    const task = taskRegistry.start<RunFlowOutput>(
+        { kind: 'flow', timeoutMs: watchdogMs },
+        (ctx) => runFlowTaskRunner(input, ctx.signal),
+    );
+    return {
+        taskId: task.taskId,
+        kind: 'flow',
         status: task.status,
         startedAt: task.startedAt,
     };

@@ -82,6 +82,10 @@ import {
     AuditStateOutputSchema,
     StartBuildInputSchema,
     StartBuildOutputSchema,
+    StartTestInputSchema,
+    StartTestOutputSchema,
+    StartFlowInputSchema,
+    StartFlowOutputSchema,
     PollTaskStatusInputSchema,
     PollTaskStatusOutputSchema,
     GetTaskResultInputSchema,
@@ -124,6 +128,8 @@ import {
     handleSetMockResponse,
     handleClearMockResponses,
     handleStartBuild,
+    handleStartTest,
+    handleStartFlow,
     handlePollTaskStatus,
     handleGetTaskResult,
     handleCancelTask,
@@ -719,6 +725,58 @@ server.registerTool(
     },
     async (args) => {
         const result = await handleStartBuild(args);
+        return {
+            content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
+            structuredContent: result,
+        };
+    }
+);
+
+// ── 13a-test. start_test ──
+server.registerTool(
+    TOOL_NAMES.START_TEST,
+    {
+        title: 'Start Test (Async)',
+        description:
+            'Starts a Maestro YAML test asynchronously. Returns a taskId immediately so the agent can poll status via poll_task_status without hitting the MCP transport timeout. Pause/resume bracketing of an active recording session works exactly as for run_test; cancel_task SIGTERMs the Maestro CLI and runs resume cleanup.',
+        inputSchema: StartTestInputSchema,
+        outputSchema: StartTestOutputSchema,
+        annotations: {
+            title: 'Start Test (Async)',
+            readOnlyHint: false,
+            destructiveHint: false,
+            idempotentHint: false,
+            openWorldHint: true,
+        },
+    },
+    async (args) => {
+        const result = await handleStartTest(args);
+        return {
+            content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
+            structuredContent: result,
+        };
+    }
+);
+
+// ── 13a-flow. start_flow ──
+server.registerTool(
+    TOOL_NAMES.START_FLOW,
+    {
+        title: 'Start Flow (Async)',
+        description:
+            'Starts a named Maestro flow asynchronously by resolving <flowsDir>/<name>.yaml and merging manifest param defaults. Returns a taskId immediately. cancel_task interrupts a running flow mid-execution by SIGTERMing the Maestro CLI; resume cleanup runs automatically when bracketing an active recording session.',
+        inputSchema: StartFlowInputSchema,
+        outputSchema: StartFlowOutputSchema,
+        annotations: {
+            title: 'Start Flow (Async)',
+            readOnlyHint: false,
+            destructiveHint: false,
+            idempotentHint: false,
+            openWorldHint: true,
+        },
+    },
+    async (args) => {
+        const result = await handleStartFlow(args);
         return {
             content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
             structuredContent: result,
