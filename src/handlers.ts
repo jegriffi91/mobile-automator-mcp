@@ -194,6 +194,31 @@ export function _setCancelDeadlineMsForTests(ms: number): number {
 export const OUTER_BUILD_GRACE_MS = 30_000;
 
 /**
+ * Phase 4 feature flag — when enabled, run_test/run_flow pause an active
+ * recording session for the duration of the flow and resume it afterward.
+ * When disabled (default), the legacy assertNoActiveSessions guard fires
+ * with a hard error.
+ *
+ * Read once at module load; tests flip via _setFlowPauseResumeEnabledForTests.
+ */
+let _flowPauseResumeEnabled = process.env.MCA_FLOW_PAUSE_RESUME === 'on';
+
+/** Test-only — flip the Phase 4 feature flag at runtime. Returns the previous value. */
+export function _setFlowPauseResumeEnabledForTests(value: boolean): boolean {
+    const prev = _flowPauseResumeEnabled;
+    _flowPauseResumeEnabled = value;
+    return prev;
+}
+
+/**
+ * Outer watchdog for the pause→flow→resume cycle. The flow itself has its
+ * own testRunMs timeout in MaestroWrapper.runTest; this is purely the upper
+ * bound on the orchestration (pause + flow + resume) before runHandler's
+ * cleanup stack fires resume on the error path.
+ */
+const PAUSE_RESUME_WATCHDOG_MS = 5 * 60_000;
+
+/**
  * Test-only — replace the Proxyman MCP client used by handlers. Returns the
  * previous instance so tests can restore it.
  */
@@ -244,6 +269,12 @@ export async function handleStartRecording(
             input.settleTimeoutMs,
             input.trackEventPaths,
         );
+        // Phase 4: stash deviceId + driverTimeouts so resumeSession can
+        // recreate the daemon driver after a paused flow run.
+        sessionManager.setSessionRuntime(sessionId, {
+            deviceId: validation.deviceId,
+            driverTimeouts: input.timeouts,
+        });
         cleanup.add('mark session aborted', () =>
             sessionManager.markAborted(sessionId, 'start_recording_session aborted'),
         );
@@ -1538,15 +1569,119 @@ export async function handleRegisterSegment(
     };
 }
 
+/**
+ * Phase 4: bracket a flow run with pause/resume of an active recording
+ * session, behind MCA_FLOW_PAUSE_RESUME.
+ *
+ * When the flag is OFF (default): falls through to the legacy
+ * assertNoActiveSessions hard-error guard — preserves Phase 1 behavior.
+ *
+ * When the flag is ON and exactly one session is active: pauses the
+ * session, runs the flow with a propagated AbortSignal so cancel_task can
+ * SIGTERM the maestro test subprocess, then resumes. Resume runs on both
+ * success and error paths via a single doResume() helper so failure
+ * handling is identical. runHandler's cleanup stack guarantees resume
+ * even on uncaught throws or watchdog timeout.
+ */
+async function executeFlowWithPause<T>(
+    flowName: string,
+    runFlow: (signal: AbortSignal) => Promise<{ result: T; output: string; succeeded: boolean }>,
+): Promise<T> {
+    if (!_flowPauseResumeEnabled) {
+        assertNoActiveSessions(sessionManager.listActiveDrivers(), flowName);
+        const { result } = await runFlow(new AbortController().signal);
+        return result;
+    }
+
+    const active = sessionManager.listActiveDrivers();
+    if (active.length === 0) {
+        const { result } = await runFlow(new AbortController().signal);
+        return result;
+    }
+    if (active.length > 1) {
+        throw new Error(
+            `Cannot run flow "${flowName}" with ${active.length} active sessions; ` +
+                `multi-session flow execution is not supported. Use force_cleanup_session ` +
+                `to stop the unwanted session(s) first.`,
+        );
+    }
+    const sessionId = active[0];
+
+    return runHandler(
+        { name: `flow_with_pause(${flowName})`, timeoutMs: PAUSE_RESUME_WATCHDOG_MS },
+        async (cleanup) => {
+            const session = await sessionManager.getSession(sessionId);
+            if (!session) {
+                throw new Error(`Session disappeared: ${sessionId}`);
+            }
+            if (!session.deviceId) {
+                throw new Error(
+                    `Session ${sessionId} has no recorded deviceId — cannot resume after flow.`,
+                );
+            }
+
+            const { pausedAt } = await sessionManager.pauseSession(sessionId, flowName);
+
+            // Single resume helper used by both success and error paths so
+            // failure handling is identical (markAborted is called inside
+            // resumeSession on its own error path).
+            let resumed = false;
+            const flowResult = { output: '', succeeded: false };
+            const doResume = async (): Promise<void> => {
+                if (resumed) return;
+                resumed = true;
+                await sessionManager.resumeSession(
+                    sessionId,
+                    session.deviceId!,
+                    session.platform,
+                    session.appBundleId,
+                    flowName,
+                    flowResult.output,
+                    flowResult.succeeded,
+                    pausedAt,
+                );
+            };
+            cleanup.add('resume session', doResume);
+
+            const { result, output, succeeded } = await runFlow(cleanup.signal);
+            flowResult.output = output;
+            flowResult.succeeded = succeeded;
+            // Success path: invoke resume manually and clear the cleanup
+            // entry so we don't double-resume. (cleanup.runAll only runs on
+            // throw/abort/timeout — see cleanup.ts.)
+            cleanup.forget('resume session');
+            await doResume();
+            return result;
+        },
+    );
+}
+
 // ---- run_test ----
 export async function handleRunTest(
     input: RunTestInput
 ): Promise<RunTestOutput> {
     console.error(`[MCP] run_test: running ${input.yamlPath}`);
 
-    // Fail fast if a recording session owns the XCTest driver on port 7001.
-    assertNoActiveSessions(sessionManager.listActiveDrivers(), 'run_test');
+    return executeFlowWithPause(
+        input.yamlPath,
+        async (signal) => {
+            const out = await runTestCore(input, signal);
+            return {
+                result: out,
+                output: out.output,
+                succeeded: out.passed,
+            };
+        },
+    );
+}
 
+/**
+ * Inner body of run_test, factored out so executeFlowWithPause can wrap it.
+ * Receives the AbortSignal that propagates from cleanup.signal — passed all
+ * the way down to MaestroWrapper.runTest so cancel_task (or watchdog
+ * timeout) can SIGTERM the flow subprocess.
+ */
+async function runTestCore(input: RunTestInput, signal: AbortSignal): Promise<RunTestOutput> {
     // Create a CLI-only driver for test execution (no daemon needed). Forward
     // driverCooldownMs so callers can tune the port-7001 TIME_WAIT drain when
     // the health probe misses and we fall back to uninstall.
@@ -1609,8 +1744,10 @@ export async function handleRunTest(
             }
         }
 
-        // Step 3: Run Maestro test
-        const result = await driver.runTest(input.yamlPath, input.env, input.debugOutput);
+        // Step 3: Run Maestro test (signal propagates from
+        // executeFlowWithPause's cleanup.signal so cancel_task can interrupt
+        // the maestro test subprocess via SIGTERM)
+        const result = await driver.runTest(input.yamlPath, input.env, input.debugOutput, signal);
 
         // Step 4: Stop profiling and collect metrics (non-fatal on failure)
         if (profiler?.isActive) {
@@ -1879,9 +2016,6 @@ export async function handleListFlows(input: ListFlowsInput): Promise<ListFlowsO
 }
 
 export async function handleRunFlow(input: RunFlowInput): Promise<RunFlowOutput> {
-    // Fail fast (with the run_flow name) before delegating into run_test.
-    assertNoActiveSessions(sessionManager.listActiveDrivers(), 'run_flow');
-
     const flowsDir = resolveFlowsDir(input.flowsDir);
     console.error(`[MCP] run_flow: resolving "${input.name}" in ${flowsDir}`);
 
@@ -1892,15 +2026,31 @@ export async function handleRunFlow(input: RunFlowInput): Promise<RunFlowOutput>
         `[MCP] run_flow: executing ${flow.path} with ${Object.keys(appliedParams).length} param(s)`,
     );
 
-    const result = await handleRunTest({
-        yamlPath: flow.path,
-        env: appliedParams,
-        debugOutput: input.debugOutput,
-        stubsDir: input.stubsDir,
-        stubServerPort: input.stubServerPort,
-        platform: input.platform,
-        driverCooldownMs: input.driverCooldownMs,
-    });
+    // Route through executeFlowWithPause directly (rather than handleRunTest)
+    // so the flow name is meaningful in the pause/resume marker and the
+    // active-session guard, and so we don't double-bracket the cycle.
+    const result = await executeFlowWithPause(
+        flow.name,
+        async (signal) => {
+            const out = await runTestCore(
+                {
+                    yamlPath: flow.path,
+                    env: appliedParams,
+                    debugOutput: input.debugOutput,
+                    stubsDir: input.stubsDir,
+                    stubServerPort: input.stubServerPort,
+                    platform: input.platform,
+                    driverCooldownMs: input.driverCooldownMs,
+                },
+                signal,
+            );
+            return {
+                result: out,
+                output: out.output,
+                succeeded: out.passed,
+            };
+        },
+    );
 
     return {
         passed: result.passed,

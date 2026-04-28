@@ -113,6 +113,22 @@ Since Proxyman captures the full URL including port, domain filtering effectivel
 
 ---
 
+## Recording sessions and Maestro flow execution
+
+When `MCA_FLOW_PAUSE_RESUME=on` and a recording session is active, calling
+`run_test`/`run_flow` pauses the session's hierarchy poller, tears down the
+daemon driver to release port 7001, runs the flow via the CLI, then
+restarts the daemon and resumes polling. Synthetic `flow_boundary` markers
+in `pollRecords` mark the gap; the flow's stdout is captured on
+`Session.flowExecutions[]` for compile-time consumption.
+
+When the flag is unset/`off` (default), the legacy `assertNoActiveSessions`
+guard throws — current behavior preserved.
+
+See `docs/phase-4-design.md` for strategy comparison and decision context.
+
+---
+
 ## Recording vs. Replay
 
 > **Important:** `run_test` is a **replay-only** tool. It executes a static Maestro YAML script against a booted simulator, optionally serving pre-recorded WireMock stubs. It does **not** connect to live Proxyman or capture new network traffic during execution.
