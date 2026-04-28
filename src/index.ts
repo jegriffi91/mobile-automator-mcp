@@ -914,7 +914,7 @@ server.registerTool(
     {
         title: 'Take Screenshot',
         description:
-            'Capture a PNG of the current simulator/emulator screen. iOS uses `xcrun simctl io <udid> screenshot`; Android uses `adb exec-out screencap -p`. Returns the absolute path of the written PNG, which Claude can read back directly.',
+            'Capture a PNG of the current simulator/emulator screen; returns an absolute path Claude can read back. iOS uses `xcrun simctl io <udid> screenshot`; Android uses `adb exec-out screencap -p`. Retries up to 2x on transient failures (with exponential backoff); on terminal failure returns passed:false with a structured output instead of throwing.',
         inputSchema: TakeScreenshotInputSchema,
         outputSchema: TakeScreenshotOutputSchema,
         annotations: {

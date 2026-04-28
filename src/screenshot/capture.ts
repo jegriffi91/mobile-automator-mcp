@@ -6,6 +6,16 @@
  *
  * Both return a `ScreenshotResult` with the final image path, size on disk,
  * and a truncated stdout/stderr blob for diagnostics.
+ *
+ * ── Resilience contract ──
+ * Both iOS (xcrun simctl io screenshot) and Android (adb exec-out screencap)
+ * paths are wrapped in retry<T> with up to 2 retries on transient failures
+ * (timeouts, network class). On terminal failure, returns a structured
+ * { passed: false, output, durationMs } result rather than throwing — callers
+ * receive the same shape on success and failure and decide how to proceed.
+ *
+ * No fallback binary (e.g. idb) today; if simctl/adb is unavailable, the
+ * call returns passed:false. A future iteration could add idb as a fallback.
  */
 
 import { execFile } from 'child_process';
@@ -13,6 +23,7 @@ import * as path from 'path';
 import * as os from 'os';
 import * as fs from 'fs/promises';
 import { truncateOutput, execFileWithAbort } from '../build/utils.js';
+import { retry } from '../retry.js';
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 const ADB_MAX_BUFFER = 50 * 1024 * 1024;
@@ -91,6 +102,27 @@ function execAdbScreencap(
     });
 }
 
+// ── Test seams (DI) ──
+// Mirror the established `_setProxymanMcpClientFactory` pattern in handlers.ts.
+type ExecFileWithAbortFn = typeof execFileWithAbort;
+type ExecAdbScreencapFn = typeof execAdbScreencap;
+let _execFileWithAbort: ExecFileWithAbortFn = execFileWithAbort;
+let _execAdbScreencap: ExecAdbScreencapFn = execAdbScreencap;
+
+/** Test-only: swap the iOS exec helper. Returns the previous fn. */
+export function _setExecFileWithAbortForTests(fn: ExecFileWithAbortFn): ExecFileWithAbortFn {
+    const prev = _execFileWithAbort;
+    _execFileWithAbort = fn;
+    return prev;
+}
+
+/** Test-only: swap the Android adb screencap helper. Returns the previous fn. */
+export function _setExecAdbScreencapForTests(fn: ExecAdbScreencapFn): ExecAdbScreencapFn {
+    const prev = _execAdbScreencap;
+    _execAdbScreencap = fn;
+    return prev;
+}
+
 async function statSizeOrUndefined(filePath: string): Promise<number | undefined> {
     try {
         const s = await fs.stat(filePath);
@@ -109,10 +141,19 @@ export async function takeIosScreenshot(options: ScreenshotOptions): Promise<Scr
     let passed = false;
 
     try {
-        const { stdout, stderr } = await execFileWithAbort(
-            'xcrun',
-            ['simctl', 'io', options.deviceUdid, 'screenshot', imagePath],
-            { timeout: options.timeoutMs ?? DEFAULT_TIMEOUT_MS, signal: options.signal },
+        const { stdout, stderr } = await retry(
+            () => _execFileWithAbort(
+                'xcrun',
+                ['simctl', 'io', options.deviceUdid, 'screenshot', imagePath],
+                { timeout: options.timeoutMs ?? DEFAULT_TIMEOUT_MS, signal: options.signal },
+            ),
+            {
+                retries: 2,
+                initialDelayMs: 250,
+                maxDelayMs: 2000,
+                signal: options.signal,
+                name: 'screenshot/ios',
+            },
         );
         chunks.push(stdout, stderr);
         passed = true;
@@ -149,10 +190,19 @@ export async function takeAndroidScreenshot(options: ScreenshotOptions): Promise
     let passed = false;
 
     try {
-        const { stdout, stderr } = await execAdbScreencap(
-            options.deviceUdid,
-            options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
-            options.signal,
+        const { stdout, stderr } = await retry(
+            () => _execAdbScreencap(
+                options.deviceUdid,
+                options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+                options.signal,
+            ),
+            {
+                retries: 2,
+                initialDelayMs: 250,
+                maxDelayMs: 2000,
+                signal: options.signal,
+                name: 'screenshot/android',
+            },
         );
         await fs.writeFile(imagePath, stdout);
         const stderrText = stderr.toString('utf8');

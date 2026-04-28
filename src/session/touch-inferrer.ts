@@ -14,6 +14,7 @@
 import type { UIInteraction, UIElement, UIActionType, StateChange, UIHierarchyNode } from '../types.js';
 import { HierarchyDiffer, flattenToElements } from '../maestro/hierarchy-differ.js';
 import { isLowConfidenceElement } from './element-quality.js';
+import { retry } from '../retry.js';
 
 /** Health status returned by TouchInferrer.getStatus() */
 export interface PollingStatus {
@@ -374,7 +375,18 @@ export class TouchInferrer {
     this.pollCount++;
     const pollStart = Date.now();
     try {
-      const currentHierarchy = await this.hierarchyReader();
+      // Retry hierarchy reads once on transient failure. Polling is best-effort
+      // and we don't want to compound delays — only one retry. errorCount is
+      // incremented in the outer catch, so it only counts post-retry failures.
+      const currentHierarchy = await retry(
+        () => this.hierarchyReader(),
+        {
+          retries: 1,
+          initialDelayMs: 100,
+          maxDelayMs: 400,
+          name: 'touch-inferrer/hierarchy',
+        },
+      );
       this.successCount++;
       const readDuration = Date.now() - pollStart;
 

@@ -828,3 +828,50 @@ describe('inferInteraction — low-confidence element rejection', () => {
   });
 });
 
+describe('TouchInferrer.pollOnce hierarchy retry', () => {
+  const sessionId = 'retry-test';
+
+  function makeTree(id: string) {
+    return { role: 'view', id, children: [] };
+  }
+
+  it('retries hierarchy read once on transient failure without incrementing errorCount', async () => {
+    let calls = 0;
+    const reader = vi.fn().mockImplementation(async () => {
+      calls += 1;
+      if (calls === 1) {
+        const err: NodeJS.ErrnoException = new Error('transient');
+        err.code = 'ECONNRESET';
+        throw err;
+      }
+      return makeTree('root');
+    });
+    const logger = vi.fn().mockResolvedValue(undefined);
+    const inferrer = new TouchInferrer(logger, reader, { pollingIntervalMs: 10000 });
+
+    await inferrer.pollOnce(sessionId);
+    const status = inferrer.getStatus();
+    expect(status.pollCount).toBe(1);
+    expect(status.successCount).toBe(1);
+    expect(status.errorCount).toBe(0);
+    expect(reader).toHaveBeenCalledTimes(2);
+  });
+
+  it('errorCount increments only once after retry exhaustion', async () => {
+    let calls = 0;
+    const reader = vi.fn().mockImplementation(async () => {
+      calls += 1;
+      const err: NodeJS.ErrnoException = new Error(`fail-${calls}`);
+      err.code = 'ECONNRESET';
+      throw err;
+    });
+    const logger = vi.fn();
+    const inferrer = new TouchInferrer(logger, reader, { pollingIntervalMs: 10000 });
+
+    await expect(inferrer.pollOnce(sessionId)).rejects.toThrow(/fail-2/);
+    const status = inferrer.getStatus();
+    expect(status.errorCount).toBe(1); // not 2 — retry was internal
+    expect(reader).toHaveBeenCalledTimes(2); // 1 retry → 2 total attempts
+  });
+});
+

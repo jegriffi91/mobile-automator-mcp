@@ -6,7 +6,7 @@
  */
 
 import { describe, it, expect, vi } from 'vitest';
-import { parseRuleId, parseRuleList, ProxymanMcpClient, type ProxymanRuleSummary } from './client.js';
+import { parseRuleId, parseRuleList, ProxymanMcpClient, ProxymanMcpError, type ProxymanRuleSummary } from './client.js';
 
 describe('parseRuleId', () => {
     it('extracts the ID from a successful create response', () => {
@@ -134,5 +134,34 @@ describe('listRulesByTagPrefix / deleteRulesByTagPrefix / healthCheck', () => {
             () => new Promise(() => {}), // hangs forever
         );
         await expect(client.healthCheck(20)).resolves.toBe(false);
+    });
+});
+
+describe('deleteRule retry', () => {
+    it('retries on transient failure and ultimately succeeds', async () => {
+        const client = new ProxymanMcpClient('/dev/null');
+        let calls = 0;
+        const callToolSpy = vi.spyOn(client, 'callTool').mockImplementation(async () => {
+            calls += 1;
+            if (calls < 3) {
+                const err: NodeJS.ErrnoException = new Error('connection reset');
+                err.code = 'ECONNRESET';
+                throw err;
+            }
+            return 'ok';
+        });
+
+        await expect(client.deleteRule('ABC123', 'scripting')).resolves.toBeUndefined();
+        expect(callToolSpy).toHaveBeenCalledTimes(3);
+    });
+
+    it('does not retry on terminal "rule not found" error', async () => {
+        const client = new ProxymanMcpClient('/dev/null');
+        const callToolSpy = vi.spyOn(client, 'callTool').mockImplementation(async () => {
+            throw new ProxymanMcpError('Rule not found', 'delete_rule');
+        });
+
+        await expect(client.deleteRule('MISSING', 'scripting')).rejects.toThrow(/not found/i);
+        expect(callToolSpy).toHaveBeenCalledTimes(1);
     });
 });
