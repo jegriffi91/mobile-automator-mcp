@@ -17,6 +17,7 @@
 
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { retry } from '../retry.js';
 
 const DEFAULT_BIN = '/Applications/Proxyman.app/Contents/MacOS/mcp-server';
 
@@ -217,7 +218,30 @@ export class ProxymanMcpClient {
     }
 
     async deleteRule(id: string, ruleType: ProxymanRuleType = 'scripting'): Promise<void> {
-        await this.callTool('delete_rule', { id, rule_type: ruleType });
+        // Retry transient transport/timeout failures. ProxymanMcpError instances
+        // surface tool-level errors (e.g. "rule not found") — the default
+        // isRetryable predicate keeps Error subclasses retryable, so we narrow
+        // here: a ProxymanMcpError that names a non-existent rule is not worth
+        // retrying. Heuristic: re-fail messages that look definitive.
+        await retry(
+            () => this.callTool('delete_rule', { id, rule_type: ruleType }),
+            {
+                retries: 2,
+                initialDelayMs: 200,
+                maxDelayMs: 1500,
+                name: 'proxyman/delete',
+                isRetryable: (err) => {
+                    if (err instanceof ProxymanMcpError) {
+                        // "Not found" / "does not exist" — terminal, no point retrying.
+                        if (/not found|does not exist|no such rule/i.test(err.message)) return false;
+                        return true;
+                    }
+                    // Fall through to default heuristics for non-Proxyman errors.
+                    if (err instanceof Error && err.name === 'AbortError') return false;
+                    return err instanceof Error;
+                },
+            },
+        );
     }
 
     async listRules(ruleType: ProxymanRuleType | 'all' = 'all'): Promise<ProxymanRuleSummary[]> {

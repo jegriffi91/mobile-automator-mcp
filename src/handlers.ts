@@ -2539,6 +2539,10 @@ export async function handleSetMockResponse(
 //   - sessionId (with optional mockId): clear all session mocks, or one specific
 //   - mockId without sessionId: clear one standalone mock by ID
 //   - allStandalone: clear all standalone mocks
+//
+// Note: transient delete failures are retried at the client layer
+// (ProxymanMcpClient.deleteRule wraps callTool in retry<T>). The catch blocks
+// below only fire on terminal failure — no double-retry needed here.
 export async function handleClearMockResponses(
     input: ClearMockResponsesInput,
 ): Promise<ClearMockResponsesOutput> {
@@ -2624,6 +2628,11 @@ export async function handleClearMockResponses(
  * stop_and_compile_test. Uses Proxyman's list_rules as the source of truth so
  * we don't leak when the local ledger is stale (e.g. user deleted via the UI
  * mid-session).
+ *
+ * Note: transient delete failures are retried at the client layer
+ * (ProxymanMcpClient.deleteRule wraps callTool in retry<T>). The aggregator
+ * `deleteRulesByTagPrefix` and the ledger-fallback loop both call deleteRule
+ * directly, so retry happens automatically — no extra wrapping here.
  */
 async function cleanupProxymanRulesForSession(sessionId: string): Promise<void> {
     const ledgerEntries = sessionManager.listSessionMocks(sessionId);
