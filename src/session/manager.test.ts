@@ -328,3 +328,106 @@ describe('SessionManager.forceCleanup on paused session', () => {
     expect(mgr.getFlowExecutions(sessionId)).toEqual([]);
   });
 });
+
+// ── Phase 6: survive-restart integration ──
+//
+// sql.js is in-memory only — we cannot literally restart the process. Instead
+// we simulate a restart by sharing the *same* SessionDatabase instance between
+// two SessionManager instances. The first manager writes state; the second
+// manager is constructed fresh (empty in-memory caches) and should read back
+// everything from the shared DB.
+
+describe('Phase 6 — session-runtime state survives manager restart', () => {
+  it('getSession returns persisted deviceId and driverTimeouts on a fresh manager', async () => {
+    // ── First manager (simulates the original server process) ──
+    const db = new SessionDatabase();
+    await db.initialize();
+    const mgr1 = new SessionManager(db);
+    const sessionId = `s-${Math.random().toString(36).slice(2, 10)}`;
+    await mgr1.create(sessionId, 'com.test.app', 'ios');
+    mgr1.setSessionRuntime(sessionId, {
+      deviceId: 'IPHONE-15-SIM',
+      driverTimeouts: { actionMs: 30_000, testRunMs: 200_000 },
+    });
+
+    // ── Second manager (simulates a restarted server process) ──
+    const mgr2 = new SessionManager(db);
+
+    const session = await mgr2.getSession(sessionId);
+    expect(session).not.toBeNull();
+    expect(session?.deviceId).toBe('IPHONE-15-SIM');
+    expect(session?.driverTimeouts).toEqual({ actionMs: 30_000, testRunMs: 200_000 });
+  });
+
+  it('getFlowExecutions returns persisted records on a fresh manager', async () => {
+    // ── First manager ──
+    const db = new SessionDatabase();
+    await db.initialize();
+    const mgr1 = new SessionManager(db);
+    const sessionId = `s-${Math.random().toString(36).slice(2, 10)}`;
+    await mgr1.create(sessionId, 'com.test.app', 'ios');
+    const driver = makeMockDriver();
+    mgr1.setActiveDriver(sessionId, driver);
+    mgr1.setSessionRuntime(sessionId, { deviceId: 'PIXEL-8' });
+    const flowStartedAt = new Date().toISOString();
+    await mgr1.pauseSession(sessionId, 'checkout.flow');
+
+    const newDriver = makeMockDriver();
+    vi.mocked(DriverFactory.create).mockResolvedValue(newDriver);
+
+    await mgr1.resumeSession(
+      sessionId,
+      'PIXEL-8',
+      'android',
+      'com.test.app',
+      'checkout.flow',
+      'maestro output text',
+      true,
+      flowStartedAt,
+      undefined,
+      { flowPath: '/flows/checkout.yaml' },
+    );
+
+    // ── Second manager (fresh process simulation) ──
+    const mgr2 = new SessionManager(db);
+
+    const execs = mgr2.getFlowExecutions(sessionId);
+    expect(execs).toHaveLength(1);
+    expect(execs[0].flowName).toBe('checkout.flow');
+    expect(execs[0].output).toBe('maestro output text');
+    expect(execs[0].succeeded).toBe(true);
+    expect(execs[0].flowPath).toBe('/flows/checkout.yaml');
+
+    vi.mocked(DriverFactory.create).mockReset();
+  });
+
+  it('forceCleanup on fresh manager removes persisted flow_executions', async () => {
+    const db = new SessionDatabase();
+    await db.initialize();
+    const sessionId = `s-${Math.random().toString(36).slice(2, 10)}`;
+
+    // Seed directly via DB to simulate state written by a prior process.
+    db.insertSession({
+      id: sessionId,
+      appBundleId: 'com.test.app',
+      platform: 'ios',
+      status: 'recording',
+      startedAt: new Date().toISOString(),
+    });
+    db.addFlowExecution(sessionId, {
+      flowName: 'login.flow',
+      startedAt: new Date().toISOString(),
+      endedAt: new Date().toISOString(),
+      durationMs: 3_000,
+      output: 'ok',
+      succeeded: true,
+    });
+
+    // Fresh manager cleans up.
+    const mgr = new SessionManager(db);
+    await mgr.forceCleanup(sessionId, 'test cleanup');
+
+    expect(mgr.getFlowExecutions(sessionId)).toEqual([]);
+    expect(db.getFlowExecutions(sessionId)).toEqual([]);
+  });
+});
