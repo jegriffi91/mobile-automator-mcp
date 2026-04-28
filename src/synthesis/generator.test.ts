@@ -220,3 +220,88 @@ describe('YamlGenerator.buildSelector', () => {
         expect(YamlGenerator.buildSelector({})).toBe('text: "unknown"');
     });
 });
+
+// ── Phase 5: runFlow: emission ──
+
+import type { RunFlowYamlBlock, FlowStep } from './flow-weaver.js';
+
+function flowStep(seq: number, kind: string, opts: Partial<FlowStep> = {}): FlowStep {
+    return {
+        sequenceNumber: seq,
+        timestamp: new Date(1746121231000 + seq * 100).toISOString(),
+        kind,
+        durationMs: 10,
+        status: 'COMPLETED',
+        raw: {},
+        ...opts,
+    };
+}
+
+describe('YamlGenerator.toYaml — flowBlocks (Phase 5)', () => {
+    const gen = new YamlGenerator('com.example.MyApp');
+
+    it('produces output identical to legacy when no flowBlocks supplied', () => {
+        const before = gen.toYaml([makeStep()]);
+        const after = gen.toYaml([makeStep()], undefined, {});
+        expect(after).toBe(before);
+    });
+
+    it('emits a runFlow: line at the right chronological position with summary comments', () => {
+        const flowBlock: RunFlowYamlBlock = {
+            timestamp: '2024-01-01T00:00:00.500Z',
+            endTimestamp: '2024-01-01T00:00:05.000Z',
+            flowName: 'login',
+            flowPath: '/abs/login.yaml',
+            succeeded: true,
+            steps: [flowStep(0, 'tapOnElement', { target: 'Login' }), flowStep(1, 'inputText', { target: 'u' })],
+        };
+        const yaml = gen.toYaml(
+            [
+                makeStep({ index: 0, interaction: { timestamp: '2024-01-01T00:00:00.000Z' } }),
+                makeStep({ index: 1, interaction: { timestamp: '2024-01-01T00:00:10.000Z' } }),
+            ],
+            undefined,
+            { flowBlocks: [flowBlock], outputDir: '/abs' },
+        );
+        expect(yaml).toContain('# Flow: login');
+        expect(yaml).toContain('# Steps: tapOnElement → inputText');
+        expect(yaml).toContain('- runFlow: login.yaml');
+        // Position check: runFlow line should come after the first step but
+        // before the second step.
+        const idxFirstStep = yaml.indexOf('- tapOn:');
+        const idxRunFlow = yaml.indexOf('- runFlow:');
+        const idxSecondStep = yaml.lastIndexOf('- tapOn:');
+        expect(idxFirstStep).toBeLessThan(idxRunFlow);
+        expect(idxRunFlow).toBeLessThan(idxSecondStep);
+    });
+
+    it('emits a leading FAILED warning + error message for a failed flow', () => {
+        const flowBlock: RunFlowYamlBlock = {
+            timestamp: '2024-01-01T00:00:00.000Z',
+            endTimestamp: '2024-01-01T00:00:05.000Z',
+            flowName: 'login',
+            flowPath: '/abs/login.yaml',
+            succeeded: false,
+            steps: [
+                flowStep(0, 'assertVisible', { status: 'FAILED', error: 'Element not found' }),
+            ],
+        };
+        const yaml = gen.toYaml([], undefined, { flowBlocks: [flowBlock], outputDir: '/abs' });
+        expect(yaml).toContain('# ⚠ flow FAILED: login — Element not found');
+        expect(yaml).toContain('assertVisible (FAILED: Element not found)');
+    });
+
+    it('emits a leading CANCELLED warning for a cancelled flow', () => {
+        const flowBlock: RunFlowYamlBlock = {
+            timestamp: '2024-01-01T00:00:00.000Z',
+            endTimestamp: '2024-01-01T00:00:05.000Z',
+            flowName: 'login',
+            flowPath: '/abs/login.yaml',
+            succeeded: false,
+            cancelled: true,
+            steps: [],
+        };
+        const yaml = gen.toYaml([], undefined, { flowBlocks: [flowBlock], outputDir: '/abs' });
+        expect(yaml).toContain('# ⚠ flow CANCELLED: login');
+    });
+});
