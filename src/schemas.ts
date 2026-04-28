@@ -1813,7 +1813,7 @@ export const AuditStateOutputSchema = z.object({
 // Async task lifecycle (Phase 2: pollable long-running tasks)
 // ──────────────────────────────────────────────
 
-export const TaskKindSchema = z.enum(['build', 'unit_tests', 'recording']);
+export const TaskKindSchema = z.enum(['build', 'unit_tests', 'recording', 'test', 'flow']);
 export const TaskStatusSchema = z.enum([
     'pending',
     'running',
@@ -1827,6 +1827,22 @@ export const StartBuildInputSchema = BuildAppInputSchema;
 export const StartBuildOutputSchema = z.object({
     taskId: z.string().uuid(),
     kind: z.literal('build'),
+    status: TaskStatusSchema,
+    startedAt: z.string().datetime(),
+});
+
+export const StartTestInputSchema = RunTestInputSchema;
+export const StartTestOutputSchema = z.object({
+    taskId: z.string().uuid(),
+    kind: z.literal('test'),
+    status: TaskStatusSchema,
+    startedAt: z.string().datetime(),
+});
+
+export const StartFlowInputSchema = RunFlowInputSchema;
+export const StartFlowOutputSchema = z.object({
+    taskId: z.string().uuid(),
+    kind: z.literal('flow'),
     status: TaskStatusSchema,
     startedAt: z.string().datetime(),
 });
@@ -1861,6 +1877,8 @@ export const GetTaskResultOutputSchema = z.object({
     result: z
         .discriminatedUnion('kind', [
             z.object({ kind: z.literal('build'), build: BuildAppOutputSchema }),
+            z.object({ kind: z.literal('test'), test: RunTestOutputSchema }),
+            z.object({ kind: z.literal('flow'), flow: RunFlowOutputSchema }),
         ])
         .optional(),
 });
@@ -1900,6 +1918,10 @@ export const ListTasksOutputSchema = z.object({
 
 export type StartBuildInput = z.infer<typeof StartBuildInputSchema>;
 export type StartBuildOutput = z.infer<typeof StartBuildOutputSchema>;
+export type StartTestInput = z.infer<typeof StartTestInputSchema>;
+export type StartTestOutput = z.infer<typeof StartTestOutputSchema>;
+export type StartFlowInput = z.infer<typeof StartFlowInputSchema>;
+export type StartFlowOutput = z.infer<typeof StartFlowOutputSchema>;
 export type PollTaskStatusInput = z.infer<typeof PollTaskStatusInputSchema>;
 export type PollTaskStatusOutput = z.infer<typeof PollTaskStatusOutputSchema>;
 export type GetTaskResultInput = z.infer<typeof GetTaskResultInputSchema>;
@@ -1949,6 +1971,8 @@ export const TOOL_NAMES = {
     FORCE_CLEANUP_MOCKS: 'force_cleanup_mocks',
     AUDIT_STATE: 'audit_state',
     START_BUILD: 'start_build',
+    START_TEST: 'start_test',
+    START_FLOW: 'start_flow',
     POLL_TASK_STATUS: 'poll_task_status',
     GET_TASK_RESULT: 'get_task_result',
     CANCEL_TASK: 'cancel_task',
