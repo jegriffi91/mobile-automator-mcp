@@ -80,6 +80,8 @@ import {
     ForceCleanupMocksOutputSchema,
     AuditStateInputSchema,
     AuditStateOutputSchema,
+    ForceCleanupArtifactsInputSchema,
+    ForceCleanupArtifactsOutputSchema,
     StartBuildInputSchema,
     StartBuildOutputSchema,
     StartTestInputSchema,
@@ -144,6 +146,7 @@ import {
     handleForceCleanupSession,
     handleForceCleanupMocks,
     handleAuditState,
+    handleForceCleanupArtifacts,
 } from './admin/index.js';
 
 import { sessionManager } from './session/index.js';
@@ -1219,6 +1222,32 @@ server.registerTool(
     },
     async (args) => {
         const result = await handleAuditState(args);
+        return {
+            content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
+            structuredContent: result,
+        };
+    }
+);
+
+// ── 27. force_cleanup_artifacts (admin, destructive) ──
+server.registerTool(
+    TOOL_NAMES.FORCE_CLEANUP_ARTIFACTS,
+    {
+        title: 'Force-Cleanup Artifacts',
+        description:
+            'Remove accumulated debug-output directories, screenshots, and other on-disk artifacts older than olderThanHours (default 24). Scoped to one session if sessionId is given; otherwise scans all sessions. Use dryRun:true to preview without deleting. Never throws — partial failures surface in errors[].',
+        inputSchema: ForceCleanupArtifactsInputSchema,
+        outputSchema: ForceCleanupArtifactsOutputSchema,
+        annotations: {
+            title: 'Force-Cleanup Artifacts',
+            readOnlyHint: false,
+            destructiveHint: true,
+            idempotentHint: true,
+            openWorldHint: true,
+        },
+    },
+    async (args) => {
+        const result = await handleForceCleanupArtifacts(args);
         return {
             content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
             structuredContent: result,

@@ -1,5 +1,5 @@
 /**
- * Admin tool handlers — Phase 1: orphan visibility + force-cleanup.
+ * Admin tool handlers — Phase 1 + Phase 6: orphan visibility + force-cleanup + artifact cleanup.
  *
  * Five tools:
  *   list_active_sessions      — what sessions are alive, drivers, pollers, mocks
@@ -14,6 +14,8 @@
  * `errors[]` field of the structured output instead.
  */
 
+import * as fs from 'fs/promises';
+import * as path from 'path';
 import { z } from 'zod';
 import {
     ListActiveSessionsInputSchema,
@@ -26,6 +28,8 @@ import {
     ForceCleanupMocksOutputSchema,
     AuditStateInputSchema,
     AuditStateOutputSchema,
+    ForceCleanupArtifactsInputSchema,
+    ForceCleanupArtifactsOutputSchema,
 } from '../schemas.js';
 import { sessionManager } from '../session/index.js';
 import { getProxymanMcpClient, type ProxymanMcpClient, type ProxymanRuleSummary } from '../proxymanMcp/client.js';
@@ -40,6 +44,8 @@ export type ForceCleanupMocksInput = z.infer<typeof ForceCleanupMocksInputSchema
 export type ForceCleanupMocksOutput = z.infer<typeof ForceCleanupMocksOutputSchema>;
 export type AuditStateInput = z.infer<typeof AuditStateInputSchema>;
 export type AuditStateOutput = z.infer<typeof AuditStateOutputSchema>;
+export type ForceCleanupArtifactsInput = z.infer<typeof ForceCleanupArtifactsInputSchema>;
+export type ForceCleanupArtifactsOutput = z.infer<typeof ForceCleanupArtifactsOutputSchema>;
 
 // ── Test seam: handlers go through the singleton, but tests need to swap it.
 let _proxymanClientFactory: () => ProxymanMcpClient = getProxymanMcpClient;
@@ -306,6 +312,137 @@ export async function handleForceCleanupMocks(
         proxymanReachable: reachable,
         rulesDeleted,
         ledgerEntriesCleared,
+        errors,
+    };
+}
+
+// ── force_cleanup_artifacts ──────────────────────────────────────────────────
+
+/**
+ * Recursively compute the total byte size of a directory.
+ * Returns 0 for empty dirs or on any stat error.
+ */
+async function dirSize(dirPath: string): Promise<number> {
+    let total = 0;
+    let entries: import('fs').Dirent[];
+    try {
+        entries = await fs.readdir(dirPath, { withFileTypes: true });
+    } catch {
+        return 0;
+    }
+    for (const entry of entries) {
+        const full = path.join(dirPath, entry.name);
+        if (entry.isDirectory()) {
+            total += await dirSize(full);
+        } else {
+            try {
+                const s = await fs.stat(full);
+                total += s.size;
+            } catch {
+                // skip unreadable files
+            }
+        }
+    }
+    return total;
+}
+
+export async function handleForceCleanupArtifacts(
+    input: ForceCleanupArtifactsInput,
+): Promise<ForceCleanupArtifactsOutput> {
+    const errors: string[] = [];
+    const olderThanHours = input.olderThanHours ?? 24;
+    const dryRun = input.dryRun ?? false;
+    const cutoff = Date.now() - olderThanHours * 3600 * 1000;
+
+    // Determine which sessions to scope
+    let sessions: Array<{ id: string }>;
+    if (input.sessionId) {
+        try {
+            const s = await sessionManager.getSession(input.sessionId);
+            sessions = s ? [{ id: s.id }] : [];
+            if (!s) {
+                errors.push(`session not found: ${input.sessionId}`);
+            }
+        } catch (err) {
+            errors.push(`getSession(${input.sessionId}): ${(err as Error).message}`);
+            sessions = [];
+        }
+    } else {
+        sessions = sessionManager.listAllSessions().map((s) => ({ id: s.id }));
+    }
+
+    let artifactsRemoved = 0;
+    let bytesFreed = 0;
+    let directoriesScanned = 0;
+    const perSession: ForceCleanupArtifactsOutput['perSession'] = [];
+
+    for (const session of sessions) {
+        let sessionArtifacts = 0;
+        let sessionBytes = 0;
+
+        let executions: readonly import('../types.js').FlowExecutionRecord[];
+        try {
+            executions = sessionManager.getFlowExecutions(session.id);
+        } catch (err) {
+            errors.push(`getFlowExecutions(${session.id}): ${(err as Error).message}`);
+            continue;
+        }
+
+        for (const exec of executions) {
+            if (!exec.debugOutputDir) continue;
+
+            directoriesScanned++;
+
+            let stat: import('fs').Stats;
+            try {
+                stat = await fs.stat(exec.debugOutputDir);
+            } catch (err) {
+                errors.push(`stat(${exec.debugOutputDir}): ${(err as Error).message}`);
+                continue;
+            }
+
+            if (!stat.isDirectory()) continue;
+            if (stat.mtimeMs >= cutoff) continue;
+
+            // Compute size before removal
+            let size = 0;
+            try {
+                size = await dirSize(exec.debugOutputDir);
+            } catch (err) {
+                errors.push(`dirSize(${exec.debugOutputDir}): ${(err as Error).message}`);
+            }
+
+            if (!dryRun) {
+                try {
+                    await fs.rm(exec.debugOutputDir, { recursive: true, force: true });
+                } catch (err) {
+                    errors.push(`rm(${exec.debugOutputDir}): ${(err as Error).message}`);
+                    continue;
+                }
+            }
+
+            sessionArtifacts++;
+            sessionBytes += size;
+        }
+
+        artifactsRemoved += sessionArtifacts;
+        bytesFreed += sessionBytes;
+
+        if (sessionArtifacts > 0 || sessionBytes > 0) {
+            perSession.push({
+                sessionId: session.id,
+                artifactsRemoved: sessionArtifacts,
+                bytesFreed: sessionBytes,
+            });
+        }
+    }
+
+    return {
+        artifactsRemoved,
+        bytesFreed,
+        directoriesScanned,
+        perSession,
+        dryRun,
         errors,
     };
 }

@@ -1695,6 +1695,32 @@ export type ClearMockResponsesInput = z.infer<typeof ClearMockResponsesInputSche
 export type ClearMockResponsesOutput = z.infer<typeof ClearMockResponsesOutputSchema>;
 
 // ──────────────────────────────────────────────
+// Admin tools — Phase 6: force_cleanup_artifacts
+// ──────────────────────────────────────────────
+
+export const ForceCleanupArtifactsInputSchema = z.object({
+    sessionId: z.string().optional(),
+    olderThanHours: z.number().int().min(0).optional(),
+    dryRun: z.boolean().optional(),
+});
+
+export const ForceCleanupArtifactsOutputSchema = z.object({
+    artifactsRemoved: z.number().int().nonnegative(),
+    bytesFreed: z.number().int().nonnegative(),
+    directoriesScanned: z.number().int().nonnegative(),
+    perSession: z.array(z.object({
+        sessionId: z.string(),
+        artifactsRemoved: z.number().int().nonnegative(),
+        bytesFreed: z.number().int().nonnegative(),
+    })),
+    dryRun: z.boolean(),
+    errors: z.array(z.string()),
+});
+
+export type ForceCleanupArtifactsInput = z.infer<typeof ForceCleanupArtifactsInputSchema>;
+export type ForceCleanupArtifactsOutput = z.infer<typeof ForceCleanupArtifactsOutputSchema>;
+
+// ──────────────────────────────────────────────
 // Admin tools (Phase 1: orphan cleanup + visibility)
 // ──────────────────────────────────────────────
 
@@ -1969,6 +1995,7 @@ export const TOOL_NAMES = {
     LIST_ACTIVE_MOCKS: 'list_active_mocks',
     FORCE_CLEANUP_SESSION: 'force_cleanup_session',
     FORCE_CLEANUP_MOCKS: 'force_cleanup_mocks',
+    FORCE_CLEANUP_ARTIFACTS: 'force_cleanup_artifacts',
     AUDIT_STATE: 'audit_state',
     START_BUILD: 'start_build',
     START_TEST: 'start_test',
