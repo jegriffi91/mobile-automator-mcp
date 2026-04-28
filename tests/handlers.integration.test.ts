@@ -97,6 +97,7 @@ const {
   handleClearMockResponses,
   _setProxymanMcpClientFactory,
   _setFlowPauseResumeEnabledForTests,
+  _executeFlowWithPauseForTests,
 } = await import('../src/handlers.js');
 
 // ── Test suites ──
@@ -1132,6 +1133,85 @@ describe('Handler Integration Tests', () => {
         await handleStopAndCompile({ sessionId: start1.sessionId });
         await handleStopAndCompile({ sessionId: start2.sessionId });
       }
+    });
+
+    it('feature flag ON: parentSignal abort propagates into runFlow signal and triggers resume', async () => {
+      const { sessionManager } = await import('../src/session/index.js');
+      const start = await handleStartRecording({
+        appBundleId: 'com.test.app',
+        platform: 'ios',
+      });
+
+      const parent = new AbortController();
+      let inner: AbortSignal | undefined;
+      let aborted = false;
+
+      const promise = _executeFlowWithPauseForTests<{ ok: true }>(
+        'parent-signal-flow',
+        (signal) => new Promise((_, reject) => {
+          inner = signal;
+          signal.addEventListener('abort', () => {
+            aborted = true;
+            const err = new Error(
+              signal.reason instanceof Error ? signal.reason.message : String(signal.reason),
+            );
+            err.name = 'AbortError';
+            reject(err);
+          }, { once: true });
+        }),
+        parent.signal,
+      );
+
+      // Let pauseSession + runFlow setup settle.
+      await new Promise((r) => setTimeout(r, 25));
+      expect(sessionManager.isSessionPaused(start.sessionId)).toBe(true);
+      expect(inner).toBeDefined();
+      expect(inner!.aborted).toBe(false);
+
+      parent.abort(new Error('cancelled by parent'));
+
+      await expect(promise).rejects.toThrow(/cancelled by parent/);
+      expect(aborted).toBe(true);
+      // Resume cleanup ran via runHandler — session is no longer paused.
+      expect(sessionManager.isSessionPaused(start.sessionId)).toBe(false);
+
+      await handleStopAndCompile({ sessionId: start.sessionId });
+    });
+
+    it('feature flag ON: parent already aborted before call still propagates and resumes', async () => {
+      const { sessionManager } = await import('../src/session/index.js');
+      const start = await handleStartRecording({
+        appBundleId: 'com.test.app',
+        platform: 'ios',
+      });
+
+      const parent = new AbortController();
+      parent.abort(new Error('pre-aborted'));
+
+      await expect(
+        _executeFlowWithPauseForTests<{ ok: true }>(
+          'pre-aborted-flow',
+          (signal) => new Promise((_, reject) => {
+            if (signal.aborted) {
+              const err = new Error('aborted');
+              err.name = 'AbortError';
+              reject(err);
+              return;
+            }
+            signal.addEventListener('abort', () => {
+              const err = new Error('aborted');
+              err.name = 'AbortError';
+              reject(err);
+            }, { once: true });
+          }),
+          parent.signal,
+        ),
+      ).rejects.toThrow();
+
+      // Resume still ran on the cleanup path.
+      expect(sessionManager.isSessionPaused(start.sessionId)).toBe(false);
+
+      await handleStopAndCompile({ sessionId: start.sessionId });
     });
 
     it('feature flag ON: run_flow shares the same pause/resume bracket', async () => {

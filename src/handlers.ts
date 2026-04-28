@@ -1644,6 +1644,14 @@ export async function handleRegisterSegment(
  * handling is identical. runHandler's cleanup stack guarantees resume
  * even on uncaught throws or watchdog timeout.
  */
+export async function _executeFlowWithPauseForTests<T>(
+    flowName: string,
+    runFlow: (signal: AbortSignal) => Promise<{ result: T; output: string; succeeded: boolean }>,
+    parentSignal?: AbortSignal,
+): Promise<T> {
+    return executeFlowWithPause(flowName, runFlow, parentSignal);
+}
+
 async function executeFlowWithPause<T>(
     flowName: string,
     runFlow: (
@@ -1656,18 +1664,25 @@ async function executeFlowWithPause<T>(
         debugOutputDir?: string;
         flowPath?: string;
     }>,
+    parentSignal?: AbortSignal,
 ): Promise<T> {
+    // When no parent signal is provided we still want a real, non-aborting
+    // signal to thread through to runFlow. Reuse a single controller per call
+    // — its signal is forwarded into runFlow on the no-pause-needed paths.
+    const noopController = new AbortController();
+    const baseSignal = parentSignal ?? noopController.signal;
+
     if (!_flowPauseResumeEnabled) {
         assertNoActiveSessions(sessionManager.listActiveDrivers(), flowName);
         const dir = await allocateFlowDebugDir('standalone', 0);
-        const { result } = await runFlow(new AbortController().signal, dir);
+        const { result } = await runFlow(baseSignal, dir);
         return result;
     }
 
     const active = sessionManager.listActiveDrivers();
     if (active.length === 0) {
         const dir = await allocateFlowDebugDir('standalone', 0);
-        const { result } = await runFlow(new AbortController().signal, dir);
+        const { result } = await runFlow(baseSignal, dir);
         return result;
     }
     if (active.length > 1) {
@@ -1682,6 +1697,21 @@ async function executeFlowWithPause<T>(
     return runHandler(
         { name: `flow_with_pause(${flowName})`, timeoutMs: PAUSE_RESUME_WATCHDOG_MS },
         async (cleanup) => {
+            // Forward the parent's abort onto runHandler's cleanup.signal so
+            // cancel_task (TaskRegistry parent) propagates: parent → cleanup
+            // → runFlow's signal arg → MaestroWrapper.runTest SIGTERM. The
+            // resume cleanup runs automatically via runHandler's cleanup stack.
+            if (parentSignal) {
+                if (parentSignal.aborted) {
+                    cleanup.abort(parentSignal.reason);
+                } else {
+                    parentSignal.addEventListener(
+                        'abort',
+                        () => cleanup.abort(parentSignal.reason),
+                        { once: true },
+                    );
+                }
+            }
             const session = await sessionManager.getSession(sessionId);
             if (!session) {
                 throw new Error(`Session disappeared: ${sessionId}`);
