@@ -24,6 +24,13 @@ export type TaskStatus =
 
 const DEFAULT_PRUNE_INTERVAL_MS = 60_000;
 const DEFAULT_TASK_TTL_MS = 60 * 60 * 1000; // 1h
+const DEFAULT_MAX_RETAINED_PER_KIND = 50;
+
+function parseMaxRetained(raw: string | undefined): number | undefined {
+    if (!raw) return undefined;
+    const n = Number(raw);
+    return Number.isFinite(n) && n > 0 ? Math.floor(n) : undefined;
+}
 
 export interface TaskContext {
     readonly signal: AbortSignal;
@@ -50,6 +57,12 @@ export interface RegisterOptions {
     kind: TaskKind;
     timeoutMs?: number;
     ringBuffer?: { maxLines?: number; maxBytes?: number };
+    /**
+     * Per-kind retention cap for finished tasks. Newest finished evicts oldest
+     * finished when count exceeds the cap. Running/cancelling/pending tasks
+     * are NEVER evicted. Default: env MCA_TASK_MAX_RETAINED or 50.
+     */
+    maxRetained?: number;
 }
 
 export interface ListTasksFilter {
@@ -84,6 +97,47 @@ interface InternalTask<TResult = unknown> extends Task<TResult> {
 class TaskRegistryImpl implements TaskRegistry {
     private readonly tasks = new Map<string, InternalTask>();
     private pruneTimer?: NodeJS.Timeout;
+    private readonly capWarnedKinds = new Set<TaskKind>();
+
+    /**
+     * Evict oldest *terminal* tasks of the given kind until count <= cap.
+     * Terminal = status in {'done','failed','cancelled'}. Running/cancelling/
+     * pending are skipped. If no terminal candidates exist while over cap,
+     * log a one-shot warning per kind and return without eviction.
+     *
+     * Returns the number of tasks evicted.
+     */
+    private evictIfOverCap(kind: TaskKind, cap: number): number {
+        const sameKind: InternalTask[] = [];
+        for (const t of this.tasks.values()) {
+            if (t.kind === kind) sameKind.push(t as InternalTask);
+        }
+        if (sameKind.length <= cap) return 0;
+
+        const TERMINAL: TaskStatus[] = ['done', 'failed', 'cancelled'];
+        const terminal = sameKind
+            .filter((t) => TERMINAL.includes(t.status) && t.finishedAt)
+            .sort((a, b) => Date.parse(a.finishedAt!) - Date.parse(b.finishedAt!));
+
+        const overBy = sameKind.length - cap;
+        let evicted = 0;
+        for (const t of terminal) {
+            if (evicted >= overBy) break;
+            this.tasks.delete(t.taskId);
+            evicted += 1;
+        }
+
+        if (evicted > 0) {
+            this.capWarnedKinds.delete(kind); // re-arm warning for future breaches
+        } else if (!this.capWarnedKinds.has(kind)) {
+            // eslint-disable-next-line no-console
+            console.error(
+                `[TaskRegistry] kind=${kind} cap=${cap} breached (${sameKind.length} tasks, all in-flight); accepting breach`,
+            );
+            this.capWarnedKinds.add(kind);
+        }
+        return evicted;
+    }
 
     start<TResult>(opts: RegisterOptions, run: TaskRunner<TResult>): Task<TResult> {
         const taskId = randomUUID();
@@ -131,6 +185,11 @@ class TaskRegistryImpl implements TaskRegistry {
         };
 
         this.tasks.set(taskId, task as InternalTask);
+
+        const cap = opts.maxRetained
+            ?? parseMaxRetained(process.env.MCA_TASK_MAX_RETAINED)
+            ?? DEFAULT_MAX_RETAINED_PER_KIND;
+        this.evictIfOverCap(opts.kind, cap);
 
         const ctx: TaskContext = {
             signal: controller.signal,
@@ -298,6 +357,7 @@ class TaskRegistryImpl implements TaskRegistry {
             }
         }
         this.tasks.clear();
+        this.capWarnedKinds.clear();
         this.stopPruneTimer();
     }
 }
