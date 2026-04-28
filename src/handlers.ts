@@ -21,6 +21,12 @@ import { HierarchyParser } from './maestro/index.js';
 import { proxymanWrapper, PayloadValidator } from './proxyman/index.js';
 import { Correlator, YamlGenerator, StubWriter } from './synthesis/index.js';
 import { TimelineBuilder } from './synthesis/timeline-builder.js';
+import {
+    parseMaestroDebugOutput,
+    weaveFlowExecutions,
+    type FlowStep,
+    type WeaveResult,
+} from './synthesis/flow-weaver.js';
 import { SegmentFingerprint, SegmentRegistry } from './segments/index.js';
 import { FlowRegistry } from './flows/index.js';
 import {
@@ -389,6 +395,7 @@ export async function handleStopAndCompile(
     let matchedSegments: Array<{ name: string; fingerprint: string; similarity: number; yamlPath: string }> | undefined;
     let pollingDiagnostics: ReturnType<typeof sessionManager.getPollingStatus> | undefined;
     let timelinePath: string | undefined;
+    let weaveResult: WeaveResult | undefined;
 
     try {
         // ── Step 1: Export scoped Proxyman HAR ──
@@ -468,12 +475,45 @@ export async function handleStopAndCompile(
         const correlator = new Correlator();
         steps = correlator.correlate(allInteractions, allNetworkEvents);
 
+        // ── Step 3b (Phase 5): Weave compile-time flow events ──
+        // Parse Maestro --debug-output for every recorded FlowExecutionRecord
+        // and reconcile with the flow_boundary marker pairs in pollRecords.
+        // Defensive: parser never throws (commit 2), weaver is pure.
+        const flowExecutions = sessionManager.getFlowExecutions(input.sessionId);
+        const wovenPollRecords = sessionManager.getPollRecords(input.sessionId);
+        const parsedSteps = new Map<string, FlowStep[]>();
+        for (const exec of flowExecutions) {
+            if (!exec.debugOutputDir) continue;
+            const flowSteps = await parseMaestroDebugOutput(exec.debugOutputDir);
+            parsedSteps.set(`${exec.flowName}|${exec.startedAt}`, flowSteps);
+        }
+        weaveResult = weaveFlowExecutions({
+            pollRecords: wovenPollRecords,
+            flowExecutions,
+            parsedSteps,
+        });
+        if (weaveResult.warnings.length > 0) {
+            for (const w of weaveResult.warnings) {
+                console.error(`[MCP] stop_and_compile_test: weaver warning — ${w}`);
+            }
+        }
+        if (weaveResult.woven.length > 0) {
+            console.error(
+                `[MCP] stop_and_compile_test: wove ${weaveResult.woven.length} flow execution(s) into compile output`,
+            );
+        }
+
         // ── Step 4: Generate YAML ──
         const generator = new YamlGenerator(session.appBundleId);
-        yaml = generator.toYaml(steps, input.conditions);
+        // Resolve output path early so the generator can compute relative
+        // runFlow: paths against the YAML's directory.
+        outputPath = input.outputPath ?? path.join(os.tmpdir(), `maestro-test-${input.sessionId}.yaml`);
+        yaml = generator.toYaml(steps, input.conditions, {
+            flowBlocks: weaveResult.yamlBlocks,
+            outputDir: path.dirname(outputPath),
+        });
 
         // Write YAML
-        outputPath = input.outputPath ?? path.join(os.tmpdir(), `maestro-test-${input.sessionId}.yaml`);
         await fs.writeFile(outputPath, yaml, 'utf-8');
 
         // ── Step 5: Generate WireMock stubs (if network events exist) ──
@@ -539,7 +579,11 @@ export async function handleStopAndCompile(
 
         // ── Step 7b: Build and write session timeline ──
         try {
-            const pollRecords = sessionManager.getPollRecords(input.sessionId);
+            // Phase 5: prefer the weaver-stripped pollRecords stream so
+            // flow_boundary entries don't appear alongside the woven flow
+            // entries. Fall back to the raw stream if weaving was skipped.
+            const pollRecords =
+                weaveResult?.pollRecords ?? sessionManager.getPollRecords(input.sessionId);
             const timelineBuilder = new TimelineBuilder();
             const timeline = timelineBuilder.build({
                 session,
@@ -554,6 +598,7 @@ export async function handleStopAndCompile(
                 pollRecords,
                 pollingDiagnostics: pollingDiagnostics ?? undefined,
                 correlationWindowMs: 3000,
+                wovenFlowExecutions: weaveResult?.woven,
             });
 
             const sessionDir = path.dirname(outputPath);
@@ -632,6 +677,19 @@ export async function handleStopAndCompile(
         await sessionManager.purgeSnapshots(input.sessionId);
     }
 
+    // Phase 5: surface a per-flow summary alongside the existing artifacts.
+    const flowSummaries = weaveResult?.woven.map((w) => {
+        const failedIdx = w.steps.findIndex((s) => s.status === 'FAILED');
+        return {
+            flowName: w.flowName,
+            succeeded: w.succeeded,
+            ...(w.cancelled !== undefined ? { cancelled: w.cancelled } : {}),
+            durationMs: w.durationMs,
+            stepCount: w.steps.length,
+            ...(failedIdx >= 0 ? { failedStepIndex: failedIdx } : {}),
+        };
+    });
+
     return {
         sessionId: input.sessionId,
         yaml,
@@ -643,6 +701,9 @@ export async function handleStopAndCompile(
         matchedSegments,
         pollingDiagnostics,
         timelinePath,
+        ...(flowSummaries && flowSummaries.length > 0
+            ? { flowExecutions: flowSummaries }
+            : {}),
     };
 }
 

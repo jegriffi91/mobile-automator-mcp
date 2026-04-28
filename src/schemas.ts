@@ -1118,6 +1118,32 @@ export const StopAndCompileOutputSchema = z.object({
         .string()
         .optional()
         .describe('Path to the session timeline JSON file for post-hoc debugging'),
+    flowExecutions: z
+        .array(
+            z.object({
+                flowName: z.string().describe('Name of the flow that ran during this session'),
+                succeeded: z.boolean().describe('Whether the flow completed successfully'),
+                cancelled: z
+                    .boolean()
+                    .optional()
+                    .describe('True when the flow was cancelled (cancel_task / watchdog), distinct from failure'),
+                durationMs: z.number().describe('Wall-clock duration of the flow execution'),
+                stepCount: z
+                    .number()
+                    .int()
+                    .describe('Number of Maestro steps parsed from --debug-output for this flow'),
+                failedStepIndex: z
+                    .number()
+                    .int()
+                    .optional()
+                    .describe('0-based index of the first failed step, when applicable'),
+            }),
+        )
+        .optional()
+        .describe(
+            'Phase 5: per-flow summary for run_test / run_flow executions captured ' +
+            'mid-session. The full step stream lives in the timeline.json file.',
+        ),
 });
 
 export const BuildAppOutputSchema = z.object({
