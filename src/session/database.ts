@@ -1,5 +1,5 @@
 import initSqlJs, { type Database, type SqlJsStatic } from 'sql.js';
-import type { Session, SessionStatus, UIInteraction, NetworkEvent, MobilePlatform, HierarchySnapshot, CaptureMode } from '../types.js';
+import type { Session, SessionStatus, UIInteraction, NetworkEvent, MobilePlatform, HierarchySnapshot, CaptureMode, FlowExecutionRecord, TimeoutConfig } from '../types.js';
 
 export class SessionDatabase {
     private db: Database | null = null;
@@ -32,7 +32,9 @@ export class SessionDatabase {
                 captureMode TEXT,
                 pollingIntervalMs INTEGER,
                 settleTimeoutMs INTEGER,
-                trackEventPaths TEXT
+                trackEventPaths TEXT,
+                device_id TEXT,
+                driver_timeouts_json TEXT
             );
 
             CREATE TABLE IF NOT EXISTS ui_interactions (
@@ -77,6 +79,25 @@ export class SessionDatabase {
 
             CREATE INDEX IF NOT EXISTS idx_hierarchy_snapshots_sessionId
                 ON hierarchy_snapshots(sessionId);
+
+            CREATE TABLE IF NOT EXISTS flow_executions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                flow_name TEXT NOT NULL,
+                flow_path TEXT,
+                started_at TEXT NOT NULL,
+                ended_at TEXT NOT NULL,
+                duration_ms INTEGER NOT NULL,
+                output TEXT,
+                succeeded INTEGER NOT NULL,
+                cancelled INTEGER NOT NULL DEFAULT 0,
+                debug_output_dir TEXT,
+                seq INTEGER NOT NULL,
+                FOREIGN KEY (session_id) REFERENCES sessions(id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_flow_executions_session
+                ON flow_executions(session_id, seq);
         `);
     }
 
@@ -170,6 +191,10 @@ export class SessionDatabase {
             pollingIntervalMs: row.pollingIntervalMs != null ? (row.pollingIntervalMs as number) : undefined,
             settleTimeoutMs: row.settleTimeoutMs != null ? (row.settleTimeoutMs as number) : undefined,
             trackEventPaths: row.trackEventPaths ? JSON.parse(row.trackEventPaths as string) : undefined,
+            deviceId: (row.device_id as string) || undefined,
+            driverTimeouts: row.driver_timeouts_json
+                ? (JSON.parse(row.driver_timeouts_json as string) as Partial<TimeoutConfig>)
+                : undefined,
         };
     }
 
@@ -395,6 +420,130 @@ export class SessionDatabase {
     purgeSnapshots(sessionId: string): void {
         const db = this.getDb();
         const stmt = db.prepare(`DELETE FROM hierarchy_snapshots WHERE sessionId = ?`);
+        stmt.run([sessionId]);
+        stmt.free();
+    }
+
+    // ── Phase 6: runtime-state persistence ──
+
+    /**
+     * Persist the device UDID associated with a session.
+     * Used by resumeSession to recreate the daemon driver after a paused flow.
+     */
+    setDeviceId(sessionId: string, deviceId: string): void {
+        const db = this.getDb();
+        const stmt = db.prepare(`UPDATE sessions SET device_id = ? WHERE id = ?`);
+        stmt.run([deviceId, sessionId]);
+        stmt.free();
+    }
+
+    /**
+     * Persist the timeout overrides supplied at session creation.
+     * Stored as JSON so the original Partial<TimeoutConfig> shape is preserved.
+     */
+    setDriverTimeouts(sessionId: string, timeouts: Partial<TimeoutConfig>): void {
+        const db = this.getDb();
+        const stmt = db.prepare(`UPDATE sessions SET driver_timeouts_json = ? WHERE id = ?`);
+        stmt.run([JSON.stringify(timeouts), sessionId]);
+        stmt.free();
+    }
+
+    /**
+     * Return the persisted timeout overrides for a session, or undefined if none.
+     */
+    getDriverTimeouts(sessionId: string): Partial<TimeoutConfig> | undefined {
+        const db = this.getDb();
+        const stmt = db.prepare(`SELECT driver_timeouts_json FROM sessions WHERE id = ?`);
+        stmt.bind([sessionId]);
+        if (stmt.step()) {
+            const row = stmt.getAsObject();
+            stmt.free();
+            if (row.driver_timeouts_json) {
+                return JSON.parse(row.driver_timeouts_json as string) as Partial<TimeoutConfig>;
+            }
+            return undefined;
+        }
+        stmt.free();
+        return undefined;
+    }
+
+    /**
+     * Append a FlowExecutionRecord for a session.
+     * `seq` is auto-assigned as (max existing seq + 1) for this session,
+     * starting at 0.
+     */
+    addFlowExecution(sessionId: string, record: FlowExecutionRecord): void {
+        const db = this.getDb();
+
+        // Determine next seq
+        const seqResult = db.exec(
+            `SELECT COALESCE(MAX(seq) + 1, 0) as next_seq FROM flow_executions WHERE session_id = '${sessionId.replace(/'/g, "''")}'`
+        );
+        const nextSeq = (seqResult[0]?.values[0]?.[0] as number) ?? 0;
+
+        const stmt = db.prepare(
+            `INSERT INTO flow_executions
+                (session_id, flow_name, flow_path, started_at, ended_at, duration_ms, output, succeeded, cancelled, debug_output_dir, seq)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        );
+        stmt.run([
+            sessionId,
+            record.flowName,
+            record.flowPath ?? null,
+            record.startedAt,
+            record.endedAt,
+            record.durationMs,
+            record.output ?? null,
+            record.succeeded ? 1 : 0,
+            record.cancelled ? 1 : 0,
+            record.debugOutputDir ?? null,
+            nextSeq,
+        ]);
+        stmt.free();
+    }
+
+    /**
+     * Retrieve all FlowExecutionRecords for a session, ordered by seq.
+     */
+    getFlowExecutions(sessionId: string): FlowExecutionRecord[] {
+        const db = this.getDb();
+        const stmt = db.prepare(
+            `SELECT * FROM flow_executions WHERE session_id = ? ORDER BY seq ASC`
+        );
+        stmt.bind([sessionId]);
+        const results: FlowExecutionRecord[] = [];
+        while (stmt.step()) {
+            const row = stmt.getAsObject();
+            const rec: FlowExecutionRecord = {
+                flowName: row.flow_name as string,
+                startedAt: row.started_at as string,
+                endedAt: row.ended_at as string,
+                durationMs: row.duration_ms as number,
+                output: (row.output as string) ?? '',
+                succeeded: (row.succeeded as number) !== 0,
+            };
+            if (row.cancelled as number) {
+                rec.cancelled = true;
+            }
+            if (row.debug_output_dir != null) {
+                rec.debugOutputDir = row.debug_output_dir as string;
+            }
+            if (row.flow_path != null) {
+                rec.flowPath = row.flow_path as string;
+            }
+            results.push(rec);
+        }
+        stmt.free();
+        return results;
+    }
+
+    /**
+     * Delete all flow_executions rows for a session.
+     * Called from forceCleanup to release storage.
+     */
+    deleteFlowExecutions(sessionId: string): void {
+        const db = this.getDb();
+        const stmt = db.prepare(`DELETE FROM flow_executions WHERE session_id = ?`);
         stmt.run([sessionId]);
         stmt.free();
     }
