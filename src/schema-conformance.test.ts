@@ -46,6 +46,8 @@ import {
   ForceCleanupMocksOutputSchema,
   AuditStateOutputSchema,
   StartBuildOutputSchema,
+  StartTestOutputSchema,
+  StartFlowOutputSchema,
   PollTaskStatusInputSchema,
   PollTaskStatusOutputSchema,
   GetTaskResultInputSchema,
@@ -1177,6 +1179,39 @@ describe('Schema Conformance', () => {
       ).toBe(true);
     });
 
+    it('StartTestOutputSchema accepts the immediate-return shape (Phase 5)', () => {
+      expect(
+        StartTestOutputSchema.safeParse({
+          taskId: '550e8400-e29b-41d4-a716-446655440000',
+          kind: 'test',
+          status: 'running',
+          startedAt: '2026-04-27T00:00:00.000Z',
+        }).success,
+      ).toBe(true);
+    });
+
+    it('StartTestOutputSchema rejects mismatched kind', () => {
+      expect(
+        StartTestOutputSchema.safeParse({
+          taskId: '550e8400-e29b-41d4-a716-446655440000',
+          kind: 'build',
+          status: 'running',
+          startedAt: '2026-04-27T00:00:00.000Z',
+        }).success,
+      ).toBe(false);
+    });
+
+    it('StartFlowOutputSchema accepts the immediate-return shape (Phase 5)', () => {
+      expect(
+        StartFlowOutputSchema.safeParse({
+          taskId: '550e8400-e29b-41d4-a716-446655440000',
+          kind: 'flow',
+          status: 'running',
+          startedAt: '2026-04-27T00:00:00.000Z',
+        }).success,
+      ).toBe(true);
+    });
+
     it('PollTaskStatusInputSchema rejects out-of-range tailLines', () => {
       expect(
         PollTaskStatusInputSchema.safeParse({
@@ -1239,6 +1274,63 @@ describe('Schema Conformance', () => {
           },
         }).success,
       ).toBe(true);
+    });
+
+    it('GetTaskResultOutputSchema accepts a completed-test result (Phase 5 discriminated union)', () => {
+      expect(
+        GetTaskResultOutputSchema.safeParse({
+          taskId: '550e8400-e29b-41d4-a716-446655440000',
+          status: 'done',
+          result: {
+            kind: 'test',
+            test: {
+              passed: true,
+              output: 'Test passed',
+              durationMs: 1234,
+            },
+          },
+        }).success,
+      ).toBe(true);
+    });
+
+    it('GetTaskResultOutputSchema accepts a completed-flow result (Phase 5 discriminated union)', () => {
+      expect(
+        GetTaskResultOutputSchema.safeParse({
+          taskId: '550e8400-e29b-41d4-a716-446655440000',
+          status: 'done',
+          result: {
+            kind: 'flow',
+            flow: {
+              passed: true,
+              flowName: 'login',
+              flowPath: '/foo/flows/login.yaml',
+              appliedParams: { USERNAME: 'admin' },
+              output: 'Flow completed',
+              durationMs: 4321,
+            },
+          },
+        }).success,
+      ).toBe(true);
+    });
+
+    it('GetTaskResultOutputSchema rejects a result whose kind/payload-key disagree', () => {
+      expect(
+        GetTaskResultOutputSchema.safeParse({
+          taskId: '550e8400-e29b-41d4-a716-446655440000',
+          status: 'done',
+          // kind says 'test' but payload key is 'build' — discriminated union
+          // should refuse this rather than silently lose data.
+          result: {
+            kind: 'test',
+            build: {
+              passed: true,
+              platform: 'ios',
+              durationMs: 1,
+              output: '',
+            },
+          },
+        }).success,
+      ).toBe(false);
     });
 
     it('GetTaskResultOutputSchema accepts notFound and not-yet-done shapes', () => {

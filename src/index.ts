@@ -556,7 +556,7 @@ server.registerTool(
     {
         title: 'Run Test',
         description:
-            'Run a Maestro YAML test file with optional WireMock stub replay. Automatically starts an in-process stub server, runs the test, and tears down. Returns pass/fail status, output, and duration. Note: this tool replays a static YAML script against a booted simulator — it does NOT connect to live Proxyman or record new network traffic during execution. When MCA_FLOW_PAUSE_RESUME=on and a recording session is active, the session is paused for the duration of the flow and resumed automatically afterward. Otherwise, run_test errors if any recording session is active.',
+            'Run a Maestro YAML test file with optional WireMock stub replay. Automatically starts an in-process stub server, runs the test, and tears down. Returns pass/fail status, output, and duration. Note: this tool replays a static YAML script against a booted simulator — it does NOT connect to live Proxyman or record new network traffic during execution. When MCA_FLOW_PAUSE_RESUME=on and a recording session is active, the session is paused for the duration of the flow and resumed automatically afterward. Otherwise, run_test errors if any recording session is active. For long-running flows that may exceed the MCP transport timeout, prefer the async sibling start_test (poll via poll_task_status; cancel mid-flow via cancel_task — SIGTERMs the Maestro CLI).',
         inputSchema: RunTestInputSchema,
         outputSchema: RunTestOutputSchema,
         annotations: {
@@ -660,7 +660,7 @@ server.registerTool(
     {
         title: 'Run Flow',
         description:
-            'Execute a named Maestro flow by name. Resolves <flowsDir>/<name>.yaml, merges manifest param defaults with caller-supplied params, and runs the flow against a booted simulator. Use this to navigate to the area of an incremental change before verifying it. When MCA_FLOW_PAUSE_RESUME=on and a recording session is active, the session is paused for the duration of the flow and resumed automatically afterward. Otherwise, run_flow errors if any recording session is active.',
+            'Execute a named Maestro flow by name. Resolves <flowsDir>/<name>.yaml, merges manifest param defaults with caller-supplied params, and runs the flow against a booted simulator. Use this to navigate to the area of an incremental change before verifying it. When MCA_FLOW_PAUSE_RESUME=on and a recording session is active, the session is paused for the duration of the flow and resumed automatically afterward. Otherwise, run_flow errors if any recording session is active. For long-running flows that may exceed the MCP transport timeout, prefer the async sibling start_flow (poll via poll_task_status; cancel mid-flow via cancel_task — SIGTERMs the Maestro CLI).',
         inputSchema: RunFlowInputSchema,
         outputSchema: RunFlowOutputSchema,
         annotations: {
