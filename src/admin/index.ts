@@ -10,6 +10,7 @@ export {
     handleForceCleanupSession,
     handleForceCleanupMocks,
     handleAuditState,
+    handleForceCleanupArtifacts,
     _setAdminProxymanClientFactory,
     type ListActiveSessionsInput,
     type ListActiveSessionsOutput,
@@ -21,4 +22,6 @@ export {
     type ForceCleanupMocksOutput,
     type AuditStateInput,
     type AuditStateOutput,
+    type ForceCleanupArtifactsInput,
+    type ForceCleanupArtifactsOutput,
 } from './handlers.js';

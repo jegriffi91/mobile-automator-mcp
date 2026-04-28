@@ -56,6 +56,8 @@ import {
   CancelTaskOutputSchema,
   ListTasksInputSchema,
   ListTasksOutputSchema,
+  ForceCleanupArtifactsInputSchema,
+  ForceCleanupArtifactsOutputSchema,
 } from './schemas.js';
 
 describe('Schema Conformance', () => {
@@ -1426,6 +1428,52 @@ describe('Schema Conformance', () => {
             sessionsWithoutDriver: [],
             pollersWithoutSession: [],
           },
+        }).success,
+      ).toBe(true);
+    });
+
+    it('ForceCleanupArtifactsInputSchema accepts all optional fields', () => {
+      expect(ForceCleanupArtifactsInputSchema.safeParse({}).success).toBe(true);
+      expect(
+        ForceCleanupArtifactsInputSchema.safeParse({
+          sessionId: 's-1',
+          olderThanHours: 48,
+          dryRun: true,
+        }).success,
+      ).toBe(true);
+    });
+
+    it('ForceCleanupArtifactsInputSchema rejects negative olderThanHours', () => {
+      expect(
+        ForceCleanupArtifactsInputSchema.safeParse({ olderThanHours: -1 }).success,
+      ).toBe(false);
+    });
+
+    it('ForceCleanupArtifactsOutputSchema accepts a full success result', () => {
+      expect(
+        ForceCleanupArtifactsOutputSchema.safeParse({
+          artifactsRemoved: 3,
+          bytesFreed: 10240,
+          directoriesScanned: 5,
+          perSession: [
+            { sessionId: 's-1', artifactsRemoved: 2, bytesFreed: 8192 },
+            { sessionId: 's-2', artifactsRemoved: 1, bytesFreed: 2048 },
+          ],
+          dryRun: false,
+          errors: [],
+        }).success,
+      ).toBe(true);
+    });
+
+    it('ForceCleanupArtifactsOutputSchema accepts a dryRun result with errors', () => {
+      expect(
+        ForceCleanupArtifactsOutputSchema.safeParse({
+          artifactsRemoved: 1,
+          bytesFreed: 512,
+          directoriesScanned: 2,
+          perSession: [],
+          dryRun: true,
+          errors: ['stat(/tmp/missing): ENOENT'],
         }).success,
       ).toBe(true);
     });
