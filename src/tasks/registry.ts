@@ -13,7 +13,7 @@ import { randomUUID } from 'crypto';
 import { CleanupImpl, type Cleanup } from '../cleanup.js';
 import { RingBuffer } from './ring-buffer.js';
 
-export type TaskKind = 'build' | 'unit_tests' | 'recording';
+export type TaskKind = 'build' | 'unit_tests' | 'recording' | 'test' | 'flow';
 export type TaskStatus =
     | 'pending'
     | 'running'

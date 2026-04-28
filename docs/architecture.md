@@ -168,6 +168,17 @@ See `docs/phase-4-design.md` for the original design discussion.
 
 ---
 
+## Async Execution: TaskRegistry Migration Pattern
+
+Long-running operations (`build_app`, `run_test`, `run_flow`) can exceed the MCP transport timeout (~5min). To avoid this and to enable mid-flight cancellation, these handlers route through `TaskRegistry` (Phase 2 introduced the registry for `build_app`; Phase 5 extends it to flows). Each long-running tool now has two surfaces:
+
+- **Sync** (`run_test`, `run_flow`, `build_app`): delegate to `taskRegistry.run`, await the terminal state, and re-throw on failure/cancellation. Schemas are unchanged — purely a refactor under the hood.
+- **Async** (`start_test`, `start_flow`, `start_build`): call `taskRegistry.start` and return a `taskId` immediately. Agents poll via `poll_task_status`, fetch the typed payload via `get_task_result` (which uses a discriminated union keyed by `kind`), and abort via `cancel_task`.
+
+`cancel_task` propagates an `AbortSignal` through the runner closure into `MaestroWrapper.runTest` (Phase 4 plumbing), which translates it into SIGTERM on the Maestro CLI subprocess. When the cancelled flow had paused an active recording session, the resume cleanup runs automatically via `runHandler`'s LIFO cleanup stack — so cancellation never strands a session in `paused` state. See `phase-4-design.md` for the recording↔Maestro decoupling and signal-propagation details.
+
+---
+
 ## Key Technical Decisions
 
 | Decision | Rationale |

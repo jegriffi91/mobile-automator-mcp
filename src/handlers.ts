@@ -124,6 +124,10 @@ import type {
     ClearMockResponsesOutput,
     StartBuildInput,
     StartBuildOutput,
+    StartTestInput,
+    StartTestOutput,
+    StartFlowInput,
+    StartFlowOutput,
     PollTaskStatusInput,
     PollTaskStatusOutput,
     GetTaskResultInput,
@@ -198,6 +202,20 @@ export function _setCancelDeadlineMsForTests(ms: number): number {
  * itself stalls (e.g. uninterruptible Swift compile, runaway log streaming).
  */
 export const OUTER_BUILD_GRACE_MS = 30_000;
+
+/**
+ * Watchdog ceiling for run_test/run_flow when routed through TaskRegistry.
+ * RunTestInputSchema has no `timeoutMs` field; the inner Maestro test
+ * timeout is configured via DriverFactory's TimeoutConfig.testRunMs (default
+ * 120s). This outer cap protects against wedged orchestration (driver setup,
+ * stub server start/stop, profiling) on top of the inner subprocess timeout.
+ *
+ * 10 minutes is intentionally generous — flows that run >5min should be the
+ * exception; longer-running flows configure higher driver.testRunMs and the
+ * watchdog scales via RUN_TEST_GRACE_MS at the call site.
+ */
+export const DEFAULT_RUN_TEST_TIMEOUT_MS = 10 * 60_000;
+export const RUN_TEST_GRACE_MS = 30_000;
 
 /**
  * Phase 4 feature flag — when enabled, run_test/run_flow pause an active
@@ -1644,6 +1662,14 @@ export async function handleRegisterSegment(
  * handling is identical. runHandler's cleanup stack guarantees resume
  * even on uncaught throws or watchdog timeout.
  */
+export async function _executeFlowWithPauseForTests<T>(
+    flowName: string,
+    runFlow: (signal: AbortSignal) => Promise<{ result: T; output: string; succeeded: boolean }>,
+    parentSignal?: AbortSignal,
+): Promise<T> {
+    return executeFlowWithPause(flowName, runFlow, parentSignal);
+}
+
 async function executeFlowWithPause<T>(
     flowName: string,
     runFlow: (
@@ -1656,18 +1682,25 @@ async function executeFlowWithPause<T>(
         debugOutputDir?: string;
         flowPath?: string;
     }>,
+    parentSignal?: AbortSignal,
 ): Promise<T> {
+    // When no parent signal is provided we still want a real, non-aborting
+    // signal to thread through to runFlow. Reuse a single controller per call
+    // — its signal is forwarded into runFlow on the no-pause-needed paths.
+    const noopController = new AbortController();
+    const baseSignal = parentSignal ?? noopController.signal;
+
     if (!_flowPauseResumeEnabled) {
         assertNoActiveSessions(sessionManager.listActiveDrivers(), flowName);
         const dir = await allocateFlowDebugDir('standalone', 0);
-        const { result } = await runFlow(new AbortController().signal, dir);
+        const { result } = await runFlow(baseSignal, dir);
         return result;
     }
 
     const active = sessionManager.listActiveDrivers();
     if (active.length === 0) {
         const dir = await allocateFlowDebugDir('standalone', 0);
-        const { result } = await runFlow(new AbortController().signal, dir);
+        const { result } = await runFlow(baseSignal, dir);
         return result;
     }
     if (active.length > 1) {
@@ -1682,6 +1715,21 @@ async function executeFlowWithPause<T>(
     return runHandler(
         { name: `flow_with_pause(${flowName})`, timeoutMs: PAUSE_RESUME_WATCHDOG_MS },
         async (cleanup) => {
+            // Forward the parent's abort onto runHandler's cleanup.signal so
+            // cancel_task (TaskRegistry parent) propagates: parent → cleanup
+            // → runFlow's signal arg → MaestroWrapper.runTest SIGTERM. The
+            // resume cleanup runs automatically via runHandler's cleanup stack.
+            if (parentSignal) {
+                if (parentSignal.aborted) {
+                    cleanup.abort(parentSignal.reason);
+                } else {
+                    parentSignal.addEventListener(
+                        'abort',
+                        () => cleanup.abort(parentSignal.reason),
+                        { once: true },
+                    );
+                }
+            }
             const session = await sessionManager.getSession(sessionId);
             if (!session) {
                 throw new Error(`Session disappeared: ${sessionId}`);
@@ -1774,11 +1822,33 @@ async function allocateFlowDebugDir(sessionId: string, seq: number): Promise<str
 }
 
 // ---- run_test ----
+/**
+ * Synchronous run_test entry point — kept for backwards compatibility but now
+ * delegates to TaskRegistry so sync and async (start_test) flow runs share a
+ * single code path. On success returns the structured RunTestOutput; on
+ * failure or cancellation throws with a structured error.
+ */
 export async function handleRunTest(
     input: RunTestInput
 ): Promise<RunTestOutput> {
     console.error(`[MCP] run_test: running ${input.yamlPath}`);
+    const watchdogMs = DEFAULT_RUN_TEST_TIMEOUT_MS + RUN_TEST_GRACE_MS;
+    const task = await taskRegistry.run<RunTestOutput>(
+        { kind: 'test', timeoutMs: watchdogMs },
+        (ctx) => runTestTaskRunner(input, ctx.signal),
+    );
+    if (task.status === 'done' && task.result) return task.result;
+    if (task.status === 'cancelled') {
+        throw new Error(`run_test cancelled: ${task.error ?? 'aborted'}`);
+    }
+    throw new Error(task.error || 'run_test failed');
+}
 
+/** Shared between handleRunTest and handleStartTest. */
+async function runTestTaskRunner(
+    input: RunTestInput,
+    parentSignal: AbortSignal,
+): Promise<RunTestOutput> {
     return executeFlowWithPause(
         input.yamlPath,
         async (signal, debugOutputDir) => {
@@ -1798,6 +1868,7 @@ export async function handleRunTest(
                 flowPath: input.yamlPath,
             };
         },
+        parentSignal,
     );
 }
 
@@ -2153,9 +2224,25 @@ export async function handleListFlows(input: ListFlowsInput): Promise<ListFlowsO
 }
 
 export async function handleRunFlow(input: RunFlowInput): Promise<RunFlowOutput> {
-    const flowsDir = resolveFlowsDir(input.flowsDir);
-    console.error(`[MCP] run_flow: resolving "${input.name}" in ${flowsDir}`);
+    console.error(`[MCP] run_flow: resolving "${input.name}"`);
+    const watchdogMs = DEFAULT_RUN_TEST_TIMEOUT_MS + RUN_TEST_GRACE_MS;
+    const task = await taskRegistry.run<RunFlowOutput>(
+        { kind: 'flow', timeoutMs: watchdogMs },
+        (ctx) => runFlowTaskRunner(input, ctx.signal),
+    );
+    if (task.status === 'done' && task.result) return task.result;
+    if (task.status === 'cancelled') {
+        throw new Error(`run_flow cancelled: ${task.error ?? 'aborted'}`);
+    }
+    throw new Error(task.error || 'run_flow failed');
+}
 
+/** Shared between handleRunFlow and handleStartFlow. */
+async function runFlowTaskRunner(
+    input: RunFlowInput,
+    parentSignal: AbortSignal,
+): Promise<RunFlowOutput> {
+    const flowsDir = resolveFlowsDir(input.flowsDir);
     const flow = await FlowRegistry.resolve(flowsDir, input.name);
     const appliedParams = FlowRegistry.applyParams(flow, input.params);
 
@@ -2190,6 +2277,7 @@ export async function handleRunFlow(input: RunFlowInput): Promise<RunFlowOutput>
                 flowPath: flow.path,
             };
         },
+        parentSignal,
     );
 
     return {
@@ -2304,6 +2392,46 @@ export async function handleStartBuild(input: StartBuildInput): Promise<StartBui
 }
 
 /**
+ * Schedule a Maestro YAML test asynchronously. Returns a taskId immediately
+ * so the agent can poll for status via poll_task_status without hitting the
+ * MCP transport timeout. cancel_task SIGTERMs the Maestro CLI (Phase 4
+ * plumbing) and runs resume cleanup if pause/resume bracketing was active.
+ */
+export async function handleStartTest(input: StartTestInput): Promise<StartTestOutput> {
+    console.error(`[MCP] start_test: yamlPath=${input.yamlPath}`);
+    const watchdogMs = DEFAULT_RUN_TEST_TIMEOUT_MS + RUN_TEST_GRACE_MS;
+    const task = taskRegistry.start<RunTestOutput>(
+        { kind: 'test', timeoutMs: watchdogMs },
+        (ctx) => runTestTaskRunner(input, ctx.signal),
+    );
+    return {
+        taskId: task.taskId,
+        kind: 'test',
+        status: task.status,
+        startedAt: task.startedAt,
+    };
+}
+
+/**
+ * Schedule a named Maestro flow asynchronously. Mirrors handleStartTest but
+ * resolves <flowsDir>/<name>.yaml + manifest params before scheduling.
+ */
+export async function handleStartFlow(input: StartFlowInput): Promise<StartFlowOutput> {
+    console.error(`[MCP] start_flow: name=${input.name}`);
+    const watchdogMs = DEFAULT_RUN_TEST_TIMEOUT_MS + RUN_TEST_GRACE_MS;
+    const task = taskRegistry.start<RunFlowOutput>(
+        { kind: 'flow', timeoutMs: watchdogMs },
+        (ctx) => runFlowTaskRunner(input, ctx.signal),
+    );
+    return {
+        taskId: task.taskId,
+        kind: 'flow',
+        status: task.status,
+        startedAt: task.startedAt,
+    };
+}
+
+/**
  * Returns current status, duration, recent output for a task. Cheap; callable
  * frequently. Never throws — unknown/pruned task IDs return notFound:true so
  * agents can distinguish "task expired" from a network error.
@@ -2373,6 +2501,22 @@ export async function handleGetTaskResult(
             taskId: task.taskId,
             status: task.status,
             result: { kind: 'build', build: task.result },
+        };
+    }
+    if (task.kind === 'test') {
+        return {
+            taskId: task.taskId,
+            status: task.status,
+            result: { kind: 'test', test: task.result as unknown as RunTestOutput },
+            cancelReason: task.cancelReason,
+        };
+    }
+    if (task.kind === 'flow') {
+        return {
+            taskId: task.taskId,
+            status: task.status,
+            result: { kind: 'flow', flow: task.result as unknown as RunFlowOutput },
+            cancelReason: task.cancelReason,
         };
     }
     // Other kinds (unit_tests etc) aren't wired into the discriminated union yet.
