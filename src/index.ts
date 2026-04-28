@@ -556,7 +556,7 @@ server.registerTool(
     {
         title: 'Run Test',
         description:
-            'Run a Maestro YAML test file with optional WireMock stub replay. Automatically starts an in-process stub server, runs the test, and tears down. Returns pass/fail status, output, and duration. Note: this tool replays a static YAML script against a booted simulator — it does NOT connect to live Proxyman or record new network traffic during execution. When MCA_FLOW_PAUSE_RESUME=on and a recording session is active, the session is paused for the duration of the flow and resumed automatically afterward. Otherwise, run_test errors if any recording session is active. For long-running flows that may exceed the MCP transport timeout, prefer the async sibling start_test (poll via poll_task_status; cancel mid-flow via cancel_task — SIGTERMs the Maestro CLI).',
+            'Run a Maestro YAML test file with optional WireMock stub replay. Automatically starts an in-process stub server, runs the test, and tears down. Returns pass/fail status, output, and duration. Maestro stdout/stderr is streamed line-by-line into the task ring buffer — poll_task_status shows live output. Note: this tool replays a static YAML script against a booted simulator — it does NOT connect to live Proxyman or record new network traffic during execution. When MCA_FLOW_PAUSE_RESUME=on and a recording session is active, the session is paused for the duration of the flow and resumed automatically afterward. Otherwise, run_test errors if any recording session is active. For long-running flows that may exceed the MCP transport timeout, prefer the async sibling start_test (poll via poll_task_status; cancel mid-flow via cancel_task — SIGTERMs the Maestro CLI).',
         inputSchema: RunTestInputSchema,
         outputSchema: RunTestOutputSchema,
         annotations: {
@@ -660,7 +660,7 @@ server.registerTool(
     {
         title: 'Run Flow',
         description:
-            'Execute a named Maestro flow by name. Resolves <flowsDir>/<name>.yaml, merges manifest param defaults with caller-supplied params, and runs the flow against a booted simulator. Use this to navigate to the area of an incremental change before verifying it. When MCA_FLOW_PAUSE_RESUME=on and a recording session is active, the session is paused for the duration of the flow and resumed automatically afterward. Otherwise, run_flow errors if any recording session is active. For long-running flows that may exceed the MCP transport timeout, prefer the async sibling start_flow (poll via poll_task_status; cancel mid-flow via cancel_task — SIGTERMs the Maestro CLI).',
+            'Execute a named Maestro flow by name. Resolves <flowsDir>/<name>.yaml, merges manifest param defaults with caller-supplied params, and runs the flow against a booted simulator. Use this to navigate to the area of an incremental change before verifying it. Maestro stdout/stderr is streamed line-by-line into the task ring buffer — poll_task_status shows live output. When MCA_FLOW_PAUSE_RESUME=on and a recording session is active, the session is paused for the duration of the flow and resumed automatically afterward. Otherwise, run_flow errors if any recording session is active. For long-running flows that may exceed the MCP transport timeout, prefer the async sibling start_flow (poll via poll_task_status; cancel mid-flow via cancel_task — SIGTERMs the Maestro CLI).',
         inputSchema: RunFlowInputSchema,
         outputSchema: RunFlowOutputSchema,
         annotations: {
@@ -738,7 +738,7 @@ server.registerTool(
     {
         title: 'Start Test (Async)',
         description:
-            'Starts a Maestro YAML test asynchronously. Returns a taskId immediately so the agent can poll status via poll_task_status without hitting the MCP transport timeout. Pause/resume bracketing of an active recording session works exactly as for run_test; cancel_task SIGTERMs the Maestro CLI and runs resume cleanup.',
+            'Starts a Maestro YAML test asynchronously. Returns a taskId immediately so the agent can poll status via poll_task_status without hitting the MCP transport timeout. Maestro stdout/stderr streams line-by-line into the ring buffer — poll_task_status shows live output. Pause/resume bracketing of an active recording session works exactly as for run_test; cancel_task SIGTERMs the Maestro CLI and runs resume cleanup.',
         inputSchema: StartTestInputSchema,
         outputSchema: StartTestOutputSchema,
         annotations: {
@@ -764,7 +764,7 @@ server.registerTool(
     {
         title: 'Start Flow (Async)',
         description:
-            'Starts a named Maestro flow asynchronously by resolving <flowsDir>/<name>.yaml and merging manifest param defaults. Returns a taskId immediately. cancel_task interrupts a running flow mid-execution by SIGTERMing the Maestro CLI; resume cleanup runs automatically when bracketing an active recording session.',
+            'Starts a named Maestro flow asynchronously by resolving <flowsDir>/<name>.yaml and merging manifest param defaults. Returns a taskId immediately. Maestro stdout/stderr streams line-by-line into the ring buffer — poll_task_status shows live output. cancel_task interrupts a running flow mid-execution by SIGTERMing the Maestro CLI; resume cleanup runs automatically when bracketing an active recording session.',
         inputSchema: StartFlowInputSchema,
         outputSchema: StartFlowOutputSchema,
         annotations: {
