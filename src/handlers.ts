@@ -115,7 +115,18 @@ import type {
     SetMockResponseOutput,
     ClearMockResponsesInput,
     ClearMockResponsesOutput,
+    StartBuildInput,
+    StartBuildOutput,
+    PollTaskStatusInput,
+    PollTaskStatusOutput,
+    GetTaskResultInput,
+    GetTaskResultOutput,
+    CancelTaskInput,
+    CancelTaskOutput,
+    ListTasksInput,
+    ListTasksOutput,
 } from './schemas.js';
+import { taskRegistry, type TaskKind, type TaskStatus } from './tasks/registry.js';
 import { runFeatureTest, defaultSleep } from './featureTest/index.js';
 import {
     getProxymanMcpClient,
@@ -160,6 +171,18 @@ function createPollingNotifier(): PollingNotifier | undefined {
 // possible without re-exporting the maps.
 
 const STANDALONE_TAG_PREFIX = 'mca:standalone';
+
+/**
+ * How long handleCancelTask busy-polls for the runner to settle into a
+ * terminal state before giving up and returning the current (possibly
+ * 'cancelling') status. Exported so tests can shrink it for speed.
+ */
+export let CANCEL_DEADLINE_MS = 10_000;
+export function _setCancelDeadlineMsForTests(ms: number): number {
+    const prev = CANCEL_DEADLINE_MS;
+    CANCEL_DEADLINE_MS = ms;
+    return prev;
+}
 
 /**
  * Test-only — replace the Proxyman MCP client used by handlers. Returns the
@@ -1882,72 +1905,243 @@ export async function handleRunFlow(input: RunFlowInput): Promise<RunFlowOutput>
 }
 
 // ---- build_app ----
+/**
+ * Synchronous build entry point — kept for backwards compatibility but now
+ * delegates to TaskRegistry so sync and async (start_build) builds share one
+ * code path. On registry.run we await the terminal state and re-throw for
+ * failure/cancellation; success returns the structured BuildAppOutput.
+ */
 export async function handleBuildApp(input: BuildAppInput): Promise<BuildAppOutput> {
     console.error(`[MCP] build_app: platform=${input.platform}`);
-
-    // Decision A (Phase 1 plan): on a runHandler timeout/abort, do NOT delete
-    // derivedDataPath. Partial xcodebuild trees are useful for debugging the
-    // failure, and a wholesale rm -rf on someone's build artifacts is a
-    // bigger blast radius than the leak it would prevent.
-
-    // Layer the runHandler timeout *5s above* the inner build timeout so the
-    // inner timeout fires first when both are armed; the outer is only the
-    // safety net for genuinely hung child processes.
     const innerTimeout = input.timeoutMs;
-    const outerTimeout = innerTimeout != null ? innerTimeout + 5_000 : undefined;
-
-    return runHandler(
-        { name: `build_app(${input.platform})`, timeoutMs: outerTimeout },
-        async (cleanup) => {
-            if (input.platform === 'ios') {
-                if (!input.scheme) {
-                    throw new Error('iOS build requires "scheme"');
-                }
-                if (!input.workspacePath && !input.projectPath) {
-                    throw new Error('iOS build requires "workspacePath" or "projectPath"');
-                }
-                const result = await buildIosApp({
-                    workspacePath: input.workspacePath,
-                    projectPath: input.projectPath,
-                    scheme: input.scheme,
-                    configuration: input.configuration,
-                    destination: input.destination,
-                    derivedDataPath: input.derivedDataPath,
-                    timeoutMs: innerTimeout,
-                    signal: cleanup.signal,
-                });
-                return {
-                    passed: result.passed,
-                    platform: 'ios' as const,
-                    appPath: result.appPath,
-                    bundleId: result.bundleId,
-                    derivedDataPath: result.derivedDataPath,
-                    durationMs: result.durationMs,
-                    output: result.output,
-                };
-            }
-
-            if (!input.projectPath) {
-                throw new Error('Android build requires "projectPath" (Gradle project root)');
-            }
-            const result = await buildAndroidApp({
-                projectPath: input.projectPath,
-                module: input.module,
-                variant: input.variant,
-                timeoutMs: innerTimeout,
-                signal: cleanup.signal,
-            });
-            return {
-                passed: result.passed,
-                platform: 'android' as const,
-                appPath: result.apkPath,
-                module: result.module,
-                variant: result.variant,
-                durationMs: result.durationMs,
-                output: result.output,
-            };
-        },
+    const task = await taskRegistry.run<BuildAppOutput>(
+        { kind: 'build', timeoutMs: innerTimeout },
+        (ctx) => runBuildTask(input, ctx.signal, (line, stream) => ctx.appendLine(line, stream)),
     );
+    if (task.status === 'done' && task.result) return task.result;
+    if (task.status === 'cancelled') throw new Error(`build cancelled: ${task.error ?? 'aborted'}`);
+    throw new Error(task.error || 'build failed');
+}
+
+/** Shared between handleBuildApp and handleStartBuild. */
+async function runBuildTask(
+    input: BuildAppInput,
+    signal: AbortSignal,
+    onLine: (line: string, stream: 'stdout' | 'stderr') => void,
+): Promise<BuildAppOutput> {
+    if (input.platform === 'ios') {
+        if (!input.scheme) {
+            throw new Error('iOS build requires "scheme"');
+        }
+        if (!input.workspacePath && !input.projectPath) {
+            throw new Error('iOS build requires "workspacePath" or "projectPath"');
+        }
+        const result = await buildIosApp({
+            workspacePath: input.workspacePath,
+            projectPath: input.projectPath,
+            scheme: input.scheme,
+            configuration: input.configuration,
+            destination: input.destination,
+            derivedDataPath: input.derivedDataPath,
+            timeoutMs: input.timeoutMs,
+            signal,
+            onLine,
+        });
+        return {
+            passed: result.passed,
+            platform: 'ios' as const,
+            appPath: result.appPath,
+            bundleId: result.bundleId,
+            derivedDataPath: result.derivedDataPath,
+            durationMs: result.durationMs,
+            output: result.output,
+        };
+    }
+    if (!input.projectPath) {
+        throw new Error('Android build requires "projectPath" (Gradle project root)');
+    }
+    const result = await buildAndroidApp({
+        projectPath: input.projectPath,
+        module: input.module,
+        variant: input.variant,
+        timeoutMs: input.timeoutMs,
+        signal,
+        onLine,
+    });
+    return {
+        passed: result.passed,
+        platform: 'android' as const,
+        appPath: result.apkPath,
+        module: result.module,
+        variant: result.variant,
+        durationMs: result.durationMs,
+        output: result.output,
+    };
+}
+
+// ---- start_build / poll_task_status / get_task_result / cancel_task / list_tasks ----
+
+/**
+ * Schedule a build asynchronously. Returns a taskId immediately so the agent
+ * can poll for status via poll_task_status without hitting the MCP transport
+ * timeout (~5min). Tasks live in-process; server restart cancels in-flight
+ * builds and forgets completed ones.
+ */
+export async function handleStartBuild(input: StartBuildInput): Promise<StartBuildOutput> {
+    console.error(`[MCP] start_build: platform=${input.platform}`);
+    const task = taskRegistry.start<BuildAppOutput>(
+        { kind: 'build', timeoutMs: input.timeoutMs },
+        (ctx) => runBuildTask(input, ctx.signal, (line, stream) => ctx.appendLine(line, stream)),
+    );
+    return {
+        taskId: task.taskId,
+        kind: 'build',
+        status: task.status,
+        startedAt: task.startedAt,
+    };
+}
+
+/**
+ * Returns current status, duration, recent output for a task. Cheap; callable
+ * frequently. Never throws — unknown/pruned task IDs return notFound:true so
+ * agents can distinguish "task expired" from a network error.
+ */
+export async function handlePollTaskStatus(
+    input: PollTaskStatusInput,
+): Promise<PollTaskStatusOutput> {
+    const task = taskRegistry.get(input.taskId);
+    if (!task) {
+        return {
+            taskId: input.taskId,
+            status: 'failed',
+            durationMs: 0,
+            recentOutputLines: [],
+            lineCount: 0,
+            notFound: true,
+        };
+    }
+    return {
+        taskId: task.taskId,
+        kind: task.kind,
+        status: task.status,
+        startedAt: task.startedAt,
+        finishedAt: task.finishedAt,
+        durationMs: task.durationMs(),
+        recentOutputLines: task.recentOutputLines(input.tailLines),
+        lineCount: task.lineCount(),
+        error: task.error,
+    };
+}
+
+/**
+ * Returns the structured result of a completed task. Idempotent — multiple
+ * calls return the same payload until the task is pruned. Returns notFound /
+ * not-yet-done errors instead of throwing.
+ */
+export async function handleGetTaskResult(
+    input: GetTaskResultInput,
+): Promise<GetTaskResultOutput> {
+    const task = taskRegistry.get<BuildAppOutput>(input.taskId);
+    if (!task) {
+        return {
+            taskId: input.taskId,
+            status: 'failed',
+            notFound: true,
+            error: 'Task not found or pruned',
+        };
+    }
+    if (task.status === 'running' || task.status === 'pending') {
+        return {
+            taskId: task.taskId,
+            status: task.status,
+            error: 'Task not yet complete',
+        };
+    }
+    if (task.status !== 'done' || !task.result) {
+        return {
+            taskId: task.taskId,
+            status: task.status,
+            error: task.error,
+        };
+    }
+    if (task.kind === 'build') {
+        return {
+            taskId: task.taskId,
+            status: task.status,
+            result: { kind: 'build', build: task.result },
+        };
+    }
+    // Other kinds (unit_tests etc) aren't wired into the discriminated union yet.
+    return {
+        taskId: task.taskId,
+        status: task.status,
+        error: `result projection not implemented for kind=${task.kind}`,
+    };
+}
+
+/**
+ * Aborts a running task (SIGTERM children, run cleanups, mark cancelled).
+ * Idempotent and never throws — terminal/unknown returns cancelled:false with
+ * a structured reason.
+ */
+export async function handleCancelTask(input: CancelTaskInput): Promise<CancelTaskOutput> {
+    const task = taskRegistry.get(input.taskId);
+    if (!task) {
+        return { taskId: input.taskId, cancelled: false, notFound: true };
+    }
+    const previousStatus = task.status;
+    if (previousStatus !== 'running' && previousStatus !== 'pending') {
+        return {
+            taskId: task.taskId,
+            cancelled: false,
+            previousStatus,
+            finalStatus: previousStatus,
+        };
+    }
+    taskRegistry.cancel(task.taskId, input.reason);
+    // Wait briefly for the runner to settle into a terminal state. If the
+    // runner ignores SIGTERM and we exhaust the deadline, the task remains
+    // in the transient 'cancelling' status — which we return honestly rather
+    // than lying with finalStatus='running'.
+    const deadline = Date.now() + CANCEL_DEADLINE_MS;
+    while (
+        task.status !== 'done' &&
+        task.status !== 'failed' &&
+        task.status !== 'cancelled' &&
+        Date.now() < deadline
+    ) {
+        await new Promise((r) => setTimeout(r, 25));
+    }
+    return {
+        taskId: task.taskId,
+        cancelled: true,
+        previousStatus,
+        finalStatus: task.status,
+    };
+}
+
+/**
+ * Lists tasks, optionally filtered by kind/status/since. Useful for orphan
+ * recovery alongside list_active_sessions.
+ */
+export async function handleListTasks(input: ListTasksInput): Promise<ListTasksOutput> {
+    const tasks = taskRegistry.list({
+        kind: input.kind as TaskKind | undefined,
+        status: input.status as TaskStatus | TaskStatus[] | undefined,
+        since: input.since,
+    });
+    return {
+        tasks: tasks.map((t) => ({
+            taskId: t.taskId,
+            kind: t.kind,
+            status: t.status,
+            startedAt: t.startedAt,
+            finishedAt: t.finishedAt,
+            durationMs: t.durationMs(),
+            lineCount: t.lineCount(),
+        })),
+        totalTasks: tasks.length,
+    };
 }
 
 // ---- install_app ----

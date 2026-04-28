@@ -42,6 +42,11 @@ The system orchestrates two async data streams — **UI interactions** (via Maes
 | `boot_simulator` | Boot an iOS simulator by UDID and wait for it to be ready (Android emulator: start manually) |
 | `take_screenshot` | Capture a PNG of the current simulator/emulator screen; returns an absolute path Claude can read back |
 | `run_unit_tests` | Run the unit-test target and return structured results (`passed`/`failed` counts, failing test names, first-line failure messages) |
+| `start_build` | Async entry point for `build_app` — returns a `taskId` immediately so agents can poll without hitting the MCP transport timeout |
+| `poll_task_status` | Read current status, duration, and recent streamed output for a task (read-only, never throws) |
+| `get_task_result` | Read the final structured result for a completed task (idempotent, does not consume) |
+| `cancel_task` | Abort a running task — SIGTERMs children, runs cleanups, marks cancelled |
+| `list_tasks` | Inventory of in-process tasks filtered by `kind` / `status` / `since` |
 
 ## Quick Start
 

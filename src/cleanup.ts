@@ -43,7 +43,7 @@ export class TimeoutError extends Error {
   }
 }
 
-class CleanupImpl implements Cleanup {
+export class CleanupImpl implements Cleanup {
   private readonly actions: CleanupAction[] = [];
   private readonly controller: AbortController;
 

@@ -80,6 +80,16 @@ import {
     ForceCleanupMocksOutputSchema,
     AuditStateInputSchema,
     AuditStateOutputSchema,
+    StartBuildInputSchema,
+    StartBuildOutputSchema,
+    PollTaskStatusInputSchema,
+    PollTaskStatusOutputSchema,
+    GetTaskResultInputSchema,
+    GetTaskResultOutputSchema,
+    CancelTaskInputSchema,
+    CancelTaskOutputSchema,
+    ListTasksInputSchema,
+    ListTasksOutputSchema,
     TOOL_NAMES,
 } from './schemas.js';
 
@@ -113,8 +123,14 @@ import {
     handleRunFeatureTest,
     handleSetMockResponse,
     handleClearMockResponses,
+    handleStartBuild,
+    handlePollTaskStatus,
+    handleGetTaskResult,
+    handleCancelTask,
+    handleListTasks,
     setMcpServer,
 } from './handlers.js';
+import { taskRegistry } from './tasks/registry.js';
 
 import {
     handleListActiveSessions,
@@ -684,6 +700,136 @@ server.registerTool(
     }
 );
 
+// ── 13a. start_build ──
+server.registerTool(
+    TOOL_NAMES.START_BUILD,
+    {
+        title: 'Start Build (Async)',
+        description:
+            'Starts an iOS or Android build asynchronously. Returns a taskId immediately so the agent can poll for status without hitting the MCP transport timeout. Tasks live in-process for 1 hour after completion; a server restart cancels in-flight builds.',
+        inputSchema: StartBuildInputSchema,
+        outputSchema: StartBuildOutputSchema,
+        annotations: {
+            title: 'Start Build (Async)',
+            readOnlyHint: false,
+            destructiveHint: false,
+            idempotentHint: false,
+            openWorldHint: true,
+        },
+    },
+    async (args) => {
+        const result = await handleStartBuild(args);
+        return {
+            content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
+            structuredContent: result,
+        };
+    }
+);
+
+// ── 13b. poll_task_status ──
+server.registerTool(
+    TOOL_NAMES.POLL_TASK_STATUS,
+    {
+        title: 'Poll Task Status',
+        description:
+            'Returns current status, duration, and the recent tail of streamed output for a task. Cheap; safe to call frequently. Returns notFound:true for unknown or pruned task IDs (never throws).',
+        inputSchema: PollTaskStatusInputSchema,
+        outputSchema: PollTaskStatusOutputSchema,
+        annotations: {
+            title: 'Poll Task Status',
+            readOnlyHint: true,
+            destructiveHint: false,
+            idempotentHint: true,
+            openWorldHint: false,
+        },
+    },
+    async (args) => {
+        const result = await handlePollTaskStatus(args);
+        return {
+            content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
+            structuredContent: result,
+        };
+    }
+);
+
+// ── 13c. get_task_result ──
+server.registerTool(
+    TOOL_NAMES.GET_TASK_RESULT,
+    {
+        title: 'Get Task Result',
+        description:
+            'Returns the final structured result for a completed task. Returns error/notFound for not-yet-done or unknown tasks. Idempotent — does not consume the task.',
+        inputSchema: GetTaskResultInputSchema,
+        outputSchema: GetTaskResultOutputSchema,
+        annotations: {
+            title: 'Get Task Result',
+            readOnlyHint: true,
+            destructiveHint: false,
+            idempotentHint: true,
+            openWorldHint: false,
+        },
+    },
+    async (args) => {
+        const result = await handleGetTaskResult(args);
+        return {
+            content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
+            structuredContent: result,
+        };
+    }
+);
+
+// ── 13d. cancel_task ──
+server.registerTool(
+    TOOL_NAMES.CANCEL_TASK,
+    {
+        title: 'Cancel Task',
+        description:
+            'Aborts a running task: sends SIGTERM to children, runs registered cleanups in reverse order, marks the task cancelled. Idempotent and never throws.',
+        inputSchema: CancelTaskInputSchema,
+        outputSchema: CancelTaskOutputSchema,
+        annotations: {
+            title: 'Cancel Task',
+            readOnlyHint: false,
+            destructiveHint: true,
+            idempotentHint: true,
+            openWorldHint: true,
+        },
+    },
+    async (args) => {
+        const result = await handleCancelTask(args);
+        return {
+            content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
+            structuredContent: result,
+        };
+    }
+);
+
+// ── 13e. list_tasks ──
+server.registerTool(
+    TOOL_NAMES.LIST_TASKS,
+    {
+        title: 'List Tasks',
+        description:
+            'Lists tasks in the registry, optionally filtered by kind/status. Useful for orphan recovery alongside list_active_sessions.',
+        inputSchema: ListTasksInputSchema,
+        outputSchema: ListTasksOutputSchema,
+        annotations: {
+            title: 'List Tasks',
+            readOnlyHint: true,
+            destructiveHint: false,
+            idempotentHint: true,
+            openWorldHint: false,
+        },
+    },
+    async (args) => {
+        const result = await handleListTasks(args);
+        return {
+            content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
+            structuredContent: result,
+        };
+    }
+);
+
 // ── 14. install_app ──
 server.registerTool(
     TOOL_NAMES.INSTALL_APP,
@@ -1029,6 +1175,10 @@ server.registerTool(
 async function main() {
     await sessionManager.initialize();
     console.error('[mobile-automator-mcp] Session Database initialized');
+
+    // Start the periodic prune of finished tasks (TTL via MCA_TASK_TTL_MS,
+    // default 1h). Tests don't call this so they stay deterministic.
+    taskRegistry.startPruneTimer();
 
     if (process.env.MCP_TRANSPORT === 'http') {
         const { startHttpBridge } = await import('./httpBridge.js');

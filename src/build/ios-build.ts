@@ -16,6 +16,7 @@ import {
     truncateOutput,
     execFileWithAbort,
 } from './utils.js';
+import { spawnStream } from './stream.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -40,6 +41,13 @@ export interface IosBuildOptions {
     timeoutMs?: number;
     /** Optional AbortSignal — on abort, SIGTERM xcodebuild, SIGKILL after 5s. */
     signal?: AbortSignal;
+    /**
+     * If provided, output streams line-by-line through this callback (also
+     * captured into the result). When absent, output is buffered until process
+     * exit (legacy path). Used by start_build to surface progress while the
+     * agent polls for status.
+     */
+    onLine?: (line: string, stream: 'stdout' | 'stderr') => void;
 }
 
 export interface IosBuildResult {
@@ -77,21 +85,41 @@ export async function buildIosApp(options: IosBuildOptions): Promise<IosBuildRes
     const start = Date.now();
     let stdoutStderr = '';
     let passed = false;
-    try {
-        const { stdout, stderr } = await execFileWithAbort('xcodebuild', args, {
-            maxBuffer: 50 * 1024 * 1024,
-            timeout: options.timeoutMs ?? DEFAULT_BUILD_TIMEOUT_MS,
-            signal: options.signal,
-        });
-        stdoutStderr = [stdout, stderr].filter(Boolean).join('\n');
-        passed = true;
-    } catch (error: unknown) {
-        const e = error as { stdout?: string; stderr?: string; message?: string; name?: string };
-        stdoutStderr = [e.stdout, e.stderr, e.message].filter(Boolean).join('\n');
-        if (options.signal?.aborted) {
-            stdoutStderr = `[aborted] ${stdoutStderr}`;
+    if (options.onLine) {
+        // Streaming path: line-by-line via spawnStream.
+        try {
+            const result = await spawnStream('xcodebuild', args, {
+                maxBufferBytes: 50 * 1024 * 1024,
+                timeout: options.timeoutMs ?? DEFAULT_BUILD_TIMEOUT_MS,
+                signal: options.signal,
+                onLine: options.onLine,
+            });
+            stdoutStderr = [result.stdout, result.stderr].filter(Boolean).join('\n');
+            passed = result.code === 0 && !result.timedOut && !result.aborted;
+            if (result.aborted) stdoutStderr = `[aborted] ${stdoutStderr}`;
+            else if (result.timedOut) stdoutStderr = `[timed-out] ${stdoutStderr}`;
+        } catch (error: unknown) {
+            const e = error as { message?: string };
+            stdoutStderr = e.message ?? String(error);
+            passed = false;
         }
-        passed = false;
+    } else {
+        try {
+            const { stdout, stderr } = await execFileWithAbort('xcodebuild', args, {
+                maxBuffer: 50 * 1024 * 1024,
+                timeout: options.timeoutMs ?? DEFAULT_BUILD_TIMEOUT_MS,
+                signal: options.signal,
+            });
+            stdoutStderr = [stdout, stderr].filter(Boolean).join('\n');
+            passed = true;
+        } catch (error: unknown) {
+            const e = error as { stdout?: string; stderr?: string; message?: string; name?: string };
+            stdoutStderr = [e.stdout, e.stderr, e.message].filter(Boolean).join('\n');
+            if (options.signal?.aborted) {
+                stdoutStderr = `[aborted] ${stdoutStderr}`;
+            }
+            passed = false;
+        }
     }
     const durationMs = Date.now() - start;
 

@@ -1784,6 +1784,103 @@ export const AuditStateOutputSchema = z.object({
 });
 
 // ──────────────────────────────────────────────
+// Async task lifecycle (Phase 2: pollable long-running tasks)
+// ──────────────────────────────────────────────
+
+export const TaskKindSchema = z.enum(['build', 'unit_tests', 'recording']);
+export const TaskStatusSchema = z.enum([
+    'pending',
+    'running',
+    'cancelling',
+    'done',
+    'failed',
+    'cancelled',
+]);
+
+export const StartBuildInputSchema = BuildAppInputSchema;
+export const StartBuildOutputSchema = z.object({
+    taskId: z.string().uuid(),
+    kind: z.literal('build'),
+    status: TaskStatusSchema,
+    startedAt: z.string().datetime(),
+});
+
+export const PollTaskStatusInputSchema = z.object({
+    taskId: z.string().uuid(),
+    tailLines: z.number().int().min(0).max(500).optional()
+        .describe('Cap the recentOutputLines tail. Default: full retained buffer.'),
+});
+export const PollTaskStatusOutputSchema = z.object({
+    taskId: z.string().uuid(),
+    kind: TaskKindSchema.optional(),
+    status: TaskStatusSchema,
+    startedAt: z.string().datetime().optional(),
+    finishedAt: z.string().datetime().optional(),
+    durationMs: z.number(),
+    recentOutputLines: z.array(z.string()),
+    lineCount: z.number().int().nonnegative()
+        .describe('Lifetime line count (may exceed recentOutputLines.length when ring buffer evicted older lines).'),
+    error: z.string().optional(),
+    notFound: z.boolean().optional(),
+});
+
+export const GetTaskResultInputSchema = z.object({ taskId: z.string().uuid() });
+export const GetTaskResultOutputSchema = z.object({
+    taskId: z.string().uuid(),
+    status: TaskStatusSchema,
+    notFound: z.boolean().optional(),
+    error: z.string().optional(),
+    result: z
+        .discriminatedUnion('kind', [
+            z.object({ kind: z.literal('build'), build: BuildAppOutputSchema }),
+        ])
+        .optional(),
+});
+
+export const CancelTaskInputSchema = z.object({
+    taskId: z.string().uuid(),
+    reason: z.string().optional(),
+});
+export const CancelTaskOutputSchema = z.object({
+    taskId: z.string().uuid(),
+    cancelled: z.boolean(),
+    previousStatus: TaskStatusSchema.optional(),
+    finalStatus: TaskStatusSchema.optional(),
+    notFound: z.boolean().optional(),
+});
+
+export const ListTasksInputSchema = z.object({
+    kind: TaskKindSchema.optional(),
+    status: z.union([TaskStatusSchema, z.array(TaskStatusSchema)]).optional(),
+    since: z.string().datetime().optional(),
+});
+export const ListTasksOutputSchema = z.object({
+    tasks: z.array(
+        z.object({
+            taskId: z.string().uuid(),
+            kind: TaskKindSchema,
+            status: TaskStatusSchema,
+            startedAt: z.string().datetime(),
+            finishedAt: z.string().datetime().optional(),
+            durationMs: z.number(),
+            lineCount: z.number().int().nonnegative(),
+        }),
+    ),
+    totalTasks: z.number().int().nonnegative(),
+});
+
+export type StartBuildInput = z.infer<typeof StartBuildInputSchema>;
+export type StartBuildOutput = z.infer<typeof StartBuildOutputSchema>;
+export type PollTaskStatusInput = z.infer<typeof PollTaskStatusInputSchema>;
+export type PollTaskStatusOutput = z.infer<typeof PollTaskStatusOutputSchema>;
+export type GetTaskResultInput = z.infer<typeof GetTaskResultInputSchema>;
+export type GetTaskResultOutput = z.infer<typeof GetTaskResultOutputSchema>;
+export type CancelTaskInput = z.infer<typeof CancelTaskInputSchema>;
+export type CancelTaskOutput = z.infer<typeof CancelTaskOutputSchema>;
+export type ListTasksInput = z.infer<typeof ListTasksInputSchema>;
+export type ListTasksOutput = z.infer<typeof ListTasksOutputSchema>;
+
+// ──────────────────────────────────────────────
 // Tool name constants
 // ──────────────────────────────────────────────
 
@@ -1822,4 +1919,9 @@ export const TOOL_NAMES = {
     FORCE_CLEANUP_SESSION: 'force_cleanup_session',
     FORCE_CLEANUP_MOCKS: 'force_cleanup_mocks',
     AUDIT_STATE: 'audit_state',
+    START_BUILD: 'start_build',
+    POLL_TASK_STATUS: 'poll_task_status',
+    GET_TASK_RESULT: 'get_task_result',
+    CANCEL_TASK: 'cancel_task',
+    LIST_TASKS: 'list_tasks',
 } as const;

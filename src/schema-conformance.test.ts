@@ -45,6 +45,15 @@ import {
   ForceCleanupMocksInputSchema,
   ForceCleanupMocksOutputSchema,
   AuditStateOutputSchema,
+  StartBuildOutputSchema,
+  PollTaskStatusInputSchema,
+  PollTaskStatusOutputSchema,
+  GetTaskResultInputSchema,
+  GetTaskResultOutputSchema,
+  CancelTaskInputSchema,
+  CancelTaskOutputSchema,
+  ListTasksInputSchema,
+  ListTasksOutputSchema,
 } from './schemas.js';
 
 describe('Schema Conformance', () => {
@@ -1110,6 +1119,156 @@ describe('Schema Conformance', () => {
           rulesDeleted: 2,
           ledgerEntriesCleared: 4,
           errors: ['deleteRule(R3): denied'],
+        }).success,
+      ).toBe(true);
+    });
+
+    it('StartBuildOutputSchema accepts the immediate-return shape', () => {
+      expect(
+        StartBuildOutputSchema.safeParse({
+          taskId: '550e8400-e29b-41d4-a716-446655440000',
+          kind: 'build',
+          status: 'running',
+          startedAt: '2026-04-27T00:00:00.000Z',
+        }).success,
+      ).toBe(true);
+    });
+
+    it('PollTaskStatusInputSchema rejects out-of-range tailLines', () => {
+      expect(
+        PollTaskStatusInputSchema.safeParse({
+          taskId: '550e8400-e29b-41d4-a716-446655440000',
+          tailLines: 600,
+        }).success,
+      ).toBe(false);
+    });
+
+    it('PollTaskStatusOutputSchema accepts a running task projection', () => {
+      expect(
+        PollTaskStatusOutputSchema.safeParse({
+          taskId: '550e8400-e29b-41d4-a716-446655440000',
+          kind: 'build',
+          status: 'running',
+          startedAt: '2026-04-27T00:00:00.000Z',
+          durationMs: 1234,
+          recentOutputLines: ['xcodebuild ...', '** BUILD SUCCEEDED **'],
+          lineCount: 2,
+        }).success,
+      ).toBe(true);
+    });
+
+    it('PollTaskStatusOutputSchema accepts notFound shape (no kind/startedAt)', () => {
+      // notFound responses don't fabricate `kind` or `startedAt` — both are
+      // now optional in the schema.
+      expect(
+        PollTaskStatusOutputSchema.safeParse({
+          taskId: '550e8400-e29b-41d4-a716-446655440000',
+          status: 'failed',
+          durationMs: 0,
+          recentOutputLines: [],
+          lineCount: 0,
+          notFound: true,
+        }).success,
+      ).toBe(true);
+    });
+
+    it('GetTaskResultInputSchema requires uuid', () => {
+      expect(
+        GetTaskResultInputSchema.safeParse({ taskId: 'not-a-uuid' }).success,
+      ).toBe(false);
+    });
+
+    it('GetTaskResultOutputSchema accepts a completed-build result', () => {
+      expect(
+        GetTaskResultOutputSchema.safeParse({
+          taskId: '550e8400-e29b-41d4-a716-446655440000',
+          status: 'done',
+          result: {
+            kind: 'build',
+            build: {
+              passed: true,
+              platform: 'ios',
+              appPath: '/tmp/X.app',
+              bundleId: 'com.example.app',
+              durationMs: 60000,
+              output: '** BUILD SUCCEEDED **',
+            },
+          },
+        }).success,
+      ).toBe(true);
+    });
+
+    it('GetTaskResultOutputSchema accepts notFound and not-yet-done shapes', () => {
+      expect(
+        GetTaskResultOutputSchema.safeParse({
+          taskId: '550e8400-e29b-41d4-a716-446655440000',
+          status: 'failed',
+          notFound: true,
+          error: 'Task not found or pruned',
+        }).success,
+      ).toBe(true);
+    });
+
+    it('CancelTaskInputSchema accepts optional reason', () => {
+      expect(
+        CancelTaskInputSchema.safeParse({
+          taskId: '550e8400-e29b-41d4-a716-446655440000',
+        }).success,
+      ).toBe(true);
+      expect(
+        CancelTaskInputSchema.safeParse({
+          taskId: '550e8400-e29b-41d4-a716-446655440000',
+          reason: 'user clicked cancel',
+        }).success,
+      ).toBe(true);
+    });
+
+    it('CancelTaskOutputSchema accepts cancelled and notFound shapes', () => {
+      expect(
+        CancelTaskOutputSchema.safeParse({
+          taskId: '550e8400-e29b-41d4-a716-446655440000',
+          cancelled: true,
+          previousStatus: 'running',
+          finalStatus: 'cancelled',
+        }).success,
+      ).toBe(true);
+      expect(
+        CancelTaskOutputSchema.safeParse({
+          taskId: '550e8400-e29b-41d4-a716-446655440000',
+          cancelled: false,
+          notFound: true,
+        }).success,
+      ).toBe(true);
+    });
+
+    it('ListTasksInputSchema accepts kind/status/since filters', () => {
+      expect(
+        ListTasksInputSchema.safeParse({
+          kind: 'build',
+          status: ['done', 'failed'],
+          since: '2026-04-27T00:00:00.000Z',
+        }).success,
+      ).toBe(true);
+    });
+
+    it('ListTasksOutputSchema accepts an empty list and a populated list', () => {
+      expect(
+        ListTasksOutputSchema.safeParse({ tasks: [], totalTasks: 0 }).success,
+      ).toBe(true);
+      expect(
+        ListTasksOutputSchema.safeParse({
+          tasks: [
+            {
+              taskId: '550e8400-e29b-41d4-a716-446655440000',
+              kind: 'build',
+              status: 'done',
+              startedAt: '2026-04-27T00:00:00.000Z',
+              finishedAt: '2026-04-27T00:01:00.000Z',
+              durationMs: 60000,
+              lineCount: 250,
+            },
+          ],
+          totalTasks: 1,
         }).success,
       ).toBe(true);
     });
