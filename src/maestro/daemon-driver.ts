@@ -115,9 +115,10 @@ export class MaestroDaemonDriver implements AutomationDriver {
     async runTest(
         yamlPath: string,
         env?: Record<string, string>,
-        debugOutput?: string
+        debugOutput?: string,
+        signal?: AbortSignal,
     ): Promise<{ passed: boolean; output: string; durationMs: number }> {
-        return this.wrapper.runTest(yamlPath, env, debugOutput);
+        return this.wrapper.runTest(yamlPath, env, debugOutput, signal);
     }
 
     // ── Setup & teardown (delegated to wrapper — uses native toolchains) ──

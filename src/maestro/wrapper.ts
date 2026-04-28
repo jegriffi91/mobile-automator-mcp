@@ -19,6 +19,7 @@ import type { UIActionType, UIElement, MobilePlatform, TimeoutConfig } from '../
 import { DEFAULT_TIMEOUTS } from '../types.js';
 import { resolveMaestroBin, getExecEnv } from './env.js';
 import { withRetry, isTransientMaestroError } from './retry.js';
+import { execFileWithAbort } from '../build/utils.js';
 
 /**
  * Port the iOS XCTest driver (XCUITest / WebDriverAgent) listens on. This is
@@ -505,7 +506,12 @@ export class MaestroWrapper {
      * @param yamlPath - Path to the Maestro YAML test file
      * @returns Test result with pass/fail, output, and duration
      */
-    async runTest(yamlPath: string, env?: Record<string, string>, debugOutput?: string): Promise<{ passed: boolean; output: string; durationMs: number }> {
+    async runTest(
+        yamlPath: string,
+        env?: Record<string, string>,
+        debugOutput?: string,
+        signal?: AbortSignal,
+    ): Promise<{ passed: boolean; output: string; durationMs: number }> {
         const start = Date.now();
         const envArgs = Object.entries(env ?? {}).flatMap(([k, v]) => ['-e', `${k}=${v}`]);
         const runArgs = ['test', ...envArgs];
@@ -513,16 +519,17 @@ export class MaestroWrapper {
             runArgs.push('--debug-output', debugOutput);
         }
         runArgs.push(yamlPath);
-        
+
         try {
-            const { stdout, stderr } = await execFileAsync(
+            const { stdout, stderr } = await execFileWithAbort(
                 this.maestroBin,
                 this.buildArgs(runArgs),
                 {
                     env: getExecEnv(),
                     maxBuffer: 10 * 1024 * 1024, // 10MB buffer for verbose output
                     timeout: this.timeouts.testRunMs,
-                }
+                    signal,
+                },
             );
             const durationMs = Date.now() - start;
             const output = [stdout, stderr].filter(Boolean).join('\n');

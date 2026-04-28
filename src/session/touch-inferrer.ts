@@ -49,10 +49,18 @@ export interface PollRecord {
   timestamp: string;
   durationMs: number;
   result: 'baseline' | 'equal' | 'inferred' | 'inferred-transition'
-        | 'threshold_exceeded' | 'suppressed' | 'debounced' | 'error';
+        | 'threshold_exceeded' | 'suppressed' | 'debounced' | 'error'
+        | 'flow_boundary';
   elementCount?: number;
   inferredTarget?: string;
   error?: string;
+  /**
+   * For 'flow_boundary' records, identifies whether the marker is the start
+   * or end of a paused window (run_test / run_flow execution). Phase 4
+   * compile-time event weaving will use these to splice synthesized flow
+   * events into the timeline.
+   */
+  boundaryKind?: 'flow_start' | 'flow_end';
 }
 
 /** Callback to send real-time polling log messages to the MCP client */
@@ -364,6 +372,36 @@ export class TouchInferrer {
    */
   getPollRecords(): PollRecord[] {
     return [...this.pollRecords];
+  }
+
+  /**
+   * Push a record onto the timeline that did not come from the polling loop.
+   *
+   * Used by the SessionManager pause/resume lifecycle (Phase 4) to insert
+   * synthetic `flow_boundary` markers without going through pollOnce. The
+   * record is appended verbatim — callers are responsible for shape.
+   */
+  addExternalRecord(record: PollRecord): void {
+    this.pollRecords.push(record);
+  }
+
+  /**
+   * Replace the internal pollRecords array with the given seed.
+   *
+   * Intended for the resume path: when a paused session is being restored,
+   * the SessionManager seeds the freshly-constructed inferrer with the
+   * records captured before the pause so the timeline survives the gap.
+   *
+   * Throws if polling has already started — seeding mid-flight would mask
+   * the baseline that pollOnce captured during start().
+   */
+  seedPollRecords(records: PollRecord[]): void {
+    if (this.timer || this.startedAt !== undefined) {
+      throw new Error(
+        'seedPollRecords: cannot seed after polling has started — call before start()',
+      );
+    }
+    this.pollRecords = [...records];
   }
 
   /**
