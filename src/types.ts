@@ -58,6 +58,9 @@ export interface Session {
  * Phase 4: a single run_test / run_flow execution captured during a paused
  * window of a recording session. `output` is the captured stdout+stderr from
  * the Maestro CLI; treat it as opaque text for compile-time consumption.
+ *
+ * Phase 5 additions (`cancelled`, `debugOutputDir`, `flowPath`) feed the
+ * compile-time event-weaving pipeline — see src/synthesis/flow-weaver.ts.
  */
 export interface FlowExecutionRecord {
     flowName: string;
@@ -66,6 +69,12 @@ export interface FlowExecutionRecord {
     durationMs: number;
     output: string;
     succeeded: boolean;
+    /** True when the flow run was cancelled (cancel_task / watchdog), distinct from a failed flow. */
+    cancelled?: boolean;
+    /** Path passed to Maestro --debug-output. Phase 5 parses commands-*.json from here. */
+    debugOutputDir?: string;
+    /** Absolute path to the source flow YAML — emitted as `runFlow:` in the compiled artifact. */
+    flowPath?: string;
 }
 
 // ----- UI Types -----

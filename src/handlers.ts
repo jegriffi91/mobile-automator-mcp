@@ -1585,17 +1585,28 @@ export async function handleRegisterSegment(
  */
 async function executeFlowWithPause<T>(
     flowName: string,
-    runFlow: (signal: AbortSignal) => Promise<{ result: T; output: string; succeeded: boolean }>,
+    runFlow: (
+        signal: AbortSignal,
+        debugOutputDir: string,
+    ) => Promise<{
+        result: T;
+        output: string;
+        succeeded: boolean;
+        debugOutputDir?: string;
+        flowPath?: string;
+    }>,
 ): Promise<T> {
     if (!_flowPauseResumeEnabled) {
         assertNoActiveSessions(sessionManager.listActiveDrivers(), flowName);
-        const { result } = await runFlow(new AbortController().signal);
+        const dir = await allocateFlowDebugDir('standalone', 0);
+        const { result } = await runFlow(new AbortController().signal, dir);
         return result;
     }
 
     const active = sessionManager.listActiveDrivers();
     if (active.length === 0) {
-        const { result } = await runFlow(new AbortController().signal);
+        const dir = await allocateFlowDebugDir('standalone', 0);
+        const { result } = await runFlow(new AbortController().signal, dir);
         return result;
     }
     if (active.length > 1) {
@@ -1620,13 +1631,27 @@ async function executeFlowWithPause<T>(
                 );
             }
 
+            const flowSeq = sessionManager.getFlowExecutions(sessionId).length;
+            const debugOutputDir = await allocateFlowDebugDir(sessionId, flowSeq);
+
             const { pausedAt } = await sessionManager.pauseSession(sessionId, flowName);
 
             // Single resume helper used by both success and error paths so
             // failure handling is identical (markAborted is called inside
             // resumeSession on its own error path).
             let resumed = false;
-            const flowResult = { output: '', succeeded: false };
+            const flowResult: {
+                output: string;
+                succeeded: boolean;
+                cancelled: boolean;
+                debugOutputDir?: string;
+                flowPath?: string;
+            } = {
+                output: '',
+                succeeded: false,
+                cancelled: false,
+                debugOutputDir,
+            };
             const doResume = async (): Promise<void> => {
                 if (resumed) return;
                 resumed = true;
@@ -1639,21 +1664,52 @@ async function executeFlowWithPause<T>(
                     flowResult.output,
                     flowResult.succeeded,
                     pausedAt,
+                    undefined,
+                    {
+                        cancelled: flowResult.cancelled,
+                        debugOutputDir: flowResult.debugOutputDir,
+                        flowPath: flowResult.flowPath,
+                    },
                 );
             };
             cleanup.add('resume session', doResume);
 
-            const { result, output, succeeded } = await runFlow(cleanup.signal);
-            flowResult.output = output;
-            flowResult.succeeded = succeeded;
-            // Success path: invoke resume manually and clear the cleanup
-            // entry so we don't double-resume. (cleanup.runAll only runs on
-            // throw/abort/timeout — see cleanup.ts.)
-            cleanup.forget('resume session');
-            await doResume();
-            return result;
+            try {
+                const { result, output, succeeded, debugOutputDir: outDir, flowPath } =
+                    await runFlow(cleanup.signal, debugOutputDir);
+                flowResult.output = output;
+                flowResult.succeeded = succeeded;
+                flowResult.debugOutputDir = outDir ?? debugOutputDir;
+                flowResult.flowPath = flowPath;
+                // Success path: invoke resume manually and clear the cleanup
+                // entry so we don't double-resume. (cleanup.runAll only runs on
+                // throw/abort/timeout — see cleanup.ts.)
+                cleanup.forget('resume session');
+                await doResume();
+                return result;
+            } catch (err) {
+                // Distinguish cancellation (cleanup.signal aborted) from a
+                // flow failure so the FlowExecutionRecord can carry the
+                // distinction through to compile-time event weaving.
+                flowResult.cancelled = cleanup.signal.aborted;
+                throw err;
+            }
         },
     );
+}
+
+/**
+ * Allocate a per-flow Maestro --debug-output directory. Maestro writes
+ * commands-*.json artifacts here; Phase 5 event-weaving parses them at
+ * compile time. Lives under os.tmpdir() to keep cleanup simple.
+ */
+async function allocateFlowDebugDir(sessionId: string, seq: number): Promise<string> {
+    const dir = path.join(
+        os.tmpdir(),
+        `mca-flow-${sessionId}-${seq}-${Date.now()}`,
+    );
+    await fs.mkdir(dir, { recursive: true });
+    return dir;
 }
 
 // ---- run_test ----
@@ -1664,12 +1720,21 @@ export async function handleRunTest(
 
     return executeFlowWithPause(
         input.yamlPath,
-        async (signal) => {
-            const out = await runTestCore(input, signal);
+        async (signal, debugOutputDir) => {
+            // Caller-supplied debugOutput wins (preserves legacy behaviour);
+            // otherwise fall through to the per-flow dir allocated by
+            // executeFlowWithPause for compile-time event weaving.
+            const effectiveDebugOutput = input.debugOutput ?? debugOutputDir;
+            const out = await runTestCore(
+                { ...input, debugOutput: effectiveDebugOutput },
+                signal,
+            );
             return {
                 result: out,
                 output: out.output,
                 succeeded: out.passed,
+                debugOutputDir: effectiveDebugOutput,
+                flowPath: input.yamlPath,
             };
         },
     );
@@ -1682,6 +1747,17 @@ export async function handleRunTest(
  * timeout) can SIGTERM the flow subprocess.
  */
 async function runTestCore(input: RunTestInput, signal: AbortSignal): Promise<RunTestOutput> {
+    // Defensively ensure the --debug-output target exists so Maestro can write
+    // commands-*.json into it. mkdir(recursive: true) is a no-op if it does.
+    if (input.debugOutput) {
+        await fs.mkdir(input.debugOutput, { recursive: true }).catch((err) => {
+            console.error(
+                `[MCP] run_test: failed to ensure debugOutput dir ${input.debugOutput}`,
+                err,
+            );
+        });
+    }
+
     // Create a CLI-only driver for test execution (no daemon needed). Forward
     // driverCooldownMs so callers can tune the port-7001 TIME_WAIT drain when
     // the health probe misses and we fall back to uninstall.
@@ -2031,12 +2107,13 @@ export async function handleRunFlow(input: RunFlowInput): Promise<RunFlowOutput>
     // active-session guard, and so we don't double-bracket the cycle.
     const result = await executeFlowWithPause(
         flow.name,
-        async (signal) => {
+        async (signal, debugOutputDir) => {
+            const effectiveDebugOutput = input.debugOutput ?? debugOutputDir;
             const out = await runTestCore(
                 {
                     yamlPath: flow.path,
                     env: appliedParams,
-                    debugOutput: input.debugOutput,
+                    debugOutput: effectiveDebugOutput,
                     stubsDir: input.stubsDir,
                     stubServerPort: input.stubServerPort,
                     platform: input.platform,
@@ -2048,6 +2125,8 @@ export async function handleRunFlow(input: RunFlowInput): Promise<RunFlowOutput>
                 result: out,
                 output: out.output,
                 succeeded: out.passed,
+                debugOutputDir: effectiveDebugOutput,
+                flowPath: flow.path,
             };
         },
     );
