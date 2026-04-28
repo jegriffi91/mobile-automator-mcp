@@ -1157,13 +1157,13 @@ describe('Schema Conformance', () => {
       ).toBe(true);
     });
 
-    it('PollTaskStatusOutputSchema accepts notFound shape', () => {
+    it('PollTaskStatusOutputSchema accepts notFound shape (no kind/startedAt)', () => {
+      // notFound responses don't fabricate `kind` or `startedAt` — both are
+      // now optional in the schema.
       expect(
         PollTaskStatusOutputSchema.safeParse({
           taskId: '550e8400-e29b-41d4-a716-446655440000',
-          kind: 'build',
           status: 'failed',
-          startedAt: '2026-04-27T00:00:00.000Z',
           durationMs: 0,
           recentOutputLines: [],
           lineCount: 0,

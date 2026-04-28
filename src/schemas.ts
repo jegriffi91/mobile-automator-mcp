@@ -1805,9 +1805,9 @@ export const PollTaskStatusInputSchema = z.object({
 });
 export const PollTaskStatusOutputSchema = z.object({
     taskId: z.string().uuid(),
-    kind: TaskKindSchema,
+    kind: TaskKindSchema.optional(),
     status: TaskStatusSchema,
-    startedAt: z.string().datetime(),
+    startedAt: z.string().datetime().optional(),
     finishedAt: z.string().datetime().optional(),
     durationMs: z.number(),
     recentOutputLines: z.array(z.string()),

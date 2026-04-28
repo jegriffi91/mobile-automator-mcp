@@ -2001,9 +2001,7 @@ export async function handlePollTaskStatus(
     if (!task) {
         return {
             taskId: input.taskId,
-            kind: 'build',
             status: 'failed',
-            startedAt: new Date().toISOString(),
             durationMs: 0,
             recentOutputLines: [],
             lineCount: 0,

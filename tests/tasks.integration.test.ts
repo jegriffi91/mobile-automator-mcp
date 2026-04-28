@@ -116,8 +116,18 @@ describe('Task lifecycle integration', () => {
 
     it('notFound: poll/get_task_result/cancel on unknown UUID returns structured response', async () => {
         const polled = await handlePollTaskStatus({ taskId: VALID_UUID });
-        expect(polled.notFound).toBe(true);
-        expect(polled.status).toBe('failed');
+        // Use toEqual so absence of `kind` and `startedAt` is verified — those
+        // fields would be lies (we don't know the kind, and there is no start).
+        expect(polled).toEqual({
+            taskId: VALID_UUID,
+            status: 'failed',
+            durationMs: 0,
+            recentOutputLines: [],
+            lineCount: 0,
+            notFound: true,
+        });
+        expect(polled).not.toHaveProperty('kind');
+        expect(polled).not.toHaveProperty('startedAt');
 
         const got = await handleGetTaskResult({ taskId: VALID_UUID });
         expect(got.notFound).toBe(true);
