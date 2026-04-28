@@ -233,6 +233,75 @@ describe('SessionManager.getFlowExecutions', () => {
   });
 });
 
+describe('SessionManager.resumeSession extras (Phase 5)', () => {
+  beforeEach(() => {
+    vi.mocked(DriverFactory.create).mockReset();
+  });
+
+  it('persists cancelled / debugOutputDir / flowPath onto FlowExecutionRecord', async () => {
+    const { mgr, sessionId } = await freshManager();
+    const initialDriver = makeMockDriver();
+    mgr.setActiveDriver(sessionId, initialDriver);
+    mgr.setSessionRuntime(sessionId, { deviceId: 'DEV-1' });
+    const flowStartedAt = new Date().toISOString();
+    await mgr.pauseSession(sessionId, 'login.flow');
+
+    const newDriver = makeMockDriver();
+    vi.mocked(DriverFactory.create).mockResolvedValue(newDriver);
+
+    await mgr.resumeSession(
+      sessionId,
+      'DEV-1',
+      'ios',
+      'com.test.app',
+      'login.flow',
+      'maestro stdout',
+      false,
+      flowStartedAt,
+      undefined,
+      {
+        cancelled: true,
+        debugOutputDir: '/tmp/mca-flow-abc',
+        flowPath: '/abs/path/login.yaml',
+      },
+    );
+
+    const execs = mgr.getFlowExecutions(sessionId);
+    expect(execs).toHaveLength(1);
+    expect(execs[0].cancelled).toBe(true);
+    expect(execs[0].debugOutputDir).toBe('/tmp/mca-flow-abc');
+    expect(execs[0].flowPath).toBe('/abs/path/login.yaml');
+  });
+
+  it('omits extras fields when not supplied (preserves Phase 4 shape)', async () => {
+    const { mgr, sessionId } = await freshManager();
+    const initialDriver = makeMockDriver();
+    mgr.setActiveDriver(sessionId, initialDriver);
+    mgr.setSessionRuntime(sessionId, { deviceId: 'DEV-1' });
+    const flowStartedAt = new Date().toISOString();
+    await mgr.pauseSession(sessionId, 'login.flow');
+
+    const newDriver = makeMockDriver();
+    vi.mocked(DriverFactory.create).mockResolvedValue(newDriver);
+
+    await mgr.resumeSession(
+      sessionId,
+      'DEV-1',
+      'ios',
+      'com.test.app',
+      'login.flow',
+      '',
+      true,
+      flowStartedAt,
+    );
+
+    const execs = mgr.getFlowExecutions(sessionId);
+    expect(execs[0].cancelled).toBeUndefined();
+    expect(execs[0].debugOutputDir).toBeUndefined();
+    expect(execs[0].flowPath).toBeUndefined();
+  });
+});
+
 describe('SessionManager.forceCleanup on paused session', () => {
   let restoreCreate: () => unknown;
 

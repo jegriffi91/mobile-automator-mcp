@@ -21,6 +21,12 @@ import { HierarchyParser } from './maestro/index.js';
 import { proxymanWrapper, PayloadValidator } from './proxyman/index.js';
 import { Correlator, YamlGenerator, StubWriter } from './synthesis/index.js';
 import { TimelineBuilder } from './synthesis/timeline-builder.js';
+import {
+    parseMaestroDebugOutput,
+    weaveFlowExecutions,
+    type FlowStep,
+    type WeaveResult,
+} from './synthesis/flow-weaver.js';
 import { SegmentFingerprint, SegmentRegistry } from './segments/index.js';
 import { FlowRegistry } from './flows/index.js';
 import {
@@ -389,6 +395,7 @@ export async function handleStopAndCompile(
     let matchedSegments: Array<{ name: string; fingerprint: string; similarity: number; yamlPath: string }> | undefined;
     let pollingDiagnostics: ReturnType<typeof sessionManager.getPollingStatus> | undefined;
     let timelinePath: string | undefined;
+    let weaveResult: WeaveResult | undefined;
 
     try {
         // ── Step 1: Export scoped Proxyman HAR ──
@@ -468,12 +475,45 @@ export async function handleStopAndCompile(
         const correlator = new Correlator();
         steps = correlator.correlate(allInteractions, allNetworkEvents);
 
+        // ── Step 3b (Phase 5): Weave compile-time flow events ──
+        // Parse Maestro --debug-output for every recorded FlowExecutionRecord
+        // and reconcile with the flow_boundary marker pairs in pollRecords.
+        // Defensive: parser never throws (commit 2), weaver is pure.
+        const flowExecutions = sessionManager.getFlowExecutions(input.sessionId);
+        const wovenPollRecords = sessionManager.getPollRecords(input.sessionId);
+        const parsedSteps = new Map<string, FlowStep[]>();
+        for (const exec of flowExecutions) {
+            if (!exec.debugOutputDir) continue;
+            const flowSteps = await parseMaestroDebugOutput(exec.debugOutputDir);
+            parsedSteps.set(`${exec.flowName}|${exec.startedAt}`, flowSteps);
+        }
+        weaveResult = weaveFlowExecutions({
+            pollRecords: wovenPollRecords,
+            flowExecutions,
+            parsedSteps,
+        });
+        if (weaveResult.warnings.length > 0) {
+            for (const w of weaveResult.warnings) {
+                console.error(`[MCP] stop_and_compile_test: weaver warning — ${w}`);
+            }
+        }
+        if (weaveResult.woven.length > 0) {
+            console.error(
+                `[MCP] stop_and_compile_test: wove ${weaveResult.woven.length} flow execution(s) into compile output`,
+            );
+        }
+
         // ── Step 4: Generate YAML ──
         const generator = new YamlGenerator(session.appBundleId);
-        yaml = generator.toYaml(steps, input.conditions);
+        // Resolve output path early so the generator can compute relative
+        // runFlow: paths against the YAML's directory.
+        outputPath = input.outputPath ?? path.join(os.tmpdir(), `maestro-test-${input.sessionId}.yaml`);
+        yaml = generator.toYaml(steps, input.conditions, {
+            flowBlocks: weaveResult.yamlBlocks,
+            outputDir: path.dirname(outputPath),
+        });
 
         // Write YAML
-        outputPath = input.outputPath ?? path.join(os.tmpdir(), `maestro-test-${input.sessionId}.yaml`);
         await fs.writeFile(outputPath, yaml, 'utf-8');
 
         // ── Step 5: Generate WireMock stubs (if network events exist) ──
@@ -539,7 +579,11 @@ export async function handleStopAndCompile(
 
         // ── Step 7b: Build and write session timeline ──
         try {
-            const pollRecords = sessionManager.getPollRecords(input.sessionId);
+            // Phase 5: prefer the weaver-stripped pollRecords stream so
+            // flow_boundary entries don't appear alongside the woven flow
+            // entries. Fall back to the raw stream if weaving was skipped.
+            const pollRecords =
+                weaveResult?.pollRecords ?? sessionManager.getPollRecords(input.sessionId);
             const timelineBuilder = new TimelineBuilder();
             const timeline = timelineBuilder.build({
                 session,
@@ -554,6 +598,7 @@ export async function handleStopAndCompile(
                 pollRecords,
                 pollingDiagnostics: pollingDiagnostics ?? undefined,
                 correlationWindowMs: 3000,
+                wovenFlowExecutions: weaveResult?.woven,
             });
 
             const sessionDir = path.dirname(outputPath);
@@ -632,6 +677,19 @@ export async function handleStopAndCompile(
         await sessionManager.purgeSnapshots(input.sessionId);
     }
 
+    // Phase 5: surface a per-flow summary alongside the existing artifacts.
+    const flowSummaries = weaveResult?.woven.map((w) => {
+        const failedIdx = w.steps.findIndex((s) => s.status === 'FAILED');
+        return {
+            flowName: w.flowName,
+            succeeded: w.succeeded,
+            ...(w.cancelled !== undefined ? { cancelled: w.cancelled } : {}),
+            durationMs: w.durationMs,
+            stepCount: w.steps.length,
+            ...(failedIdx >= 0 ? { failedStepIndex: failedIdx } : {}),
+        };
+    });
+
     return {
         sessionId: input.sessionId,
         yaml,
@@ -643,6 +701,9 @@ export async function handleStopAndCompile(
         matchedSegments,
         pollingDiagnostics,
         timelinePath,
+        ...(flowSummaries && flowSummaries.length > 0
+            ? { flowExecutions: flowSummaries }
+            : {}),
     };
 }
 
@@ -1585,17 +1646,28 @@ export async function handleRegisterSegment(
  */
 async function executeFlowWithPause<T>(
     flowName: string,
-    runFlow: (signal: AbortSignal) => Promise<{ result: T; output: string; succeeded: boolean }>,
+    runFlow: (
+        signal: AbortSignal,
+        debugOutputDir: string,
+    ) => Promise<{
+        result: T;
+        output: string;
+        succeeded: boolean;
+        debugOutputDir?: string;
+        flowPath?: string;
+    }>,
 ): Promise<T> {
     if (!_flowPauseResumeEnabled) {
         assertNoActiveSessions(sessionManager.listActiveDrivers(), flowName);
-        const { result } = await runFlow(new AbortController().signal);
+        const dir = await allocateFlowDebugDir('standalone', 0);
+        const { result } = await runFlow(new AbortController().signal, dir);
         return result;
     }
 
     const active = sessionManager.listActiveDrivers();
     if (active.length === 0) {
-        const { result } = await runFlow(new AbortController().signal);
+        const dir = await allocateFlowDebugDir('standalone', 0);
+        const { result } = await runFlow(new AbortController().signal, dir);
         return result;
     }
     if (active.length > 1) {
@@ -1620,13 +1692,27 @@ async function executeFlowWithPause<T>(
                 );
             }
 
+            const flowSeq = sessionManager.getFlowExecutions(sessionId).length;
+            const debugOutputDir = await allocateFlowDebugDir(sessionId, flowSeq);
+
             const { pausedAt } = await sessionManager.pauseSession(sessionId, flowName);
 
             // Single resume helper used by both success and error paths so
             // failure handling is identical (markAborted is called inside
             // resumeSession on its own error path).
             let resumed = false;
-            const flowResult = { output: '', succeeded: false };
+            const flowResult: {
+                output: string;
+                succeeded: boolean;
+                cancelled: boolean;
+                debugOutputDir?: string;
+                flowPath?: string;
+            } = {
+                output: '',
+                succeeded: false,
+                cancelled: false,
+                debugOutputDir,
+            };
             const doResume = async (): Promise<void> => {
                 if (resumed) return;
                 resumed = true;
@@ -1639,21 +1725,52 @@ async function executeFlowWithPause<T>(
                     flowResult.output,
                     flowResult.succeeded,
                     pausedAt,
+                    undefined,
+                    {
+                        cancelled: flowResult.cancelled,
+                        debugOutputDir: flowResult.debugOutputDir,
+                        flowPath: flowResult.flowPath,
+                    },
                 );
             };
             cleanup.add('resume session', doResume);
 
-            const { result, output, succeeded } = await runFlow(cleanup.signal);
-            flowResult.output = output;
-            flowResult.succeeded = succeeded;
-            // Success path: invoke resume manually and clear the cleanup
-            // entry so we don't double-resume. (cleanup.runAll only runs on
-            // throw/abort/timeout — see cleanup.ts.)
-            cleanup.forget('resume session');
-            await doResume();
-            return result;
+            try {
+                const { result, output, succeeded, debugOutputDir: outDir, flowPath } =
+                    await runFlow(cleanup.signal, debugOutputDir);
+                flowResult.output = output;
+                flowResult.succeeded = succeeded;
+                flowResult.debugOutputDir = outDir ?? debugOutputDir;
+                flowResult.flowPath = flowPath;
+                // Success path: invoke resume manually and clear the cleanup
+                // entry so we don't double-resume. (cleanup.runAll only runs on
+                // throw/abort/timeout — see cleanup.ts.)
+                cleanup.forget('resume session');
+                await doResume();
+                return result;
+            } catch (err) {
+                // Distinguish cancellation (cleanup.signal aborted) from a
+                // flow failure so the FlowExecutionRecord can carry the
+                // distinction through to compile-time event weaving.
+                flowResult.cancelled = cleanup.signal.aborted;
+                throw err;
+            }
         },
     );
+}
+
+/**
+ * Allocate a per-flow Maestro --debug-output directory. Maestro writes
+ * commands-*.json artifacts here; Phase 5 event-weaving parses them at
+ * compile time. Lives under os.tmpdir() to keep cleanup simple.
+ */
+async function allocateFlowDebugDir(sessionId: string, seq: number): Promise<string> {
+    const dir = path.join(
+        os.tmpdir(),
+        `mca-flow-${sessionId}-${seq}-${Date.now()}`,
+    );
+    await fs.mkdir(dir, { recursive: true });
+    return dir;
 }
 
 // ---- run_test ----
@@ -1664,12 +1781,21 @@ export async function handleRunTest(
 
     return executeFlowWithPause(
         input.yamlPath,
-        async (signal) => {
-            const out = await runTestCore(input, signal);
+        async (signal, debugOutputDir) => {
+            // Caller-supplied debugOutput wins (preserves legacy behaviour);
+            // otherwise fall through to the per-flow dir allocated by
+            // executeFlowWithPause for compile-time event weaving.
+            const effectiveDebugOutput = input.debugOutput ?? debugOutputDir;
+            const out = await runTestCore(
+                { ...input, debugOutput: effectiveDebugOutput },
+                signal,
+            );
             return {
                 result: out,
                 output: out.output,
                 succeeded: out.passed,
+                debugOutputDir: effectiveDebugOutput,
+                flowPath: input.yamlPath,
             };
         },
     );
@@ -1682,6 +1808,17 @@ export async function handleRunTest(
  * timeout) can SIGTERM the flow subprocess.
  */
 async function runTestCore(input: RunTestInput, signal: AbortSignal): Promise<RunTestOutput> {
+    // Defensively ensure the --debug-output target exists so Maestro can write
+    // commands-*.json into it. mkdir(recursive: true) is a no-op if it does.
+    if (input.debugOutput) {
+        await fs.mkdir(input.debugOutput, { recursive: true }).catch((err) => {
+            console.error(
+                `[MCP] run_test: failed to ensure debugOutput dir ${input.debugOutput}`,
+                err,
+            );
+        });
+    }
+
     // Create a CLI-only driver for test execution (no daemon needed). Forward
     // driverCooldownMs so callers can tune the port-7001 TIME_WAIT drain when
     // the health probe misses and we fall back to uninstall.
@@ -2031,12 +2168,13 @@ export async function handleRunFlow(input: RunFlowInput): Promise<RunFlowOutput>
     // active-session guard, and so we don't double-bracket the cycle.
     const result = await executeFlowWithPause(
         flow.name,
-        async (signal) => {
+        async (signal, debugOutputDir) => {
+            const effectiveDebugOutput = input.debugOutput ?? debugOutputDir;
             const out = await runTestCore(
                 {
                     yamlPath: flow.path,
                     env: appliedParams,
-                    debugOutput: input.debugOutput,
+                    debugOutput: effectiveDebugOutput,
                     stubsDir: input.stubsDir,
                     stubServerPort: input.stubServerPort,
                     platform: input.platform,
@@ -2048,6 +2186,8 @@ export async function handleRunFlow(input: RunFlowInput): Promise<RunFlowOutput>
                 result: out,
                 output: out.output,
                 succeeded: out.passed,
+                debugOutputDir: effectiveDebugOutput,
+                flowPath: flow.path,
             };
         },
     );

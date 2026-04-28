@@ -395,3 +395,114 @@ describe('TimelineBuilder', () => {
     });
   });
 });
+
+// ── Phase 5: woven flow entries ──
+
+import type { WovenFlowExecution, FlowStep } from './flow-weaver.js';
+
+function tlFlowStep(seq: number, kind: string): FlowStep {
+    return {
+        sequenceNumber: seq,
+        timestamp: new Date(1746121231000 + seq * 100).toISOString(),
+        kind,
+        durationMs: 5,
+        status: 'COMPLETED',
+        raw: {},
+    };
+}
+
+describe('TimelineBuilder — Phase 5 wovenFlowExecutions', () => {
+    const builder = new TimelineBuilder();
+
+    function buildParams(overrides: Partial<TimelineBuildParams> = {}): TimelineBuildParams {
+        return {
+            session: makeSession(),
+            readiness: { driverReady: true, baselineCaptured: true, pollerStarted: true },
+            interactions: [],
+            networkEvents: [],
+            correlatedSteps: [],
+            pollRecords: [],
+            pollingDiagnostics: undefined,
+            correlationWindowMs: 3000,
+            ...overrides,
+        };
+    }
+
+    it('produces an identical entry list when no flow executions supplied', () => {
+        const a = builder.build(buildParams());
+        const b = builder.build(buildParams({ wovenFlowExecutions: [] }));
+        expect(b.entries.length).toBe(a.entries.length);
+    });
+
+    it('renders a single woven flow as a chronologically-positioned flow entry', () => {
+        const woven: WovenFlowExecution = {
+            flowName: 'login',
+            flowPath: '/abs/login.yaml',
+            startedAt: '2024-01-01T00:00:10.000Z',
+            endedAt: '2024-01-01T00:00:15.000Z',
+            durationMs: 5000,
+            succeeded: true,
+            steps: [tlFlowStep(0, 'tapOnElement'), tlFlowStep(1, 'inputText')],
+        };
+        const timeline = builder.build(
+            buildParams({ wovenFlowExecutions: [woven] }),
+        );
+        const flow = timeline.entries.find((e) => e.type === 'flow');
+        expect(flow).toBeDefined();
+        if (flow && flow.type === 'flow') {
+            expect(flow.flowName).toBe('login');
+            expect(flow.steps).toHaveLength(2);
+            expect(flow.flowPath).toBe('/abs/login.yaml');
+        }
+    });
+
+    it('filters flow_boundary records out of poll entries (defensive)', () => {
+        const polls: PollRecord[] = [
+            { timestamp: '2024-01-01T00:00:01.000Z', durationMs: 50, result: 'baseline' },
+            {
+                timestamp: '2024-01-01T00:00:10.000Z',
+                durationMs: 0,
+                result: 'flow_boundary',
+                boundaryKind: 'flow_start',
+                inferredTarget: 'login',
+            },
+            {
+                timestamp: '2024-01-01T00:00:15.000Z',
+                durationMs: 0,
+                result: 'flow_boundary',
+                boundaryKind: 'flow_end',
+                inferredTarget: 'login',
+            },
+            { timestamp: '2024-01-01T00:00:16.000Z', durationMs: 50, result: 'equal' },
+        ];
+        const timeline = builder.build(buildParams({ pollRecords: polls }));
+        const pollEntries = timeline.entries.filter((e) => e.type === 'poll');
+        expect(pollEntries).toHaveLength(2); // 'baseline' and 'equal'; boundaries dropped
+    });
+
+    it('renders multiple flows in chronological order', () => {
+        const woven: WovenFlowExecution[] = [
+            {
+                flowName: 'b',
+                startedAt: '2024-01-01T00:00:30.000Z',
+                endedAt: '2024-01-01T00:00:32.000Z',
+                durationMs: 2000,
+                succeeded: true,
+                steps: [],
+            },
+            {
+                flowName: 'a',
+                startedAt: '2024-01-01T00:00:10.000Z',
+                endedAt: '2024-01-01T00:00:12.000Z',
+                durationMs: 2000,
+                succeeded: true,
+                steps: [],
+            },
+        ];
+        const timeline = builder.build(buildParams({ wovenFlowExecutions: woven }));
+        const flowNames = timeline.entries
+            .filter((e) => e.type === 'flow')
+            .map((e) => (e as { flowName: string }).flowName);
+        expect(flowNames).toEqual(['a', 'b']);
+    });
+});

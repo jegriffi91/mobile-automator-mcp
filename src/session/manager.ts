@@ -542,6 +542,7 @@ export class SessionManager {
         flowSucceeded: boolean,
         flowStartedAt: string,
         notifier?: PollingNotifier,
+        extras?: { cancelled?: boolean; debugOutputDir?: string; flowPath?: string },
     ): Promise<{ resumedAt: string }> {
         if (!this.pausedSessions.has(sessionId)) {
             return { resumedAt: new Date().toISOString() };
@@ -612,6 +613,11 @@ export class SessionManager {
             durationMs: Date.parse(resumedAt) - Date.parse(flowStartedAt),
             output: flowOutput,
             succeeded: flowSucceeded,
+            ...(extras?.cancelled !== undefined ? { cancelled: extras.cancelled } : {}),
+            ...(extras?.debugOutputDir !== undefined
+                ? { debugOutputDir: extras.debugOutputDir }
+                : {}),
+            ...(extras?.flowPath !== undefined ? { flowPath: extras.flowPath } : {}),
         });
         this.flowExecutions.set(sessionId, execs);
 

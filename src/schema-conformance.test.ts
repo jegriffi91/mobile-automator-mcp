@@ -121,6 +121,49 @@ describe('Schema Conformance', () => {
       const result = StopAndCompileOutputSchema.safeParse(output);
       expect(result.success).toBe(true);
     });
+
+    it('accepts a Phase-5 flowExecutions summary', () => {
+      const output = {
+        sessionId: 'session-abc123',
+        yaml: 'appId: com.example.app\n---\n- runFlow: login.yaml',
+        yamlPath: '/tmp/compiled.yaml',
+        flowExecutions: [
+          {
+            flowName: 'login.yaml',
+            succeeded: true,
+            durationMs: 5000,
+            stepCount: 3,
+          },
+          {
+            flowName: 'checkout.yaml',
+            succeeded: false,
+            cancelled: false,
+            durationMs: 10_000,
+            stepCount: 7,
+            failedStepIndex: 4,
+          },
+        ],
+      };
+      expect(StopAndCompileOutputSchema.safeParse(output).success).toBe(true);
+    });
+
+    it('accepts a Phase-5 flowExecutions entry with cancelled:true', () => {
+      const output = {
+        sessionId: 'session-abc123',
+        yaml: 'appId: com.example.app\n---',
+        yamlPath: '/tmp/compiled.yaml',
+        flowExecutions: [
+          {
+            flowName: 'long-flow.yaml',
+            succeeded: false,
+            cancelled: true,
+            durationMs: 20_000,
+            stepCount: 0,
+          },
+        ],
+      };
+      expect(StopAndCompileOutputSchema.safeParse(output).success).toBe(true);
+    });
   });
 
   describe('GetUIHierarchyOutputSchema', () => {
