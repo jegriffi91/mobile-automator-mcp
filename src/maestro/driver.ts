@@ -55,6 +55,7 @@ export interface AutomationDriver {
         env?: Record<string, string>,
         debugOutput?: string,
         signal?: AbortSignal,
+        onLine?: (line: string, stream: 'stdout' | 'stderr') => void,
     ): Promise<{ passed: boolean; output: string; durationMs: number }>;
 
     // ── Setup & teardown ──

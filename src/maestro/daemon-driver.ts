@@ -117,8 +117,9 @@ export class MaestroDaemonDriver implements AutomationDriver {
         env?: Record<string, string>,
         debugOutput?: string,
         signal?: AbortSignal,
+        onLine?: (line: string, stream: 'stdout' | 'stderr') => void,
     ): Promise<{ passed: boolean; output: string; durationMs: number }> {
-        return this.wrapper.runTest(yamlPath, env, debugOutput, signal);
+        return this.wrapper.runTest(yamlPath, env, debugOutput, signal, onLine);
     }
 
     // ── Setup & teardown (delegated to wrapper — uses native toolchains) ──
