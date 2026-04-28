@@ -120,34 +120,38 @@ export class SessionManager {
     }
 
     /**
-     * Get a session state, including in-memory Phase 4 runtime fields
-     * (deviceId, driverTimeouts, flowExecutions) when present.
+     * Get a session state. Phase 6: deviceId and driverTimeouts are read from
+     * SQLite via rowToSession (persistent). flowExecutions prefers the
+     * in-memory cache when populated (same process), falling back to SQLite
+     * so records survive a server restart.
      */
     async getSession(sessionId: string): Promise<Session | null> {
         const session = this.db.getSession(sessionId);
         if (!session) return null;
-        const runtime = this.sessionRuntime.get(sessionId);
-        const flowExecs = this.flowExecutions.get(sessionId);
+        const flowExecs = this.getFlowExecutions(sessionId);
         return {
             ...session,
-            ...(runtime?.deviceId !== undefined ? { deviceId: runtime.deviceId } : {}),
-            ...(runtime?.driverTimeouts !== undefined
-                ? { driverTimeouts: runtime.driverTimeouts }
-                : {}),
-            ...(flowExecs ? { flowExecutions: [...flowExecs] } : {}),
+            ...(flowExecs.length > 0 ? { flowExecutions: [...flowExecs] } : {}),
         };
     }
 
     /**
-     * Phase 4: capture per-session runtime needed to recreate the driver on
-     * resume (deviceId, timeout overrides supplied at start_recording_session).
-     * In-memory only — not persisted to SQLite.
+     * Phase 4 / Phase 6: capture per-session runtime needed to recreate the
+     * driver on resume (deviceId, timeout overrides supplied at
+     * start_recording_session). Write-through to SQLite so the state survives
+     * a server restart.
      */
     setSessionRuntime(
         sessionId: string,
         runtime: { deviceId?: string; driverTimeouts?: Partial<TimeoutConfig> },
     ): void {
         this.sessionRuntime.set(sessionId, runtime);
+        if (runtime.deviceId !== undefined) {
+            this.db.setDeviceId(sessionId, runtime.deviceId);
+        }
+        if (runtime.driverTimeouts !== undefined) {
+            this.db.setDriverTimeouts(sessionId, runtime.driverTimeouts);
+        }
     }
 
     /**
@@ -459,6 +463,8 @@ export class SessionManager {
         this.pausedRecords.delete(sessionId);
         this.flowExecutions.delete(sessionId);
         this.sessionRuntime.delete(sessionId);
+        // Phase 6: purge persisted flow_executions rows.
+        this.db.deleteFlowExecutions(sessionId);
 
         return { pollerStopped, driverRemoved };
     }
@@ -554,10 +560,14 @@ export class SessionManager {
             throw new Error(`Cannot resume: session ${sessionId} not found`);
         }
 
-        const runtime = this.sessionRuntime.get(sessionId);
+        // Phase 6: read driverTimeouts from SQLite (source of truth on restart);
+        // fall back to in-memory cache if the DB row has no value yet.
+        const driverTimeouts =
+            this.db.getDriverTimeouts(sessionId) ??
+            this.sessionRuntime.get(sessionId)?.driverTimeouts;
         let driver: AutomationDriver;
         try {
-            driver = await DriverFactory.create(runtime?.driverTimeouts);
+            driver = await DriverFactory.create(driverTimeouts);
             await driver.start(deviceId);
         } catch (err) {
             await this.markAborted(
@@ -604,9 +614,10 @@ export class SessionManager {
             inferredTarget: flowName,
         });
 
-        // Record the flow execution for compile-time consumption.
-        const execs = this.flowExecutions.get(sessionId) ?? [];
-        execs.push({
+        // Phase 6: persist the flow execution record to SQLite (source of truth).
+        // Also keep the in-memory map as a write-through cache for callers that
+        // access getFlowExecutions() within the same server process.
+        const record: FlowExecutionRecord = {
             flowName,
             startedAt: flowStartedAt,
             endedAt: resumedAt,
@@ -618,7 +629,10 @@ export class SessionManager {
                 ? { debugOutputDir: extras.debugOutputDir }
                 : {}),
             ...(extras?.flowPath !== undefined ? { flowPath: extras.flowPath } : {}),
-        });
+        };
+        this.db.addFlowExecution(sessionId, record);
+        const execs = this.flowExecutions.get(sessionId) ?? [];
+        execs.push(record);
         this.flowExecutions.set(sessionId, execs);
 
         this.pausedSessions.delete(sessionId);
@@ -634,8 +648,15 @@ export class SessionManager {
         return this.pausedSessions.has(sessionId);
     }
 
-    /** Per-session flow execution history (Phase 4). Empty array if none. */
+    /**
+     * Per-session flow execution history (Phase 4/6).
+     * In-memory cache is the hot-path within a running process (also allows
+     * test fixups). On a fresh process (cache cold), falls back to SQLite so
+     * records survive a server restart.
+     */
     getFlowExecutions(sessionId: string): readonly FlowExecutionRecord[] {
-        return this.flowExecutions.get(sessionId) ?? [];
+        const inMemory = this.flowExecutions.get(sessionId);
+        if (inMemory !== undefined) return inMemory;
+        return this.db.getFlowExecutions(sessionId);
     }
 }
