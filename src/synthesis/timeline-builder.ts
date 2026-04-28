@@ -9,6 +9,7 @@
 import type { Session, UIInteraction, NetworkEvent } from '../types.js';
 import type { CorrelatedStep } from './correlator.js';
 import type { PollRecord, PollingStatus } from '../session/touch-inferrer.js';
+import type { WovenFlowExecution, FlowStep } from './flow-weaver.js';
 
 // ── Timeline data model ──
 
@@ -17,7 +18,8 @@ export type TimelineEntry =
   | TimelinePollEntry
   | TimelineInteractionEntry
   | TimelineNetworkEntry
-  | TimelineCorrelationEntry;
+  | TimelineCorrelationEntry
+  | TimelineFlowEntry;
 
 export interface TimelineLifecycleEntry {
   type: 'lifecycle';
@@ -61,6 +63,22 @@ export interface TimelineCorrelationEntry {
   stepIndex: number;
   interactionTarget: string;
   matchedEventCount: number;
+}
+
+/**
+ * Phase 5: a single woven flow execution rendered as a timeline entry.
+ * Replaces the synthetic flow_boundary poll pair that Phase 4 emitted.
+ */
+export interface TimelineFlowEntry {
+  type: 'flow';
+  timestamp: string;
+  endTimestamp: string;
+  durationMs: number;
+  flowName: string;
+  flowPath?: string;
+  succeeded: boolean;
+  cancelled?: boolean;
+  steps: FlowStep[];
 }
 
 export interface TimelineGap {
@@ -122,6 +140,8 @@ export interface TimelineBuildParams {
   pollRecords: PollRecord[];
   pollingDiagnostics?: PollingStatus;
   correlationWindowMs: number;
+  /** Phase 5: woven flow executions to render as 'flow' entries. */
+  wovenFlowExecutions?: WovenFlowExecution[];
 }
 
 // ── Builder ──
@@ -140,6 +160,7 @@ export class TimelineBuilder {
       pollRecords,
       pollingDiagnostics,
       correlationWindowMs,
+      wovenFlowExecutions,
     } = params;
 
     // Build reverse lookup: network event URL|timestamp → correlated step index
@@ -163,6 +184,7 @@ export class TimelineBuilder {
       ...this.buildInteractionEntries(interactions, interactionToStep),
       ...this.buildNetworkEntries(networkEvents, networkToStep),
       ...this.buildCorrelationEntries(correlatedSteps),
+      ...this.buildFlowEntries(wovenFlowExecutions ?? []),
     ];
 
     // Sort chronologically
@@ -222,14 +244,33 @@ export class TimelineBuilder {
   }
 
   private buildPollEntries(pollRecords: PollRecord[]): TimelinePollEntry[] {
-    return pollRecords.map((r) => ({
-      type: 'poll' as const,
-      timestamp: r.timestamp,
-      durationMs: r.durationMs,
-      result: r.result,
-      elementCount: r.elementCount,
-      inferredTarget: r.inferredTarget,
-      error: r.error,
+    // Phase 5: skip flow_boundary records — Woven flow entries replace them.
+    // The weaver typically strips these already; this is a defensive filter
+    // for callers that pass the raw stream.
+    return pollRecords
+      .filter((r) => r.result !== 'flow_boundary')
+      .map((r) => ({
+        type: 'poll' as const,
+        timestamp: r.timestamp,
+        durationMs: r.durationMs,
+        result: r.result,
+        elementCount: r.elementCount,
+        inferredTarget: r.inferredTarget,
+        error: r.error,
+      }));
+  }
+
+  private buildFlowEntries(woven: WovenFlowExecution[]): TimelineFlowEntry[] {
+    return woven.map((w) => ({
+      type: 'flow' as const,
+      timestamp: w.startedAt,
+      endTimestamp: w.endedAt,
+      durationMs: w.durationMs,
+      flowName: w.flowName,
+      ...(w.flowPath !== undefined ? { flowPath: w.flowPath } : {}),
+      succeeded: w.succeeded,
+      ...(w.cancelled !== undefined ? { cancelled: w.cancelled } : {}),
+      steps: w.steps,
     }));
   }
 
