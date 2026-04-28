@@ -49,6 +49,12 @@ export interface Task<TResult = unknown> {
     lineCount(): number;
     result?: TResult;
     error?: string;
+    /**
+     * Set when the task transitioned to cancelling/cancelled via cancel() or
+     * watchdog timeout. Surfaces "watchdog timeout (Xms)" vs user-supplied
+     * reason so agents can distinguish.
+     */
+    cancelReason?: string;
 }
 
 export type TaskRunner<TResult> = (ctx: TaskContext) => Promise<TResult>;
@@ -92,6 +98,7 @@ interface InternalTask<TResult = unknown> extends Task<TResult> {
     _buffer: RingBuffer;
     _settle: () => void;
     _terminalPromise: Promise<void>;
+    _watchdog?: NodeJS.Timeout;
 }
 
 class TaskRegistryImpl implements TaskRegistry {
@@ -191,6 +198,26 @@ class TaskRegistryImpl implements TaskRegistry {
             ?? DEFAULT_MAX_RETAINED_PER_KIND;
         this.evictIfOverCap(opts.kind, cap);
 
+        // Install watchdog AFTER task is in the map (so cancel() during the
+        // timer can find it) but BEFORE queueMicrotask (so the runner sees an
+        // already-armed controller if the timer somehow fires synchronously).
+        if (opts.timeoutMs && opts.timeoutMs > 0) {
+            const ms = opts.timeoutMs;
+            task._watchdog = setTimeout(() => {
+                // Mirrors cancel() but with a watchdog-specific reason. Only
+                // fires if task hasn't already settled.
+                if (task.status !== 'running' && task.status !== 'pending') return;
+                const reasonStr = `watchdog timeout (${ms}ms)`;
+                const err = new Error(reasonStr);
+                err.name = 'AbortError';
+                task.cancelReason = reasonStr;
+                task._cleanup.abort(err);
+                if (!task._controller.signal.aborted) task._controller.abort(err);
+                task.status = 'cancelling';
+            }, ms);
+            if (typeof task._watchdog.unref === 'function') task._watchdog.unref();
+        }
+
         const ctx: TaskContext = {
             signal: controller.signal,
             cleanup,
@@ -250,6 +277,10 @@ class TaskRegistryImpl implements TaskRegistry {
                 task.error = err instanceof Error ? err.message : String(err);
             }
         } finally {
+            if (task._watchdog) {
+                clearTimeout(task._watchdog);
+                task._watchdog = undefined;
+            }
             task.finishedAt = new Date().toISOString();
             task._settle();
         }
@@ -292,8 +323,10 @@ class TaskRegistryImpl implements TaskRegistry {
         if (!task) return false;
         if (task.status !== 'running' && task.status !== 'pending') return false;
 
-        const reasonErr = new Error(reason ?? 'cancelled');
+        const reasonStr = reason ?? 'cancelled';
+        const reasonErr = new Error(reasonStr);
         reasonErr.name = 'AbortError';
+        task.cancelReason = reasonStr;
         task._cleanup.abort(reasonErr);
         if (!task._controller.signal.aborted) {
             task._controller.abort(reasonErr);
@@ -343,6 +376,10 @@ class TaskRegistryImpl implements TaskRegistry {
     _clearForTests(): void {
         // Abort any outstanding tasks so background promises settle cleanly.
         for (const t of this.tasks.values()) {
+            if (t._watchdog) {
+                clearTimeout(t._watchdog);
+                t._watchdog = undefined;
+            }
             if (
                 t.status === 'running' ||
                 t.status === 'pending' ||

@@ -14,6 +14,7 @@ export {
     installIosApp,
     uninstallIosApp,
     bootIosSimulator,
+    DEFAULT_BUILD_TIMEOUT_MS,
 } from './ios-build.js';
 export type {
     IosBuildOptions,

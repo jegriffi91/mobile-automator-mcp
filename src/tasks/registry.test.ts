@@ -370,6 +370,78 @@ describe('TaskRegistry', () => {
         });
     });
 
+    describe('watchdog timeout', () => {
+        it('watchdog cancels slow runner that ignores abort', async () => {
+            // Runner resolves after 300ms ignoring signal; watchdog at 50ms
+            // should cancel it. After settle, status='cancelled' and
+            // cancelReason reflects the watchdog.
+            const task = taskRegistry.start({ kind: 'build', timeoutMs: 50 }, async () => {
+                await new Promise((r) => setTimeout(r, 300));
+                return { ignored: true };
+            });
+            // Wait for terminal.
+            for (let i = 0; i < 200; i++) {
+                if (task.status !== 'running' && task.status !== 'cancelling') break;
+                await new Promise((r) => setTimeout(r, 5));
+            }
+            expect(task.status).toBe('cancelled');
+            expect(task.cancelReason).toBe('watchdog timeout (50ms)');
+            expect(task.result).toBeUndefined();
+        });
+
+        it('explicit cancel before watchdog wins (user reason preserved)', async () => {
+            const task = taskRegistry.start({ kind: 'build', timeoutMs: 1000 }, async (ctx) => {
+                await new Promise<void>((_, reject) => {
+                    ctx.signal.addEventListener('abort', () => {
+                        const err = new Error('aborted');
+                        err.name = 'AbortError';
+                        reject(err);
+                    });
+                });
+                return 'never';
+            });
+            // Let runner attach the abort listener.
+            await new Promise((r) => setTimeout(r, 5));
+            expect(taskRegistry.cancel(task.taskId, 'user reason')).toBe(true);
+            for (let i = 0; i < 200; i++) {
+                if (task.status === 'cancelled') break;
+                await new Promise((r) => setTimeout(r, 5));
+            }
+            expect(task.status).toBe('cancelled');
+            expect(task.cancelReason).toBe('user reason');
+        });
+
+        it('natural completion before watchdog clears the timer', async () => {
+            const task = await taskRegistry.run({ kind: 'build', timeoutMs: 5000 }, async () => {
+                await new Promise((r) => setTimeout(r, 20));
+                return 42;
+            });
+            expect(task.status).toBe('done');
+            expect(task.result).toBe(42);
+            expect(task.cancelReason).toBeUndefined();
+        });
+
+        it('watchdog cancelReason does not change after settle', async () => {
+            // Runner ignores abort and eventually resolves; watchdog should
+            // fire exactly once. cancelReason should remain stable.
+            const task = taskRegistry.start({ kind: 'build', timeoutMs: 30 }, async () => {
+                await new Promise((r) => setTimeout(r, 200));
+                return 'late';
+            });
+            // Wait for terminal.
+            for (let i = 0; i < 200; i++) {
+                if (task.status !== 'running' && task.status !== 'cancelling') break;
+                await new Promise((r) => setTimeout(r, 5));
+            }
+            expect(task.status).toBe('cancelled');
+            const reasonAfterSettle = task.cancelReason;
+            expect(reasonAfterSettle).toBe('watchdog timeout (30ms)');
+            // Wait some more — verify nothing rewrites it.
+            await new Promise((r) => setTimeout(r, 100));
+            expect(task.cancelReason).toBe(reasonAfterSettle);
+        });
+    });
+
     it('recentOutputLines visible mid-flight (before terminal)', async () => {
         let resolveDone: () => void = () => undefined;
         const done = new Promise<void>((r) => {
