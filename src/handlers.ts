@@ -1835,7 +1835,7 @@ export async function handleRunTest(
     const watchdogMs = DEFAULT_RUN_TEST_TIMEOUT_MS + RUN_TEST_GRACE_MS;
     const task = await taskRegistry.run<RunTestOutput>(
         { kind: 'test', timeoutMs: watchdogMs },
-        (ctx) => runTestTaskRunner(input, ctx.signal),
+        (ctx) => runTestTaskRunner(input, ctx.signal, ctx.appendLine),
     );
     if (task.status === 'done' && task.result) return task.result;
     if (task.status === 'cancelled') {
@@ -1848,7 +1848,11 @@ export async function handleRunTest(
 async function runTestTaskRunner(
     input: RunTestInput,
     parentSignal: AbortSignal,
+    appendLine?: (line: string, stream?: 'stdout' | 'stderr') => void,
 ): Promise<RunTestOutput> {
+    const onLine = appendLine
+        ? (line: string, stream: 'stdout' | 'stderr') => appendLine(line, stream)
+        : undefined;
     return executeFlowWithPause(
         input.yamlPath,
         async (signal, debugOutputDir) => {
@@ -1859,6 +1863,7 @@ async function runTestTaskRunner(
             const out = await runTestCore(
                 { ...input, debugOutput: effectiveDebugOutput },
                 signal,
+                onLine,
             );
             return {
                 result: out,
@@ -1878,7 +1883,11 @@ async function runTestTaskRunner(
  * the way down to MaestroWrapper.runTest so cancel_task (or watchdog
  * timeout) can SIGTERM the flow subprocess.
  */
-async function runTestCore(input: RunTestInput, signal: AbortSignal): Promise<RunTestOutput> {
+async function runTestCore(
+    input: RunTestInput,
+    signal: AbortSignal,
+    onLine?: (line: string, stream: 'stdout' | 'stderr') => void,
+): Promise<RunTestOutput> {
     // Defensively ensure the --debug-output target exists so Maestro can write
     // commands-*.json into it. mkdir(recursive: true) is a no-op if it does.
     if (input.debugOutput) {
@@ -1955,7 +1964,7 @@ async function runTestCore(input: RunTestInput, signal: AbortSignal): Promise<Ru
         // Step 3: Run Maestro test (signal propagates from
         // executeFlowWithPause's cleanup.signal so cancel_task can interrupt
         // the maestro test subprocess via SIGTERM)
-        const result = await driver.runTest(input.yamlPath, input.env, input.debugOutput, signal);
+        const result = await driver.runTest(input.yamlPath, input.env, input.debugOutput, signal, onLine);
 
         // Step 4: Stop profiling and collect metrics (non-fatal on failure)
         if (profiler?.isActive) {
@@ -2228,7 +2237,7 @@ export async function handleRunFlow(input: RunFlowInput): Promise<RunFlowOutput>
     const watchdogMs = DEFAULT_RUN_TEST_TIMEOUT_MS + RUN_TEST_GRACE_MS;
     const task = await taskRegistry.run<RunFlowOutput>(
         { kind: 'flow', timeoutMs: watchdogMs },
-        (ctx) => runFlowTaskRunner(input, ctx.signal),
+        (ctx) => runFlowTaskRunner(input, ctx.signal, ctx.appendLine),
     );
     if (task.status === 'done' && task.result) return task.result;
     if (task.status === 'cancelled') {
@@ -2241,6 +2250,7 @@ export async function handleRunFlow(input: RunFlowInput): Promise<RunFlowOutput>
 async function runFlowTaskRunner(
     input: RunFlowInput,
     parentSignal: AbortSignal,
+    appendLine?: (line: string, stream?: 'stdout' | 'stderr') => void,
 ): Promise<RunFlowOutput> {
     const flowsDir = resolveFlowsDir(input.flowsDir);
     const flow = await FlowRegistry.resolve(flowsDir, input.name);
@@ -2249,6 +2259,10 @@ async function runFlowTaskRunner(
     console.error(
         `[MCP] run_flow: executing ${flow.path} with ${Object.keys(appliedParams).length} param(s)`,
     );
+
+    const onLine = appendLine
+        ? (line: string, stream: 'stdout' | 'stderr') => appendLine(line, stream)
+        : undefined;
 
     // Route through executeFlowWithPause directly (rather than handleRunTest)
     // so the flow name is meaningful in the pause/resume marker and the
@@ -2268,6 +2282,7 @@ async function runFlowTaskRunner(
                     driverCooldownMs: input.driverCooldownMs,
                 },
                 signal,
+                onLine,
             );
             return {
                 result: out,
@@ -2402,7 +2417,7 @@ export async function handleStartTest(input: StartTestInput): Promise<StartTestO
     const watchdogMs = DEFAULT_RUN_TEST_TIMEOUT_MS + RUN_TEST_GRACE_MS;
     const task = taskRegistry.start<RunTestOutput>(
         { kind: 'test', timeoutMs: watchdogMs },
-        (ctx) => runTestTaskRunner(input, ctx.signal),
+        (ctx) => runTestTaskRunner(input, ctx.signal, ctx.appendLine),
     );
     return {
         taskId: task.taskId,
@@ -2421,7 +2436,7 @@ export async function handleStartFlow(input: StartFlowInput): Promise<StartFlowO
     const watchdogMs = DEFAULT_RUN_TEST_TIMEOUT_MS + RUN_TEST_GRACE_MS;
     const task = taskRegistry.start<RunFlowOutput>(
         { kind: 'flow', timeoutMs: watchdogMs },
-        (ctx) => runFlowTaskRunner(input, ctx.signal),
+        (ctx) => runFlowTaskRunner(input, ctx.signal, ctx.appendLine),
     );
     return {
         taskId: task.taskId,
