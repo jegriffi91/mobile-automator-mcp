@@ -875,3 +875,82 @@ describe('TouchInferrer.pollOnce hierarchy retry', () => {
   });
 });
 
+describe('TouchInferrer.addExternalRecord (Phase 4 flow_boundary)', () => {
+  it('pushes a record onto pollRecords without going through the polling loop', () => {
+    const reader = vi.fn();
+    const logger = vi.fn();
+    const inferrer = new TouchInferrer(logger, reader, { pollingIntervalMs: 10000 });
+
+    inferrer.addExternalRecord({
+      timestamp: '2025-01-01T00:00:00.000Z',
+      durationMs: 0,
+      result: 'flow_boundary',
+      boundaryKind: 'flow_start',
+      inferredTarget: 'login.flow',
+    });
+
+    const records = inferrer.getPollRecords();
+    expect(records).toHaveLength(1);
+    expect(records[0].result).toBe('flow_boundary');
+    expect(records[0].boundaryKind).toBe('flow_start');
+    expect(records[0].inferredTarget).toBe('login.flow');
+    // Polling counters untouched — record didn't come from pollOnce
+    expect(reader).not.toHaveBeenCalled();
+    expect(inferrer.getStatus().pollCount).toBe(0);
+  });
+
+  it('appends in order alongside polled records', async () => {
+    const reader = vi.fn().mockResolvedValue({ role: 'view', id: 'root', children: [] });
+    const logger = vi.fn().mockResolvedValue(undefined);
+    const inferrer = new TouchInferrer(logger, reader, { pollingIntervalMs: 10000 });
+
+    await inferrer.pollOnce('s'); // baseline
+    inferrer.addExternalRecord({
+      timestamp: '2025-01-01T00:00:00.000Z',
+      durationMs: 0,
+      result: 'flow_boundary',
+      boundaryKind: 'flow_end',
+      inferredTarget: 'login.flow',
+    });
+
+    const records = inferrer.getPollRecords();
+    expect(records).toHaveLength(2);
+    expect(records[0].result).toBe('baseline');
+    expect(records[1].result).toBe('flow_boundary');
+  });
+});
+
+describe('TouchInferrer.seedPollRecords (Phase 4 resume seeding)', () => {
+  const seed = [
+    { timestamp: '2025-01-01T00:00:00.000Z', durationMs: 0, result: 'baseline' as const },
+    { timestamp: '2025-01-01T00:00:01.000Z', durationMs: 10, result: 'equal' as const },
+  ];
+
+  it('replaces the internal records with the given seed before start()', () => {
+    const reader = vi.fn();
+    const logger = vi.fn();
+    const inferrer = new TouchInferrer(logger, reader, { pollingIntervalMs: 10000 });
+
+    inferrer.seedPollRecords(seed);
+    const records = inferrer.getPollRecords();
+    expect(records).toHaveLength(2);
+    expect(records[0].result).toBe('baseline');
+    expect(records[1].result).toBe('equal');
+  });
+
+  it('throws if called after polling has started', async () => {
+    const reader = vi.fn().mockResolvedValue({ role: 'view', id: 'root', children: [] });
+    const logger = vi.fn().mockResolvedValue(undefined);
+    const inferrer = new TouchInferrer(logger, reader, { pollingIntervalMs: 10000 });
+
+    // pollOnce sets startedAt-equivalent state via the success path; call
+    // start() so seedPollRecords sees a live timer too.
+    inferrer.start('s');
+    try {
+      expect(() => inferrer.seedPollRecords(seed)).toThrow(/cannot seed after polling/);
+    } finally {
+      inferrer.stop();
+    }
+  });
+});
+

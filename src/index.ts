@@ -160,7 +160,7 @@ server.registerTool(
     {
         title: 'Start Recording Session',
         description:
-            'Begin recording a mobile interaction session. Initializes session memory, monitors the UI hierarchy, and starts capturing network events. Returns a session ID to use with subsequent tool calls.',
+            'Begin recording a mobile interaction session. Initializes session memory, monitors the UI hierarchy, and starts capturing network events. Returns a session ID to use with subsequent tool calls. During the session, drive the app via execute_ui_action (single steps) or run_flow (stored Maestro yaml). Both update the recording timeline.',
         inputSchema: StartRecordingInputSchema,
         outputSchema: StartRecordingOutputSchema,
         annotations: {
@@ -550,7 +550,7 @@ server.registerTool(
     {
         title: 'Run Test',
         description:
-            'Run a Maestro YAML test file with optional WireMock stub replay. Automatically starts an in-process stub server, runs the test, and tears down. Returns pass/fail status, output, and duration. Note: this tool replays a static YAML script against a booted simulator — it does NOT connect to live Proxyman or record new network traffic during execution.',
+            'Run a Maestro YAML test file with optional WireMock stub replay. Automatically starts an in-process stub server, runs the test, and tears down. Returns pass/fail status, output, and duration. Note: this tool replays a static YAML script against a booted simulator — it does NOT connect to live Proxyman or record new network traffic during execution. When MCA_FLOW_PAUSE_RESUME=on and a recording session is active, the session is paused for the duration of the flow and resumed automatically afterward. Otherwise, run_test errors if any recording session is active.',
         inputSchema: RunTestInputSchema,
         outputSchema: RunTestOutputSchema,
         annotations: {
@@ -654,7 +654,7 @@ server.registerTool(
     {
         title: 'Run Flow',
         description:
-            'Execute a named Maestro flow by name. Resolves <flowsDir>/<name>.yaml, merges manifest param defaults with caller-supplied params, and runs the flow against a booted simulator. Use this to navigate to the area of an incremental change before verifying it.',
+            'Execute a named Maestro flow by name. Resolves <flowsDir>/<name>.yaml, merges manifest param defaults with caller-supplied params, and runs the flow against a booted simulator. Use this to navigate to the area of an incremental change before verifying it. When MCA_FLOW_PAUSE_RESUME=on and a recording session is active, the session is paused for the duration of the flow and resumed automatically afterward. Otherwise, run_flow errors if any recording session is active.',
         inputSchema: RunFlowInputSchema,
         outputSchema: RunFlowOutputSchema,
         annotations: {

@@ -41,7 +41,21 @@ export interface AutomationDriver {
     ): Promise<{ success: boolean; error?: string }>;
 
     // ── Test execution ──
-    runTest(yamlPath: string, env?: Record<string, string>, debugOutput?: string): Promise<{ passed: boolean; output: string; durationMs: number }>;
+    /**
+     * Run a Maestro test/flow YAML.
+     *
+     * `signal` is the optional AbortSignal that will SIGTERM the underlying
+     * `maestro test` subprocess (with a SIGKILL fallback after 5s — see
+     * execFileWithAbort). Used by the Phase 4 pause/resume path so
+     * cancel_task can interrupt a running flow without orphaning the
+     * recording session it paused.
+     */
+    runTest(
+        yamlPath: string,
+        env?: Record<string, string>,
+        debugOutput?: string,
+        signal?: AbortSignal,
+    ): Promise<{ passed: boolean; output: string; durationMs: number }>;
 
     // ── Setup & teardown ──
     validateSetup(): Promise<void>;

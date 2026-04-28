@@ -90,11 +90,13 @@ const {
   handleGetUIHierarchy,
   handleExecuteUIAction,
   handleRunTest,
+  handleRunFlow,
   handleGetSessionTimeline,
   handleGetNetworkLogs,
   handleSetMockResponse,
   handleClearMockResponses,
   _setProxymanMcpClientFactory,
+  _setFlowPauseResumeEnabledForTests,
 } = await import('../src/handlers.js');
 
 // ── Test suites ──
@@ -989,6 +991,171 @@ describe('Handler Integration Tests', () => {
       } finally {
         startSpy.mockRestore();
         taskRegistry._clearForTests();
+      }
+    });
+  });
+
+  // ── Phase 4: pause/resume around run_test/run_flow ──────────────────────
+  describe('Phase 4: MCA_FLOW_PAUSE_RESUME pause/resume', () => {
+    let restoreFlag: boolean;
+
+    beforeEach(() => {
+      restoreFlag = _setFlowPauseResumeEnabledForTests(true);
+    });
+
+    afterEach(() => {
+      _setFlowPauseResumeEnabledForTests(restoreFlag);
+    });
+
+    it('feature flag OFF: run_test errors via assertNoActiveSessions when a session is active', async () => {
+      _setFlowPauseResumeEnabledForTests(false);
+      const start = await handleStartRecording({
+        appBundleId: 'com.test.app',
+        platform: 'ios',
+      });
+      try {
+        await expect(
+          handleRunTest({ yamlPath: '/tmp/test.yaml' }),
+        ).rejects.toThrow(/recording session is active/);
+      } finally {
+        await handleStopAndCompile({ sessionId: start.sessionId });
+      }
+    });
+
+    it('feature flag ON, no session active: run_test runs without bracketing', async () => {
+      // No active session — pause path should be skipped entirely.
+      const result = await handleRunTest({ yamlPath: '/tmp/test.yaml' });
+      expect(result.passed).toBe(true);
+      // No sessions to inspect — DriverFactory.create should not have been
+      // called for resume (only createCliOnly for the flow run itself).
+      expect(DriverFactory.create).not.toHaveBeenCalled();
+    });
+
+    it('feature flag ON, session active, success path: brackets the flow with pause/resume', async () => {
+      const { sessionManager } = await import('../src/session/index.js');
+      const start = await handleStartRecording({
+        appBundleId: 'com.test.app',
+        platform: 'ios',
+      });
+      // Sanity: session is registered.
+      expect(sessionManager.listActiveDrivers()).toContain(start.sessionId);
+
+      vi.mocked(DriverFactory.create).mockClear();
+
+      const result = await handleRunTest({ yamlPath: '/tmp/test.yaml' });
+      expect(result.passed).toBe(true);
+
+      // Resume recreates the driver via DriverFactory.create
+      expect(DriverFactory.create).toHaveBeenCalled();
+      // Session is no longer paused; driver and poller registered fresh.
+      expect(sessionManager.isSessionPaused(start.sessionId)).toBe(false);
+      expect(sessionManager.listActiveDrivers()).toContain(start.sessionId);
+
+      const records = sessionManager.getPollRecords(start.sessionId);
+      const boundaries = records.filter((r) => r.result === 'flow_boundary');
+      expect(boundaries.map((r) => r.boundaryKind)).toEqual(
+        expect.arrayContaining(['flow_start', 'flow_end']),
+      );
+
+      const flows = sessionManager.getFlowExecutions(start.sessionId);
+      expect(flows).toHaveLength(1);
+      expect(flows[0].flowName).toBe('/tmp/test.yaml');
+      expect(flows[0].succeeded).toBe(true);
+
+      await handleStopAndCompile({ sessionId: start.sessionId });
+    });
+
+    it('feature flag ON, session active, flow runner throws: resume still runs (cleanup path)', async () => {
+      const { sessionManager } = await import('../src/session/index.js');
+      const start = await handleStartRecording({
+        appBundleId: 'com.test.app',
+        platform: 'ios',
+      });
+      try {
+        // Force run_test to throw at the driver layer mid-flow.
+        mockDriverFns.runTest.mockRejectedValueOnce(
+          new Error('flow-runtime-error'),
+        );
+        await expect(handleRunTest({ yamlPath: '/tmp/test.yaml' })).rejects.toThrow(
+          /flow-runtime-error/,
+        );
+        // After cleanup-driven resume, session is no longer paused.
+        expect(sessionManager.isSessionPaused(start.sessionId)).toBe(false);
+        // The recording session survived: driver and poller are alive again.
+        expect(sessionManager.listActiveDrivers()).toContain(start.sessionId);
+      } finally {
+        await handleStopAndCompile({ sessionId: start.sessionId });
+      }
+    });
+
+    it('feature flag ON, resume fails: session is marked aborted and error names the flow', async () => {
+      const { sessionManager } = await import('../src/session/index.js');
+      const start = await handleStartRecording({
+        appBundleId: 'com.test.app',
+        platform: 'ios',
+      });
+
+      // Stub DriverFactory.create (the resume call) to fail. Be careful not
+      // to break the initial start_recording_session — it has already returned
+      // with a fully-armed session at this point.
+      vi.mocked(DriverFactory.create).mockRejectedValueOnce(
+        new Error('port-bind-failed'),
+      );
+
+      await expect(handleRunTest({ yamlPath: '/tmp/test.yaml' })).rejects.toThrow(
+        /Recording session aborted.*\/tmp\/test\.yaml.*port-bind-failed/,
+      );
+
+      const session = await sessionManager.getSession(start.sessionId);
+      expect(session?.status).toBe('aborted');
+      expect(sessionManager.isSessionPaused(start.sessionId)).toBe(false);
+    });
+
+    it('feature flag ON, two active sessions: throws clear multi-session error', async () => {
+      const { sessionManager } = await import('../src/session/index.js');
+      const start1 = await handleStartRecording({
+        appBundleId: 'com.test.app',
+        platform: 'ios',
+      });
+      const start2 = await handleStartRecording({
+        appBundleId: 'com.other.app',
+        platform: 'ios',
+      });
+      try {
+        await expect(handleRunTest({ yamlPath: '/tmp/test.yaml' })).rejects.toThrow(
+          /multi-session flow execution is not supported/,
+        );
+        // Neither session is paused as a side-effect of the rejection.
+        expect(sessionManager.isSessionPaused(start1.sessionId)).toBe(false);
+        expect(sessionManager.isSessionPaused(start2.sessionId)).toBe(false);
+      } finally {
+        await handleStopAndCompile({ sessionId: start1.sessionId });
+        await handleStopAndCompile({ sessionId: start2.sessionId });
+      }
+    });
+
+    it('feature flag ON: run_flow shares the same pause/resume bracket', async () => {
+      // Verify run_flow goes through executeFlowWithPause (no double-bracket
+      // via handleRunTest). We exercise the early multi-session guard which
+      // is the most observable side-effect of the wrapper running.
+      const { sessionManager } = await import('../src/session/index.js');
+      const s1 = await handleStartRecording({
+        appBundleId: 'com.test.app',
+        platform: 'ios',
+      });
+      const s2 = await handleStartRecording({
+        appBundleId: 'com.other.app',
+        platform: 'ios',
+      });
+      try {
+        await expect(
+          handleRunFlow({ name: 'login', flowsDir: '/tmp/flows' }),
+        ).rejects.toThrow();
+        expect(sessionManager.isSessionPaused(s1.sessionId)).toBe(false);
+        expect(sessionManager.isSessionPaused(s2.sessionId)).toBe(false);
+      } finally {
+        await handleStopAndCompile({ sessionId: s1.sessionId });
+        await handleStopAndCompile({ sessionId: s2.sessionId });
       }
     });
   });

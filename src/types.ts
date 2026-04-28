@@ -33,6 +33,39 @@ export interface Session {
     settleTimeoutMs?: number;
     /** URL path patterns for network-based interaction tracking (e.g., ['/__track']) */
     trackEventPaths?: string[];
+    /**
+     * Phase 4: device UDID captured at start_recording_session. In-memory only
+     * (not persisted to SQLite) — used by SessionManager.resumeSession to
+     * recreate the daemon driver after a paused flow run.
+     */
+    deviceId?: string;
+    /**
+     * Phase 4: timeout overrides supplied to DriverFactory.create at session
+     * start. In-memory only — used to recreate the driver with the same
+     * config on resume.
+     */
+    driverTimeouts?: Partial<TimeoutConfig>;
+    /**
+     * Phase 4: per-flow records captured by SessionManager.resumeSession.
+     * In-memory only. Compile-time event-weaving (a future phase) will use
+     * these to splice synthesized flow events into the timeline; for now,
+     * they are breadcrumbs for diagnostics.
+     */
+    flowExecutions?: FlowExecutionRecord[];
+}
+
+/**
+ * Phase 4: a single run_test / run_flow execution captured during a paused
+ * window of a recording session. `output` is the captured stdout+stderr from
+ * the Maestro CLI; treat it as opaque text for compile-time consumption.
+ */
+export interface FlowExecutionRecord {
+    flowName: string;
+    startedAt: string;
+    endedAt: string;
+    durationMs: number;
+    output: string;
+    succeeded: boolean;
 }
 
 // ----- UI Types -----
