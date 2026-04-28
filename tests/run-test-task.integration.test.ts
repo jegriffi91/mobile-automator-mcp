@@ -85,6 +85,11 @@ const {
   handleStartFlow,
   handlePollTaskStatus,
   handleGetTaskResult,
+  handleCancelTask,
+  handleStartRecording,
+  handleStopAndCompile,
+  _setCancelDeadlineMsForTests,
+  _setFlowPauseResumeEnabledForTests,
 } = await import('../src/handlers.js');
 
 const { taskRegistry } = await import('../src/tasks/registry.js');
@@ -161,6 +166,100 @@ describe('start_test / start_flow (Phase 5)', () => {
     const polled = await handlePollTaskStatus({ taskId: out.taskId });
     expect(polled.status).toBe('failed');
     expect(polled.error).toBeTruthy();
+  });
+});
+
+describe('cancel_task on a running flow (Phase 5)', () => {
+  let restoreFlag: boolean;
+  let restoreDeadline: number;
+
+  beforeAll(async () => {
+    await sessionManager.initialize();
+  });
+
+  beforeEach(() => {
+    vi.mocked(DriverFactory.create).mockResolvedValue(mockDriverFns as never);
+    vi.mocked(DriverFactory.createCliOnly).mockResolvedValue(mockDriverFns as never);
+    restoreFlag = _setFlowPauseResumeEnabledForTests(true);
+    restoreDeadline = _setCancelDeadlineMsForTests(2000);
+  });
+
+  afterEach(() => {
+    _setFlowPauseResumeEnabledForTests(restoreFlag);
+    _setCancelDeadlineMsForTests(restoreDeadline);
+    taskRegistry._clearForTests();
+    vi.clearAllMocks();
+  });
+
+  it('cancel_task SIGTERMs the Maestro CLI mid-flow, resumes the bracketed session, and settles task as cancelled', async () => {
+    // Stub runTest to await its signal indefinitely — simulates a long-running
+    // Maestro CLI invocation. The mock receives a real AbortSignal threaded
+    // through executeFlowWithPause and rejects when it fires (mirroring how
+    // MaestroWrapper.runTest reacts to SIGTERM in the real Phase-4 plumbing).
+    let runTestSignal: AbortSignal | undefined;
+    let signalAborted = false;
+    mockDriverFns.runTest.mockImplementationOnce(
+      (
+        _yamlPath: string,
+        _env: unknown,
+        _debugOutput: unknown,
+        signal?: AbortSignal,
+      ) => new Promise((_, reject) => {
+        runTestSignal = signal;
+        const onAbort = () => {
+          signalAborted = true;
+          const err = new Error('SIGTERM (mock)');
+          err.name = 'AbortError';
+          reject(err);
+        };
+        if (signal) {
+          if (signal.aborted) onAbort();
+          else signal.addEventListener('abort', onAbort, { once: true });
+        }
+      }),
+    );
+
+    // Start an active recording session that the flow will pause/resume around.
+    const start = await handleStartRecording({
+      appBundleId: 'com.test.app',
+      platform: 'ios',
+    });
+
+    const out = await handleStartTest({ yamlPath: '/tmp/cancel-me.yaml' });
+    expect(out.status).toBe('running');
+
+    // Wait for pause + driver setup + runTest entry. Once the runTest mock
+    // captures its signal arg, pauseSession has already engaged.
+    await waitFor(() => runTestSignal !== undefined);
+    expect(sessionManager.isSessionPaused(start.sessionId)).toBe(true);
+    expect(runTestSignal!.aborted).toBe(false);
+
+    const cancelled = await handleCancelTask({
+      taskId: out.taskId,
+      reason: 'test cancellation',
+    });
+
+    expect(cancelled.cancelled).toBe(true);
+    expect(cancelled.previousStatus).toBe('running');
+    // Settled within CANCEL_DEADLINE_MS (set to 2s for this test).
+    expect(cancelled.finalStatus).toBe('cancelled');
+    expect(cancelled.cancelReason).toBe('test cancellation');
+
+    // The Maestro mock's signal fired — proves parent → executeFlowWithPause
+    // cleanup.signal → runFlow signal arg → MaestroWrapper SIGTERM chain.
+    expect(signalAborted).toBe(true);
+
+    // Resume cleanup ran on the abort path — session is no longer paused
+    // and a fresh driver is registered.
+    expect(sessionManager.isSessionPaused(start.sessionId)).toBe(false);
+    expect(sessionManager.listActiveDrivers()).toContain(start.sessionId);
+
+    // get_task_result projects the cancelled task with the user-supplied reason.
+    const got = await handleGetTaskResult({ taskId: out.taskId });
+    expect(got.status).toBe('cancelled');
+    expect(got.cancelReason).toBe('test cancellation');
+
+    await handleStopAndCompile({ sessionId: start.sessionId });
   });
 });
 
