@@ -173,6 +173,18 @@ function createPollingNotifier(): PollingNotifier | undefined {
 const STANDALONE_TAG_PREFIX = 'mca:standalone';
 
 /**
+ * How long handleCancelTask busy-polls for the runner to settle into a
+ * terminal state before giving up and returning the current (possibly
+ * 'cancelling') status. Exported so tests can shrink it for speed.
+ */
+export let CANCEL_DEADLINE_MS = 10_000;
+export function _setCancelDeadlineMsForTests(ms: number): number {
+    const prev = CANCEL_DEADLINE_MS;
+    CANCEL_DEADLINE_MS = ms;
+    return prev;
+}
+
+/**
  * Test-only — replace the Proxyman MCP client used by handlers. Returns the
  * previous instance so tests can restore it.
  */
@@ -2087,8 +2099,11 @@ export async function handleCancelTask(input: CancelTaskInput): Promise<CancelTa
         };
     }
     taskRegistry.cancel(task.taskId, input.reason);
-    // Wait briefly for the runner to settle into a terminal state.
-    const deadline = Date.now() + 5_000;
+    // Wait briefly for the runner to settle into a terminal state. If the
+    // runner ignores SIGTERM and we exhaust the deadline, the task remains
+    // in the transient 'cancelling' status — which we return honestly rather
+    // than lying with finalStatus='running'.
+    const deadline = Date.now() + CANCEL_DEADLINE_MS;
     while (
         task.status !== 'done' &&
         task.status !== 'failed' &&

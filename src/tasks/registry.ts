@@ -14,7 +14,13 @@ import { CleanupImpl, type Cleanup } from '../cleanup.js';
 import { RingBuffer } from './ring-buffer.js';
 
 export type TaskKind = 'build' | 'unit_tests' | 'recording';
-export type TaskStatus = 'pending' | 'running' | 'done' | 'failed' | 'cancelled';
+export type TaskStatus =
+    | 'pending'
+    | 'running'
+    | 'cancelling'
+    | 'done'
+    | 'failed'
+    | 'cancelled';
 
 const DEFAULT_PRUNE_INTERVAL_MS = 60_000;
 const DEFAULT_TASK_TTL_MS = 60 * 60 * 1000; // 1h
@@ -233,6 +239,10 @@ class TaskRegistryImpl implements TaskRegistry {
         if (!task._controller.signal.aborted) {
             task._controller.abort(reasonErr);
         }
+        // Synchronously visible to the next read. The runner's terminal
+        // settlement in execute() flips this to 'cancelled' (or 'failed' if
+        // the runner threw a non-abort error after we signaled).
+        task.status = 'cancelling';
         return true;
     }
 
@@ -274,7 +284,11 @@ class TaskRegistryImpl implements TaskRegistry {
     _clearForTests(): void {
         // Abort any outstanding tasks so background promises settle cleanly.
         for (const t of this.tasks.values()) {
-            if (t.status === 'running' || t.status === 'pending') {
+            if (
+                t.status === 'running' ||
+                t.status === 'pending' ||
+                t.status === 'cancelling'
+            ) {
                 try {
                     t._cleanup.abort(new Error('test reset'));
                     t._controller.abort(new Error('test reset'));

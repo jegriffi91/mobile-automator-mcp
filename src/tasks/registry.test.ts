@@ -58,9 +58,10 @@ describe('TaskRegistry', () => {
         await Promise.resolve();
         const ok = taskRegistry.cancel(task.taskId, 'user-cancel');
         expect(ok).toBe(true);
-        // Wait for terminal
+        // Wait for terminal (cancel() flips to 'cancelling' first; runner
+        // settles into 'cancelled').
         for (let i = 0; i < 50; i++) {
-            if (task.status !== 'running') break;
+            if (task.status !== 'running' && task.status !== 'cancelling') break;
             await new Promise((r) => setTimeout(r, 5));
         }
         expect(task.status).toBe('cancelled');
@@ -84,7 +85,7 @@ describe('TaskRegistry', () => {
         await Promise.resolve();
         expect(taskRegistry.cancel(task.taskId)).toBe(true);
         for (let i = 0; i < 50; i++) {
-            if (task.status !== 'running') break;
+            if (task.status !== 'running' && task.status !== 'cancelling') break;
             await new Promise((r) => setTimeout(r, 5));
         }
         expect(task.status).toBe('cancelled');
@@ -107,6 +108,32 @@ describe('TaskRegistry', () => {
         expect(task.status).toBe('cancelled');
         expect(task.result).toBeUndefined();
         expect(task.error).toMatch(/cancelled/);
+    });
+
+    it("cancel() sets status='cancelling' synchronously (before runner settles)", async () => {
+        const task = taskRegistry.start({ kind: 'build' }, async (ctx) => {
+            await new Promise((resolve, reject) => {
+                ctx.signal.addEventListener('abort', () => {
+                    // Defer the rejection so the synchronous post-cancel read
+                    // sees 'cancelling' before execute() flips it to 'cancelled'.
+                    setTimeout(() => {
+                        const err = new Error('aborted');
+                        err.name = 'AbortError';
+                        reject(err);
+                    }, 20);
+                });
+            });
+        });
+        await Promise.resolve();
+        expect(taskRegistry.cancel(task.taskId)).toBe(true);
+        // No await — must be visible synchronously.
+        expect(task.status).toBe('cancelling');
+        // Eventually flips to terminal.
+        for (let i = 0; i < 50; i++) {
+            if (task.status === 'cancelled') break;
+            await new Promise((r) => setTimeout(r, 5));
+        }
+        expect(task.status).toBe('cancelled');
     });
 
     it('cancel() on terminal task returns false', async () => {

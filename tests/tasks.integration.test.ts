@@ -12,6 +12,7 @@ import {
     handleCancelTask,
     handleListTasks,
     handleStartBuild,
+    _setCancelDeadlineMsForTests,
 } from '../src/handlers.js';
 import { taskRegistry } from '../src/tasks/registry.js';
 
@@ -156,6 +157,36 @@ describe('Task lifecycle integration', () => {
 
         const doneOrFailed = await handleListTasks({ status: ['done', 'failed'] });
         expect(doneOrFailed.totalTasks).toBe(2);
+    });
+
+    it("handleCancelTask returns finalStatus='cancelling' when runner ignores abort beyond deadline", async () => {
+        // Shrink the deadline so the test is fast (default is 10s).
+        const prev = _setCancelDeadlineMsForTests(100);
+        try {
+            // Runner that completely ignores ctx.signal — settles long after
+            // the cancel deadline elapses. The runner is intentionally slow
+            // (300ms vs 100ms deadline) so the busy-poll exits while status
+            // is still 'cancelling'.
+            const task = taskRegistry.start({ kind: 'build' }, async () => {
+                await new Promise((r) => setTimeout(r, 300));
+                return { ignored: true };
+            });
+            await new Promise((r) => setTimeout(r, 5));
+
+            const out = await handleCancelTask({ taskId: task.taskId });
+            expect(out.cancelled).toBe(true);
+            expect(out.previousStatus).toBe('running');
+            // Deadline elapsed before runner settled — should report the
+            // honest transient status, NOT 'running' (that would contradict
+            // cancelled:true).
+            expect(out.finalStatus).toBe('cancelling');
+
+            // Runner eventually returns; fix #1 forces 'cancelled' since
+            // the abort signal was already raised when it resolved.
+            await waitFor(() => task.status === 'cancelled');
+        } finally {
+            _setCancelDeadlineMsForTests(prev);
+        }
     });
 
     it('handleStartBuild rejects iOS input missing scheme but creates a failed task', async () => {

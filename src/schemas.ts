@@ -1788,7 +1788,14 @@ export const AuditStateOutputSchema = z.object({
 // ──────────────────────────────────────────────
 
 export const TaskKindSchema = z.enum(['build', 'unit_tests', 'recording']);
-export const TaskStatusSchema = z.enum(['pending', 'running', 'done', 'failed', 'cancelled']);
+export const TaskStatusSchema = z.enum([
+    'pending',
+    'running',
+    'cancelling',
+    'done',
+    'failed',
+    'cancelled',
+]);
 
 export const StartBuildInputSchema = BuildAppInputSchema;
 export const StartBuildOutputSchema = z.object({
