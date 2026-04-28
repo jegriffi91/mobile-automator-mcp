@@ -127,6 +127,37 @@ guard throws — current behavior preserved.
 
 See `docs/phase-4-design.md` for strategy comparison and decision context.
 
+### Compile-time event weaving (Phase 5)
+
+Phase 4 left the `flow_boundary` interval opaque — the timeline knew *when*
+a flow ran but not *what* it did. Phase 5 closes that gap at compile time:
+
+- `executeFlowWithPause` allocates a per-flow `--debug-output` directory
+  under `os.tmpdir()`. Maestro writes `commands-<flowName>.json` artifacts
+  there — the only stable, structured per-step source Maestro emits
+  (`--format` only supports JUNIT/HTML; no JSON stdout exists).
+- The directory path, source flow YAML path, and a `cancelled` flag are
+  carried on `FlowExecutionRecord` alongside the captured stdout.
+- `parseMaestroDebugOutput` (`src/synthesis/flow-weaver.ts`) reads and
+  normalises those artifacts into `FlowStep[]`. It is defensive by design:
+  missing dirs, malformed JSON, or unknown command shapes all degrade to
+  empty/unknown rather than throwing — a bad artifact must not fail the
+  compile.
+- `weaveFlowExecutions` is a pure function that pairs each `flow_start` /
+  `flow_end` boundary with a matching `FlowExecutionRecord` and the parsed
+  steps, emitting `WovenFlowExecution[]` and `RunFlowYamlBlock[]`. It also
+  strips the boundary records from the returned `pollRecords` stream — the
+  woven entries take ownership of that range.
+- `YamlGenerator.toYaml` emits `- runFlow: <relativePath>` directives
+  (with summary comments) at the right chronological position rather than
+  inlining the steps. Re-using the source YAML preserves intent.
+- `TimelineBuilder` renders woven entries as `type: 'flow'` timeline
+  entries, each carrying its parsed `FlowStep[]` for post-hoc debugging.
+- `handleStopAndCompile` orchestrates the above and surfaces a per-flow
+  summary on `StopAndCompileOutput.flowExecutions`.
+
+See `docs/phase-4-design.md` for the original design discussion.
+
 ---
 
 ## Recording vs. Replay
