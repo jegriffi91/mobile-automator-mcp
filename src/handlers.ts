@@ -31,6 +31,7 @@ import {
     buildAndroidApp,
     installAndroidApp,
     uninstallAndroidApp,
+    DEFAULT_BUILD_TIMEOUT_MS,
 } from './build/index.js';
 import { takeIosScreenshot, takeAndroidScreenshot } from './screenshot/index.js';
 import { runIosUnitTests, runAndroidUnitTests } from './testing/index.js';
@@ -183,6 +184,14 @@ export function _setCancelDeadlineMsForTests(ms: number): number {
     CANCEL_DEADLINE_MS = ms;
     return prev;
 }
+
+/**
+ * Grace period above the inner build timeout before the registry watchdog
+ * fires. The inner xcodebuild/gradle timeout already kills hanging child
+ * processes; this outer watchdog only catches the case where the inner kill
+ * itself stalls (e.g. uninterruptible Swift compile, runaway log streaming).
+ */
+export const OUTER_BUILD_GRACE_MS = 30_000;
 
 /**
  * Test-only — replace the Proxyman MCP client used by handlers. Returns the
@@ -1913,9 +1922,10 @@ export async function handleRunFlow(input: RunFlowInput): Promise<RunFlowOutput>
  */
 export async function handleBuildApp(input: BuildAppInput): Promise<BuildAppOutput> {
     console.error(`[MCP] build_app: platform=${input.platform}`);
-    const innerTimeout = input.timeoutMs;
+    const innerTimeout = input.timeoutMs ?? DEFAULT_BUILD_TIMEOUT_MS;
+    const watchdogMs = innerTimeout + OUTER_BUILD_GRACE_MS;
     const task = await taskRegistry.run<BuildAppOutput>(
-        { kind: 'build', timeoutMs: innerTimeout },
+        { kind: 'build', timeoutMs: watchdogMs },
         (ctx) => runBuildTask(input, ctx.signal, (line, stream) => ctx.appendLine(line, stream)),
     );
     if (task.status === 'done' && task.result) return task.result;
@@ -1989,8 +1999,10 @@ async function runBuildTask(
  */
 export async function handleStartBuild(input: StartBuildInput): Promise<StartBuildOutput> {
     console.error(`[MCP] start_build: platform=${input.platform}`);
+    const innerTimeout = input.timeoutMs ?? DEFAULT_BUILD_TIMEOUT_MS;
+    const watchdogMs = innerTimeout + OUTER_BUILD_GRACE_MS;
     const task = taskRegistry.start<BuildAppOutput>(
-        { kind: 'build', timeoutMs: input.timeoutMs },
+        { kind: 'build', timeoutMs: watchdogMs },
         (ctx) => runBuildTask(input, ctx.signal, (line, stream) => ctx.appendLine(line, stream)),
     );
     return {
@@ -2030,6 +2042,7 @@ export async function handlePollTaskStatus(
         recentOutputLines: task.recentOutputLines(input.tailLines),
         lineCount: task.lineCount(),
         error: task.error,
+        cancelReason: task.cancelReason,
     };
 }
 
@@ -2062,6 +2075,7 @@ export async function handleGetTaskResult(
             taskId: task.taskId,
             status: task.status,
             error: task.error,
+            cancelReason: task.cancelReason,
         };
     }
     if (task.kind === 'build') {
@@ -2117,6 +2131,7 @@ export async function handleCancelTask(input: CancelTaskInput): Promise<CancelTa
         cancelled: true,
         previousStatus,
         finalStatus: task.status,
+        cancelReason: task.cancelReason,
     };
 }
 

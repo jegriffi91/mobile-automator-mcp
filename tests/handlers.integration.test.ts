@@ -968,5 +968,28 @@ describe('Handler Integration Tests', () => {
         taskRegistry._clearForTests();
       }
     });
+
+    it('handleStartBuild passes inner timeout + OUTER_BUILD_GRACE_MS to registry', async () => {
+      const { handleStartBuild, OUTER_BUILD_GRACE_MS } = await import('../src/handlers.js');
+      const { taskRegistry } = await import('../src/tasks/registry.js');
+      const startSpy = vi.spyOn(taskRegistry, 'start');
+      try {
+        const out = await handleStartBuild({
+          platform: 'ios',
+          workspacePath: '/nope/X.xcworkspace',
+          scheme: 'X',
+          timeoutMs: 1000,
+        });
+        expect(startSpy).toHaveBeenCalled();
+        const opts = startSpy.mock.calls[0][0] as { kind: string; timeoutMs?: number };
+        expect(opts.kind).toBe('build');
+        expect(opts.timeoutMs).toBe(1000 + OUTER_BUILD_GRACE_MS);
+        // Teardown — cancel the runner so it doesn't shell xcodebuild.
+        taskRegistry.cancel(out.taskId, 'test-teardown');
+      } finally {
+        startSpy.mockRestore();
+        taskRegistry._clearForTests();
+      }
+    });
   });
 });

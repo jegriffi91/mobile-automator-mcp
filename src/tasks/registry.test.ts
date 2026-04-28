@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import { taskRegistry } from './registry.js';
 
 afterEach(() => {
@@ -193,6 +193,253 @@ describe('TaskRegistry', () => {
         });
         expect(task.recentOutputLines()).toEqual(['hello', 'world']);
         expect(task.lineCount()).toBe(2);
+    });
+
+    describe('per-kind retention cap', () => {
+        async function waitTerminal(task: { status: string }): Promise<void> {
+            for (let i = 0; i < 200; i++) {
+                if (task.status !== 'running' && task.status !== 'pending' && task.status !== 'cancelling') return;
+                await new Promise((r) => setTimeout(r, 5));
+            }
+        }
+
+        it('evicts oldest finished task of same kind when cap exceeded', async () => {
+            const t1 = await taskRegistry.run({ kind: 'build', maxRetained: 3 }, async () => 'a');
+            const t2 = await taskRegistry.run({ kind: 'build', maxRetained: 3 }, async () => 'b');
+            const t3 = await taskRegistry.run({ kind: 'build', maxRetained: 3 }, async () => 'c');
+            // 4th should evict t1 (oldest finished).
+            const t4 = await taskRegistry.run({ kind: 'build', maxRetained: 3 }, async () => 'd');
+
+            const builds = taskRegistry.list({ kind: 'build' });
+            expect(builds).toHaveLength(3);
+            expect(taskRegistry.get(t1.taskId)).toBeUndefined();
+            expect(taskRegistry.get(t2.taskId)).toBeDefined();
+            expect(taskRegistry.get(t3.taskId)).toBeDefined();
+            expect(taskRegistry.get(t4.taskId)).toBeDefined();
+        });
+
+        it('never evicts running tasks; logs a one-shot warning when cap breached', async () => {
+            const errSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+            try {
+                // Three runners that wait forever (until aborted).
+                const runners = [0, 1, 2].map(() =>
+                    taskRegistry.start({ kind: 'build', maxRetained: 3 }, async (ctx) => {
+                        await new Promise<void>((_, reject) => {
+                            ctx.signal.addEventListener('abort', () => {
+                                const e = new Error('aborted');
+                                e.name = 'AbortError';
+                                reject(e);
+                            });
+                        });
+                        return 'never';
+                    }),
+                );
+                // Allow them all to reach 'running'.
+                await new Promise((r) => setTimeout(r, 10));
+
+                // 4th breaches the cap; nothing terminal to evict.
+                const t4 = taskRegistry.start({ kind: 'build', maxRetained: 3 }, async (ctx) => {
+                    await new Promise<void>((_, reject) => {
+                        ctx.signal.addEventListener('abort', () => {
+                            const e = new Error('aborted');
+                            e.name = 'AbortError';
+                            reject(e);
+                        });
+                    });
+                    return 'never';
+                });
+
+                // All 4 should still be present (nothing evicted).
+                expect(taskRegistry.list({ kind: 'build' })).toHaveLength(4);
+                for (const t of runners) {
+                    expect(taskRegistry.get(t.taskId)).toBeDefined();
+                }
+                expect(taskRegistry.get(t4.taskId)).toBeDefined();
+
+                // Warning logged exactly once.
+                const warnCalls = errSpy.mock.calls.filter((c) =>
+                    typeof c[0] === 'string' && (c[0] as string).includes('cap=3 breached'),
+                );
+                expect(warnCalls).toHaveLength(1);
+            } finally {
+                errSpy.mockRestore();
+            }
+        });
+
+        it('per-kind isolation: evicting build kind does not touch unit_tests', async () => {
+            const builds = [];
+            for (let i = 0; i < 3; i++) {
+                builds.push(await taskRegistry.run({ kind: 'build', maxRetained: 3 }, async () => `b${i}`));
+            }
+            const tests = [];
+            for (let i = 0; i < 3; i++) {
+                tests.push(
+                    await taskRegistry.run({ kind: 'unit_tests', maxRetained: 3 }, async () => `t${i}`),
+                );
+            }
+
+            // Force eviction in build kind by adding a 4th build.
+            await taskRegistry.run({ kind: 'build', maxRetained: 3 }, async () => 'b4');
+
+            const buildList = taskRegistry.list({ kind: 'build' });
+            const testList = taskRegistry.list({ kind: 'unit_tests' });
+            expect(buildList).toHaveLength(3);
+            expect(testList).toHaveLength(3);
+            // Oldest build evicted.
+            expect(taskRegistry.get(builds[0].taskId)).toBeUndefined();
+            // All unit_tests intact.
+            for (const t of tests) {
+                expect(taskRegistry.get(t.taskId)).toBeDefined();
+            }
+        });
+
+        it('warning latch resets after a successful eviction', async () => {
+            const errSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+            try {
+                // Helper: spawn a runner that blocks on abort.
+                const blocking = () =>
+                    taskRegistry.start({ kind: 'build', maxRetained: 2 }, async (ctx) => {
+                        await new Promise<void>((_, reject) => {
+                            ctx.signal.addEventListener('abort', () => {
+                                const e = new Error('aborted');
+                                e.name = 'AbortError';
+                                reject(e);
+                            });
+                        });
+                        return 'x';
+                    });
+
+                // Phase A: fill cap=2 with two running tasks, then a 3rd ->
+                // breach + warn (count #1).
+                const a = blocking();
+                const b = blocking();
+                await new Promise((r) => setTimeout(r, 10));
+                blocking(); // 3rd task — cap breached, all running -> warns.
+
+                let warnCount = errSpy.mock.calls.filter((c) =>
+                    typeof c[0] === 'string' && (c[0] as string).includes('cap=2 breached'),
+                ).length;
+                expect(warnCount).toBe(1);
+
+                // Phase B: let one of the running tasks settle to terminal so
+                // a future breach can evict.
+                taskRegistry.cancel(a.taskId);
+                await waitTerminal(a);
+
+                // Now start a 4th — this evicts terminal task `a`. Latch resets.
+                blocking();
+                expect(taskRegistry.get(a.taskId)).toBeUndefined();
+                // No new warning emitted (eviction succeeded).
+                warnCount = errSpy.mock.calls.filter((c) =>
+                    typeof c[0] === 'string' && (c[0] as string).includes('cap=2 breached'),
+                ).length;
+                expect(warnCount).toBe(1);
+
+                // Phase C: cancel another -> let it settle -> back to all running
+                // by adding more. Actually simpler: with latch reset, breach again
+                // while everyone is still running should re-warn.
+                // Cancel `b` to terminal then evict it via a 5th task.
+                taskRegistry.cancel(b.taskId);
+                await waitTerminal(b);
+                blocking(); // evicts `b` cleanly — no warn.
+
+                // Now the registry has 3 running tasks at cap=2. Spawning another
+                // breaches with no terminal candidates -> warning re-arms and fires.
+                blocking();
+                warnCount = errSpy.mock.calls.filter((c) =>
+                    typeof c[0] === 'string' && (c[0] as string).includes('cap=2 breached'),
+                ).length;
+                expect(warnCount).toBe(2);
+            } finally {
+                errSpy.mockRestore();
+            }
+        });
+
+        it('env-var MCA_TASK_MAX_RETAINED overrides the default', async () => {
+            const prev = process.env.MCA_TASK_MAX_RETAINED;
+            process.env.MCA_TASK_MAX_RETAINED = '2';
+            try {
+                for (let i = 0; i < 4; i++) {
+                    await taskRegistry.run({ kind: 'build' }, async () => `v${i}`);
+                }
+                expect(taskRegistry.list({ kind: 'build' })).toHaveLength(2);
+            } finally {
+                if (prev === undefined) delete process.env.MCA_TASK_MAX_RETAINED;
+                else process.env.MCA_TASK_MAX_RETAINED = prev;
+            }
+        });
+    });
+
+    describe('watchdog timeout', () => {
+        it('watchdog cancels slow runner that ignores abort', async () => {
+            // Runner resolves after 300ms ignoring signal; watchdog at 50ms
+            // should cancel it. After settle, status='cancelled' and
+            // cancelReason reflects the watchdog.
+            const task = taskRegistry.start({ kind: 'build', timeoutMs: 50 }, async () => {
+                await new Promise((r) => setTimeout(r, 300));
+                return { ignored: true };
+            });
+            // Wait for terminal.
+            for (let i = 0; i < 200; i++) {
+                if (task.status !== 'running' && task.status !== 'cancelling') break;
+                await new Promise((r) => setTimeout(r, 5));
+            }
+            expect(task.status).toBe('cancelled');
+            expect(task.cancelReason).toBe('watchdog timeout (50ms)');
+            expect(task.result).toBeUndefined();
+        });
+
+        it('explicit cancel before watchdog wins (user reason preserved)', async () => {
+            const task = taskRegistry.start({ kind: 'build', timeoutMs: 1000 }, async (ctx) => {
+                await new Promise<void>((_, reject) => {
+                    ctx.signal.addEventListener('abort', () => {
+                        const err = new Error('aborted');
+                        err.name = 'AbortError';
+                        reject(err);
+                    });
+                });
+                return 'never';
+            });
+            // Let runner attach the abort listener.
+            await new Promise((r) => setTimeout(r, 5));
+            expect(taskRegistry.cancel(task.taskId, 'user reason')).toBe(true);
+            for (let i = 0; i < 200; i++) {
+                if (task.status === 'cancelled') break;
+                await new Promise((r) => setTimeout(r, 5));
+            }
+            expect(task.status).toBe('cancelled');
+            expect(task.cancelReason).toBe('user reason');
+        });
+
+        it('natural completion before watchdog clears the timer', async () => {
+            const task = await taskRegistry.run({ kind: 'build', timeoutMs: 5000 }, async () => {
+                await new Promise((r) => setTimeout(r, 20));
+                return 42;
+            });
+            expect(task.status).toBe('done');
+            expect(task.result).toBe(42);
+            expect(task.cancelReason).toBeUndefined();
+        });
+
+        it('watchdog cancelReason does not change after settle', async () => {
+            // Runner ignores abort and eventually resolves; watchdog should
+            // fire exactly once. cancelReason should remain stable.
+            const task = taskRegistry.start({ kind: 'build', timeoutMs: 30 }, async () => {
+                await new Promise((r) => setTimeout(r, 200));
+                return 'late';
+            });
+            // Wait for terminal.
+            for (let i = 0; i < 200; i++) {
+                if (task.status !== 'running' && task.status !== 'cancelling') break;
+                await new Promise((r) => setTimeout(r, 5));
+            }
+            expect(task.status).toBe('cancelled');
+            const reasonAfterSettle = task.cancelReason;
+            expect(reasonAfterSettle).toBe('watchdog timeout (30ms)');
+            // Wait some more — verify nothing rewrites it.
+            await new Promise((r) => setTimeout(r, 100));
+            expect(task.cancelReason).toBe(reasonAfterSettle);
+        });
     });
 
     it('recentOutputLines visible mid-flight (before terminal)', async () => {

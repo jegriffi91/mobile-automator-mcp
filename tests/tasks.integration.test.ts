@@ -189,6 +189,45 @@ describe('Task lifecycle integration', () => {
         }
     });
 
+    it('poll_task_status surfaces cancelReason after explicit cancel', async () => {
+        const task = taskRegistry.start({ kind: 'build' }, async (ctx) => {
+            await new Promise<void>((_, reject) => {
+                ctx.signal.addEventListener('abort', () => {
+                    const e = new Error('aborted');
+                    e.name = 'AbortError';
+                    reject(e);
+                });
+            });
+            return { dummy: true };
+        });
+        await new Promise((r) => setTimeout(r, 10));
+        await handleCancelTask({ taskId: task.taskId, reason: 'manual abort' });
+        await waitFor(() => task.status === 'cancelled');
+
+        const polled = await handlePollTaskStatus({ taskId: task.taskId });
+        expect(polled.cancelReason).toBe('manual abort');
+    });
+
+    it('get_task_result surfaces cancelReason for cancelled tasks', async () => {
+        const task = taskRegistry.start({ kind: 'build' }, async (ctx) => {
+            await new Promise<void>((_, reject) => {
+                ctx.signal.addEventListener('abort', () => {
+                    const e = new Error('aborted');
+                    e.name = 'AbortError';
+                    reject(e);
+                });
+            });
+            return { dummy: true };
+        });
+        await new Promise((r) => setTimeout(r, 10));
+        await handleCancelTask({ taskId: task.taskId, reason: 'integration cancel' });
+        await waitFor(() => task.status === 'cancelled');
+
+        const got = await handleGetTaskResult({ taskId: task.taskId });
+        expect(got.status).toBe('cancelled');
+        expect(got.cancelReason).toBe('integration cancel');
+    });
+
     it('handleStartBuild rejects iOS input missing scheme but creates a failed task', async () => {
         // Routed through the registry: the runner throws synchronously inside
         // the validation, so the task ends up in `failed` (not surfaced as a

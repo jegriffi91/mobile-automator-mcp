@@ -24,6 +24,13 @@ export type TaskStatus =
 
 const DEFAULT_PRUNE_INTERVAL_MS = 60_000;
 const DEFAULT_TASK_TTL_MS = 60 * 60 * 1000; // 1h
+const DEFAULT_MAX_RETAINED_PER_KIND = 50;
+
+function parseMaxRetained(raw: string | undefined): number | undefined {
+    if (!raw) return undefined;
+    const n = Number(raw);
+    return Number.isFinite(n) && n > 0 ? Math.floor(n) : undefined;
+}
 
 export interface TaskContext {
     readonly signal: AbortSignal;
@@ -42,6 +49,12 @@ export interface Task<TResult = unknown> {
     lineCount(): number;
     result?: TResult;
     error?: string;
+    /**
+     * Set when the task transitioned to cancelling/cancelled via cancel() or
+     * watchdog timeout. Surfaces "watchdog timeout (Xms)" vs user-supplied
+     * reason so agents can distinguish.
+     */
+    cancelReason?: string;
 }
 
 export type TaskRunner<TResult> = (ctx: TaskContext) => Promise<TResult>;
@@ -50,6 +63,12 @@ export interface RegisterOptions {
     kind: TaskKind;
     timeoutMs?: number;
     ringBuffer?: { maxLines?: number; maxBytes?: number };
+    /**
+     * Per-kind retention cap for finished tasks. Newest finished evicts oldest
+     * finished when count exceeds the cap. Running/cancelling/pending tasks
+     * are NEVER evicted. Default: env MCA_TASK_MAX_RETAINED or 50.
+     */
+    maxRetained?: number;
 }
 
 export interface ListTasksFilter {
@@ -79,11 +98,53 @@ interface InternalTask<TResult = unknown> extends Task<TResult> {
     _buffer: RingBuffer;
     _settle: () => void;
     _terminalPromise: Promise<void>;
+    _watchdog?: NodeJS.Timeout;
 }
 
 class TaskRegistryImpl implements TaskRegistry {
     private readonly tasks = new Map<string, InternalTask>();
     private pruneTimer?: NodeJS.Timeout;
+    private readonly capWarnedKinds = new Set<TaskKind>();
+
+    /**
+     * Evict oldest *terminal* tasks of the given kind until count <= cap.
+     * Terminal = status in {'done','failed','cancelled'}. Running/cancelling/
+     * pending are skipped. If no terminal candidates exist while over cap,
+     * log a one-shot warning per kind and return without eviction.
+     *
+     * Returns the number of tasks evicted.
+     */
+    private evictIfOverCap(kind: TaskKind, cap: number): number {
+        const sameKind: InternalTask[] = [];
+        for (const t of this.tasks.values()) {
+            if (t.kind === kind) sameKind.push(t as InternalTask);
+        }
+        if (sameKind.length <= cap) return 0;
+
+        const TERMINAL: TaskStatus[] = ['done', 'failed', 'cancelled'];
+        const terminal = sameKind
+            .filter((t) => TERMINAL.includes(t.status) && t.finishedAt)
+            .sort((a, b) => Date.parse(a.finishedAt!) - Date.parse(b.finishedAt!));
+
+        const overBy = sameKind.length - cap;
+        let evicted = 0;
+        for (const t of terminal) {
+            if (evicted >= overBy) break;
+            this.tasks.delete(t.taskId);
+            evicted += 1;
+        }
+
+        if (evicted > 0) {
+            this.capWarnedKinds.delete(kind); // re-arm warning for future breaches
+        } else if (!this.capWarnedKinds.has(kind)) {
+            // eslint-disable-next-line no-console
+            console.error(
+                `[TaskRegistry] kind=${kind} cap=${cap} breached (${sameKind.length} tasks, all in-flight); accepting breach`,
+            );
+            this.capWarnedKinds.add(kind);
+        }
+        return evicted;
+    }
 
     start<TResult>(opts: RegisterOptions, run: TaskRunner<TResult>): Task<TResult> {
         const taskId = randomUUID();
@@ -131,6 +192,31 @@ class TaskRegistryImpl implements TaskRegistry {
         };
 
         this.tasks.set(taskId, task as InternalTask);
+
+        const cap = opts.maxRetained
+            ?? parseMaxRetained(process.env.MCA_TASK_MAX_RETAINED)
+            ?? DEFAULT_MAX_RETAINED_PER_KIND;
+        this.evictIfOverCap(opts.kind, cap);
+
+        // Install watchdog AFTER task is in the map (so cancel() during the
+        // timer can find it) but BEFORE queueMicrotask (so the runner sees an
+        // already-armed controller if the timer somehow fires synchronously).
+        if (opts.timeoutMs && opts.timeoutMs > 0) {
+            const ms = opts.timeoutMs;
+            task._watchdog = setTimeout(() => {
+                // Mirrors cancel() but with a watchdog-specific reason. Only
+                // fires if task hasn't already settled.
+                if (task.status !== 'running' && task.status !== 'pending') return;
+                const reasonStr = `watchdog timeout (${ms}ms)`;
+                const err = new Error(reasonStr);
+                err.name = 'AbortError';
+                task.cancelReason = reasonStr;
+                task._cleanup.abort(err);
+                if (!task._controller.signal.aborted) task._controller.abort(err);
+                task.status = 'cancelling';
+            }, ms);
+            if (typeof task._watchdog.unref === 'function') task._watchdog.unref();
+        }
 
         const ctx: TaskContext = {
             signal: controller.signal,
@@ -191,6 +277,10 @@ class TaskRegistryImpl implements TaskRegistry {
                 task.error = err instanceof Error ? err.message : String(err);
             }
         } finally {
+            if (task._watchdog) {
+                clearTimeout(task._watchdog);
+                task._watchdog = undefined;
+            }
             task.finishedAt = new Date().toISOString();
             task._settle();
         }
@@ -233,8 +323,10 @@ class TaskRegistryImpl implements TaskRegistry {
         if (!task) return false;
         if (task.status !== 'running' && task.status !== 'pending') return false;
 
-        const reasonErr = new Error(reason ?? 'cancelled');
+        const reasonStr = reason ?? 'cancelled';
+        const reasonErr = new Error(reasonStr);
         reasonErr.name = 'AbortError';
+        task.cancelReason = reasonStr;
         task._cleanup.abort(reasonErr);
         if (!task._controller.signal.aborted) {
             task._controller.abort(reasonErr);
@@ -284,6 +376,10 @@ class TaskRegistryImpl implements TaskRegistry {
     _clearForTests(): void {
         // Abort any outstanding tasks so background promises settle cleanly.
         for (const t of this.tasks.values()) {
+            if (t._watchdog) {
+                clearTimeout(t._watchdog);
+                t._watchdog = undefined;
+            }
             if (
                 t.status === 'running' ||
                 t.status === 'pending' ||
@@ -298,6 +394,7 @@ class TaskRegistryImpl implements TaskRegistry {
             }
         }
         this.tasks.clear();
+        this.capWarnedKinds.clear();
         this.stopPruneTimer();
     }
 }

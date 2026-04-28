@@ -1821,6 +1821,7 @@ export const PollTaskStatusOutputSchema = z.object({
     lineCount: z.number().int().nonnegative()
         .describe('Lifetime line count (may exceed recentOutputLines.length when ring buffer evicted older lines).'),
     error: z.string().optional(),
+    cancelReason: z.string().optional(),
     notFound: z.boolean().optional(),
 });
 
@@ -1830,6 +1831,7 @@ export const GetTaskResultOutputSchema = z.object({
     status: TaskStatusSchema,
     notFound: z.boolean().optional(),
     error: z.string().optional(),
+    cancelReason: z.string().optional(),
     result: z
         .discriminatedUnion('kind', [
             z.object({ kind: z.literal('build'), build: BuildAppOutputSchema }),
@@ -1846,6 +1848,7 @@ export const CancelTaskOutputSchema = z.object({
     cancelled: z.boolean(),
     previousStatus: TaskStatusSchema.optional(),
     finalStatus: TaskStatusSchema.optional(),
+    cancelReason: z.string().optional(),
     notFound: z.boolean().optional(),
 });
 

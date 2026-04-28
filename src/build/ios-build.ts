@@ -20,7 +20,7 @@ import { spawnStream } from './stream.js';
 
 const execFileAsync = promisify(execFile);
 
-const DEFAULT_BUILD_TIMEOUT_MS = 15 * 60 * 1000;
+export const DEFAULT_BUILD_TIMEOUT_MS = 15 * 60 * 1000;
 const DEFAULT_BOOT_TIMEOUT_MS = 2 * 60 * 1000;
 const DEFAULT_INSTALL_TIMEOUT_MS = 2 * 60 * 1000;
 
