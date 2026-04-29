@@ -9,7 +9,7 @@ describe('DEFAULT_TIMEOUTS', () => {
         expect(DEFAULT_TIMEOUTS.hierarchyLiteMs).toBe(10_000);
         expect(DEFAULT_TIMEOUTS.actionMs).toBe(15_000);
         expect(DEFAULT_TIMEOUTS.testRunMs).toBe(120_000);
-        expect(DEFAULT_TIMEOUTS.setupValidationMs).toBe(5_000);
+        expect(DEFAULT_TIMEOUTS.setupValidationMs).toBe(15_000);
         expect(DEFAULT_TIMEOUTS.daemonRequestMs).toBe(15_000);
         expect(DEFAULT_TIMEOUTS.daemonShutdownMs).toBe(3_000);
         expect(DEFAULT_TIMEOUTS.driverCooldownMs).toBe(3_000);

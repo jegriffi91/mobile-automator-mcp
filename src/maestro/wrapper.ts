@@ -489,15 +489,22 @@ export class MaestroWrapper {
         const built = buildActionYaml(action, element, textInput);
         if (!built.ok) return { success: false, error: built.error };
 
+        const tmpFile = path.join(os.tmpdir(), `maestro-action-${randomUUID()}.yaml`);
+        await fs.writeFile(tmpFile, built.yaml, 'utf-8');
         try {
-            const tmpFile = path.join(os.tmpdir(), `maestro-action-${randomUUID()}.yaml`);
-            await fs.writeFile(tmpFile, built.yaml, 'utf-8');
             await execFileAsync(this.maestroBin, this.buildArgs(['test', tmpFile]), { env: getExecEnv(), timeout: this.timeouts.actionMs });
+            // Only delete the temp file on success — preserve it on failure for debugging.
             await fs.unlink(tmpFile).catch(() => { });
             return { success: true };
         } catch (error: any) {
-            console.error(`[MaestroWrapper] executeAction failed:`, error);
-            return { success: false, error: error.message || String(error) };
+            const details = [
+                error.message ?? String(error),
+                error.stderr && `stderr: ${error.stderr.toString().trim()}`,
+                error.stdout && `stdout: ${error.stdout.toString().trim()}`,
+                error.killed && `killed by signal: ${error.signal ?? 'unknown'}`,
+            ].filter(Boolean).join('\n');
+            console.error(`[MaestroWrapper] executeAction failed:\n${details}\n(yaml preserved at: ${tmpFile})`);
+            return { success: false, error: details };
         }
     }
 

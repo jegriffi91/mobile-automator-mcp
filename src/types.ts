@@ -206,7 +206,7 @@ export interface TimeoutConfig {
     actionMs: number;
     /** Timeout for full test run (ms). Default: 120000 */
     testRunMs: number;
-    /** Timeout for setup validation calls (ms). Default: 5000 */
+    /** Timeout for setup validation calls (ms). Default: 15000 */
     setupValidationMs: number;
     /** Timeout for daemon JSON-RPC requests (ms). Default: 15000 */
     daemonRequestMs: number;
@@ -231,7 +231,7 @@ export const DEFAULT_TIMEOUTS: TimeoutConfig = {
     hierarchyLiteMs: 10_000,
     actionMs: 15_000,
     testRunMs: 120_000,
-    setupValidationMs: 5_000,
+    setupValidationMs: 15_000,
     daemonRequestMs: 15_000,
     daemonShutdownMs: 3_000,
     driverCooldownMs: 3_000,
