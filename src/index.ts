@@ -247,7 +247,7 @@ server.registerTool(
     {
         title: 'Execute UI Action',
         description:
-            'Dispatch a UI action (tap, type, scroll, etc.) on a target element. Logs the interaction to session memory for later test synthesis. Selector priority: id > accessibilityLabel > text.',
+            'Dispatch a UI action (tap, type, scroll, etc.) on a target element. Logs the interaction to session memory for later test synthesis. Selector priority: id > accessibilityLabel > text. When called during an active recording session, taps and inputText route through the Maestro daemon\'s JSON-RPC for sub-second latency without port-7001 conflicts. Scroll/swipe are not supported via the daemon; use run_flow for complex sequences.',
         inputSchema: ExecuteUIActionInputSchema,
         outputSchema: ExecuteUIActionOutputSchema,
         annotations: {

@@ -31,7 +31,9 @@ export function assertNoActiveSessions(
         `(sessions: ${sessionIds.join(', ')}). ` +
         `'${toolName}' uninstalls the XCTest driver on port 7001, which would ` +
         `terminate the session's hierarchy poller mid-flow. ` +
-        `Either call 'stop_and_compile_test' first, or use 'execute_ui_action' ` +
-        `to drive UI steps through the existing session's driver.`,
+        `execute_ui_action works mid-session via daemon-routed actions (Phase 7) — ` +
+        `or set MCA_FLOW_PAUSE_RESUME=on to enable pause/resume around flows ` +
+        `(this is now the default; if you are seeing this message, ` +
+        `MCA_FLOW_PAUSE_RESUME=off is set in your environment).`,
     );
 }
