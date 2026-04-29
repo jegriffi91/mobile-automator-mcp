@@ -237,6 +237,12 @@ export class MaestroDaemonDriver implements AutomationDriver {
     async start(deviceId?: string): Promise<void> {
         this.deviceId = deviceId;
         this.deviceIdForRespawn = deviceId;
+        // Wire the driver-dead recovery hook BEFORE start() so the initialize
+        // handshake itself benefits from it.
+        this.daemon.setDriverRespawnHook(async () => {
+            console.error('[MaestroDaemonDriver] driver-dead detected, respawning XCTest driver');
+            await this.daemon.respawnXCTestDriver();
+        });
         try {
             await this.daemon.start(deviceId);
             this.daemonStarted = true;

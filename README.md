@@ -53,7 +53,7 @@ The system orchestrates two async data streams — **UI interactions** (via Maes
 ### Prerequisites
 
 - **Node.js** v20+
-- **Maestro CLI** — `curl -Ls "https://get.maestro.mobile.dev" | bash`
+- **Maestro CLI 2.5.0+** — `curl -Ls "https://get.maestro.mobile.dev" | bash` (older versions log a warning at startup; 2.3.x in particular exhibits XCTest driver flakiness on iOS port 22087)
 - **Proxyman** macOS 5.20+ with CLI — see [Proxyman Setup](docs/proxyman-setup.md)
 - A booted **iOS Simulator** or **Android Emulator**
 

@@ -7,7 +7,7 @@
  * success and failure.
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import * as os from 'os';
@@ -655,6 +655,106 @@ describe('runFeatureTest — mocks in spec (Phase 0 install)', () => {
         // user can clean up manually — vs. crashing here would mask the real
         // pass/fail signal).
         expect(result.passed).toBe(true);
+    });
+});
+
+describe('runFeatureTest — CLI fallback (MCA_FEATURE_TEST_CLI_FALLBACK)', () => {
+    const originalFlag = process.env['MCA_FEATURE_TEST_CLI_FALLBACK'];
+    beforeEach(() => {
+        delete process.env['MCA_FEATURE_TEST_CLI_FALLBACK'];
+    });
+    afterEach(() => {
+        if (originalFlag === undefined) {
+            delete process.env['MCA_FEATURE_TEST_CLI_FALLBACK'];
+        } else {
+            process.env['MCA_FEATURE_TEST_CLI_FALLBACK'] = originalFlag;
+        }
+    });
+
+    it('flag unset, daemon healthy → daemon path, no CLI invoked', async () => {
+        const cliSpy = vi.fn();
+        const deps = makeDeps({ executeUIActionCli: cliSpy });
+        const result = await runFeatureTest(
+            { spec: { ...MINIMAL_SPEC, actions: [{ tap: { id: 'x' } }] } },
+            deps,
+        );
+        expect(result.passed).toBe(true);
+        expect(deps.executeUIAction).toHaveBeenCalledTimes(1);
+        expect(cliSpy).not.toHaveBeenCalled();
+        expect(result.actions.interactions[0].transport).toBe('daemon');
+    });
+
+    it('flag unset, daemon fails → bubbles error (current behavior preserved)', async () => {
+        const cliSpy = vi.fn();
+        const deps = makeDeps({
+            executeUIAction: vi.fn().mockRejectedValue(new Error('daemon dead')),
+            executeUIActionCli: cliSpy,
+        });
+        const result = await runFeatureTest(
+            { spec: { ...MINIMAL_SPEC, actions: [{ tap: { id: 'x' } }] } },
+            deps,
+        );
+        expect(result.passed).toBe(false);
+        expect(result.error).toContain('daemon dead');
+        expect(cliSpy).not.toHaveBeenCalled();
+    });
+
+    it('flag set, daemon healthy → daemon path, no CLI invoked', async () => {
+        process.env['MCA_FEATURE_TEST_CLI_FALLBACK'] = '1';
+        const cliSpy = vi.fn();
+        const deps = makeDeps({ executeUIActionCli: cliSpy });
+        const result = await runFeatureTest(
+            { spec: { ...MINIMAL_SPEC, actions: [{ tap: { id: 'x' } }] } },
+            deps,
+        );
+        expect(result.passed).toBe(true);
+        expect(cliSpy).not.toHaveBeenCalled();
+        expect(result.actions.interactions[0].transport).toBe('daemon');
+    });
+
+    it('flag set, daemon fails → CLI fallback runs and result reports transport=cli-fallback', async () => {
+        process.env['MCA_FEATURE_TEST_CLI_FALLBACK'] = '1';
+        const cliSpy = vi.fn().mockResolvedValue({ success: true, message: 'cli ok' });
+        const deps = makeDeps({
+            executeUIAction: vi.fn().mockRejectedValue(new Error('Failed to connect to /127.0.0.1:22087')),
+            executeUIActionCli: cliSpy,
+        });
+        const result = await runFeatureTest(
+            { spec: { ...MINIMAL_SPEC, actions: [{ tap: { id: 'x' } }] } },
+            deps,
+        );
+        expect(result.passed).toBe(true);
+        expect(cliSpy).toHaveBeenCalledTimes(1);
+        expect(result.actions.interactions).toHaveLength(1);
+        expect(result.actions.interactions[0].transport).toBe('cli-fallback');
+    });
+
+    it('flag set but no CLI dep wired → bubbles the daemon error (unchanged behavior)', async () => {
+        process.env['MCA_FEATURE_TEST_CLI_FALLBACK'] = '1';
+        const deps = makeDeps({
+            executeUIAction: vi.fn().mockRejectedValue(new Error('daemon dead')),
+            // executeUIActionCli intentionally omitted
+        });
+        const result = await runFeatureTest(
+            { spec: { ...MINIMAL_SPEC, actions: [{ tap: { id: 'x' } }] } },
+            deps,
+        );
+        expect(result.passed).toBe(false);
+        expect(result.error).toContain('daemon dead');
+    });
+
+    it('flag set, both daemon AND CLI fail → bubbles the CLI error', async () => {
+        process.env['MCA_FEATURE_TEST_CLI_FALLBACK'] = '1';
+        const deps = makeDeps({
+            executeUIAction: vi.fn().mockRejectedValue(new Error('daemon dead')),
+            executeUIActionCli: vi.fn().mockRejectedValue(new Error('CLI also dead')),
+        });
+        const result = await runFeatureTest(
+            { spec: { ...MINIMAL_SPEC, actions: [{ tap: { id: 'x' } }] } },
+            deps,
+        );
+        expect(result.passed).toBe(false);
+        expect(result.error).toContain('CLI also dead');
     });
 });
 

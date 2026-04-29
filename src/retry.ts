@@ -29,6 +29,13 @@ export interface RetryOptions {
     isRetryable?: (err: unknown, attempt: number) => boolean;
     /** Tag for log lines. Default 'retry'. */
     name?: string;
+    /**
+     * Callback fired between a failed attempt and the backoff sleep that
+     * precedes the next attempt. Awaited — long-running recovery work
+     * (e.g. respawning a dead driver) blocks the retry loop until it
+     * finishes. Throwing here propagates as the final error.
+     */
+    onRetry?: (err: unknown, attempt: number) => void | Promise<void>;
 }
 
 export class RetryAbortError extends Error {
@@ -118,6 +125,11 @@ export async function retry<T>(
                 delayMs,
                 err instanceof Error ? err.message : String(err),
             );
+            if (opts.onRetry) {
+                // A throw inside the hook is fatal: it propagates as the
+                // final error and stops the retry loop.
+                await opts.onRetry(err, attempt);
+            }
             await sleepWithAbort(delayMs, opts.signal);
         }
     }

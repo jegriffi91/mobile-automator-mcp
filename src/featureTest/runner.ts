@@ -71,6 +71,13 @@ export interface RunnerDeps {
     installRunnerMock(input: RunnerMockInstall): Promise<RunnerMockInstalled>;
     deleteRunnerMock(proxymanRuleId: string): Promise<void>;
     executeUIAction(input: ExecuteUIActionInput): Promise<ExecuteUIActionOutput>;
+    /**
+     * Optional pure-CLI execution path used as a fallback when the primary
+     * daemon path throws AND `MCA_FEATURE_TEST_CLI_FALLBACK=1` is set. Wired
+     * up by `handlers.ts` via MaestroCliDriver. Tests can omit it or supply
+     * a mock to verify gating semantics.
+     */
+    executeUIActionCli?: (input: ExecuteUIActionInput) => Promise<ExecuteUIActionOutput>;
     stopAndCompile(input: StopAndCompileInput): Promise<StopAndCompileOutput>;
     verifyParallelism(input: VerifyNetworkParallelismInput): Promise<VerifyNetworkParallelismOutput>;
     verifyOnScreen(input: VerifyNetworkOnScreenInput): Promise<VerifyNetworkOnScreenOutput>;
@@ -271,11 +278,27 @@ export async function runFeatureTest(
 
             const uiInput = toExecuteActionInput(action, sessionId);
             const callStart = Date.now();
-            await deps.executeUIAction(uiInput);
+            const cliFallbackEnabled = process.env['MCA_FEATURE_TEST_CLI_FALLBACK'] === '1';
+            let transport: 'daemon' | 'cli-fallback' = 'daemon';
+            try {
+                await deps.executeUIAction(uiInput);
+            } catch (daemonErr) {
+                if (cliFallbackEnabled && deps.executeUIActionCli) {
+                    console.error(
+                        `[run_feature_test] daemon path failed for action=${uiInput.action}, falling back to CLI:`,
+                        daemonErr,
+                    );
+                    await deps.executeUIActionCli(uiInput);
+                    transport = 'cli-fallback';
+                } else {
+                    throw daemonErr;
+                }
+            }
             result.actions.interactions.push({
                 action: uiInput.action,
                 element: describeElement(uiInput),
                 durationMs: Date.now() - callStart,
+                transport,
             });
         }
     } catch (err) {

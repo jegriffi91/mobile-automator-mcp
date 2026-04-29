@@ -1568,6 +1568,9 @@ const InteractionSummarySchema = z.object({
     element: z.string().describe('Human-readable target description'),
     durationMs: z.number(),
     waitMs: z.number().optional().describe('Set when the entry is a `wait` pause'),
+    transport: z.enum(['daemon', 'cli-fallback']).optional().describe(
+        'Which path executed this action. `cli-fallback` indicates the daemon path failed and the runner re-issued the action via the Maestro CLI (only set when MCA_FEATURE_TEST_CLI_FALLBACK=1).',
+    ),
 });
 
 const AssertionResultSchema = z.object({

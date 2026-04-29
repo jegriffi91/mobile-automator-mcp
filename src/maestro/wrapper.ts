@@ -17,7 +17,7 @@ import { Socket } from 'net';
 import { randomUUID } from 'crypto';
 import type { UIActionType, UIElement, MobilePlatform, TimeoutConfig } from '../types.js';
 import { DEFAULT_TIMEOUTS } from '../types.js';
-import { resolveMaestroBin, getExecEnv } from './env.js';
+import { resolveMaestroBin, getExecEnv, checkMaestroVersion } from './env.js';
 import { withRetry, isTransientMaestroError } from './retry.js';
 import { execFileWithAbort } from '../build/utils.js';
 import { spawnStream } from '../build/stream.js';
@@ -199,8 +199,10 @@ export class MaestroWrapper {
         }
 
         // 2. Check Maestro is executable
+        let versionStdout = '';
         try {
-            await execFileAsync(this.maestroBin, ['--version'], { env, timeout: this.timeouts.setupValidationMs });
+            const result = await execFileAsync(this.maestroBin, ['--version'], { env, timeout: this.timeouts.setupValidationMs });
+            versionStdout = `${result.stdout ?? ''}\n${result.stderr ?? ''}`;
         } catch (error: any) {
             if (error.killed || error.signal === 'SIGTERM') {
                 throw new Error('Maestro validation timed out (5s). Is Maestro installed correctly?');
@@ -211,7 +213,15 @@ export class MaestroWrapper {
             );
         }
 
-        console.error(`[MaestroWrapper] validateSetup: Java + Maestro OK (bin: ${this.maestroBin})`);
+        // 3. Soft version check — warn (don't throw) when below MIN_MAESTRO_VERSION.
+        const versionCheck = checkMaestroVersion(versionStdout);
+        if (!versionCheck.ok && versionCheck.warning) {
+            console.error(`[MaestroWrapper] validateSetup: WARNING — ${versionCheck.warning}`);
+        }
+
+        console.error(
+            `[MaestroWrapper] validateSetup: Java + Maestro OK (bin: ${this.maestroBin}, version: ${versionCheck.version ?? 'unknown'})`,
+        );
     }
 
     // getExecEnv() and resolveMaestroBin() moved to env.ts as shared utilities
