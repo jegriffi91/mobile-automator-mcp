@@ -221,7 +221,7 @@ server.registerTool(
     {
         title: 'Get UI Hierarchy',
         description:
-            'Capture the current UI element tree from a booted simulator. Works standalone (auto-targets the sole booted device) or within a recording session via sessionId. Returns a normalized accessibility tree. Use interactiveOnly to filter to tappable elements. Raw output is opt-in via includeRawOutput.',
+            'Capture the current UI element tree from a booted simulator. Works standalone (auto-targets the sole booted device) or within a recording session via sessionId. Returns a normalized accessibility tree. Each element includes bounds (x, y, width, height) in pixels, useful for point-based taps when selectors don\'t match. Use interactiveOnly to filter to tappable elements. Raw output is opt-in via includeRawOutput.',
         inputSchema: GetUIHierarchyInputSchema,
         outputSchema: GetUIHierarchyOutputSchema,
         annotations: {

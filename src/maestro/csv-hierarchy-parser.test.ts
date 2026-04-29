@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { parseAttributes, parseCsvHierarchy } from './csv-hierarchy-parser.js';
+import { parseAttributes, parseBoundsString, parseCsvHierarchy } from './csv-hierarchy-parser.js';
 
 describe('parseAttributes', () => {
   it('should parse semicolon-separated key=value pairs', () => {
@@ -29,6 +29,28 @@ describe('parseAttributes', () => {
   it('should handle single attribute', () => {
     const result = parseAttributes('enabled=true');
     expect(result).toEqual({ enabled: 'true' });
+  });
+});
+
+describe('parseBoundsString', () => {
+  it('parses a normal bounds string into {x, y, width, height}', () => {
+    expect(parseBoundsString('[68,255][333,312]')).toEqual({ x: 68, y: 255, width: 265, height: 57 });
+  });
+
+  it('returns undefined for an empty string', () => {
+    expect(parseBoundsString('')).toBeUndefined();
+  });
+
+  it('returns undefined for garbage input', () => {
+    expect(parseBoundsString('garbage')).toBeUndefined();
+  });
+
+  it('handles negative coordinates', () => {
+    expect(parseBoundsString('[-10,0][20,40]')).toEqual({ x: -10, y: 0, width: 30, height: 40 });
+  });
+
+  it('handles zero-size bounds', () => {
+    expect(parseBoundsString('[0,0][0,0]')).toEqual({ x: 0, y: 0, width: 0, height: 0 });
   });
 });
 
@@ -151,5 +173,32 @@ describe('parseCsvHierarchy', () => {
     expect(root.children[0].id).toBe('child_a');
     expect(root.children[1].id).toBe('child_b');
     expect(root.children[2].id).toBe('child_c');
+  });
+
+  it('should populate bounds on parsed nodes from CSV', () => {
+    const root = parseCsvHierarchy(SAMPLE_CSV);
+
+    // Root node: "[0,0][393,852]" → {x:0, y:0, width:393, height:852}
+    expect(root.bounds).toEqual({ x: 0, y: 0, width: 393, height: 852 });
+
+    // login_title: "[68,255][333,312]" → {x:68, y:255, width:265, height:57}
+    const title = root.children[0].children[0];
+    expect(title.bounds).toEqual({ x: 68, y: 255, width: 265, height: 57 });
+
+    // login_submit_button: "[120,600][280,660]" → {x:120, y:600, width:160, height:60}
+    const button = root.children[0].children[2];
+    expect(button.bounds).toEqual({ x: 120, y: 600, width: 160, height: 60 });
+  });
+
+  it('should leave bounds undefined for rows with empty bounds field', () => {
+    const csvEmptyBounds = [
+      'element_num,depth,bounds,attributes,parent_num',
+      '0,0,"","",',
+      '1,1,"[10,20][50,80]","resource-id=child",0',
+    ].join('\n');
+
+    const root = parseCsvHierarchy(csvEmptyBounds);
+    expect(root.bounds).toBeUndefined();
+    expect(root.children[0].bounds).toEqual({ x: 10, y: 20, width: 40, height: 60 });
   });
 });

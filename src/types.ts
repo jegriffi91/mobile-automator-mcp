@@ -138,6 +138,10 @@ export interface UIHierarchyNode {
      * Computed during parsing — only present on root nodes.
      */
     structuralHash?: string;
+    /** Pixel bounds of the element on the device screen, when reported by the source.
+     *  Width/height are computed from the raw [x1,y1][x2,y2] format. Absent for nodes
+     *  whose source didn't emit bounds (e.g., legacy JSON parser without attrs.bounds). */
+    bounds?: { x: number; y: number; width: number; height: number };
 }
 
 // ----- Hierarchy Capture Types -----
