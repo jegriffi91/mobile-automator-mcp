@@ -128,6 +128,152 @@ export class MaestroDaemon {
     return textContent.text;
   }
 
+  // ── Action tool wrappers ──
+
+  /**
+   * Tap on a UI element identified by id or text.
+   * Requires at least one of: `id`, `text`. For point-based taps, use the CLI path.
+   */
+  async tapOn(
+    deviceId: string,
+    selector: { id?: string; text?: string; index?: number; useFuzzyMatching?: boolean },
+  ): Promise<void> {
+    if (!this.initialized || !this.process) {
+      throw new Error('MaestroDaemon not started. Call start() first.');
+    }
+
+    const args: Record<string, unknown> = { device_id: deviceId };
+    if (selector.id !== undefined) args['id'] = selector.id;
+    if (selector.text !== undefined) args['text'] = selector.text;
+    if (selector.index !== undefined) args['index'] = selector.index;
+    if (selector.useFuzzyMatching !== undefined) args['use_fuzzy_matching'] = selector.useFuzzyMatching;
+
+    const result = await this.sendRequest('tools/call', {
+      name: 'tap_on',
+      arguments: args,
+    }) as { isError?: boolean; content?: Array<{ type: string; text: string }> };
+
+    if (result?.isError) {
+      const msg = result.content?.find((c) => c.type === 'text')?.text ?? 'tap_on failed';
+      throw new Error(`[MaestroDaemon] tap_on error: ${msg}`);
+    }
+  }
+
+  /**
+   * Type text into the currently-focused field.
+   *
+   * NOTE: `input_text` does NOT accept an element selector — Maestro types into
+   * whatever field currently has focus. Call `tapOn` first to focus the target
+   * field before calling `inputText`.
+   */
+  async inputText(deviceId: string, text: string): Promise<void> {
+    if (!this.initialized || !this.process) {
+      throw new Error('MaestroDaemon not started. Call start() first.');
+    }
+
+    const result = await this.sendRequest('tools/call', {
+      name: 'input_text',
+      arguments: { device_id: deviceId, text },
+    }) as { isError?: boolean; content?: Array<{ type: string; text: string }> };
+
+    if (result?.isError) {
+      const msg = result.content?.find((c) => c.type === 'text')?.text ?? 'input_text failed';
+      throw new Error(`[MaestroDaemon] input_text error: ${msg}`);
+    }
+  }
+
+  /**
+   * Press the device back button (Android hardware back / swipe-back gesture).
+   */
+  async back(deviceId: string): Promise<void> {
+    if (!this.initialized || !this.process) {
+      throw new Error('MaestroDaemon not started. Call start() first.');
+    }
+
+    const result = await this.sendRequest('tools/call', {
+      name: 'back',
+      arguments: { device_id: deviceId },
+    }) as { isError?: boolean; content?: Array<{ type: string; text: string }> };
+
+    if (result?.isError) {
+      const msg = result.content?.find((c) => c.type === 'text')?.text ?? 'back failed';
+      throw new Error(`[MaestroDaemon] back error: ${msg}`);
+    }
+  }
+
+  /**
+   * Launch the app identified by `appId` on the device.
+   */
+  async launchApp(deviceId: string, appId: string): Promise<void> {
+    if (!this.initialized || !this.process) {
+      throw new Error('MaestroDaemon not started. Call start() first.');
+    }
+
+    const result = await this.sendRequest('tools/call', {
+      name: 'launch_app',
+      arguments: { device_id: deviceId, app_id: appId },
+    }) as { isError?: boolean; content?: Array<{ type: string; text: string }> };
+
+    if (result?.isError) {
+      const msg = result.content?.find((c) => c.type === 'text')?.text ?? 'launch_app failed';
+      throw new Error(`[MaestroDaemon] launch_app error: ${msg}`);
+    }
+  }
+
+  /**
+   * Stop the app identified by `appId` on the device.
+   * If `appId` is omitted, Maestro stops the app that was most recently launched.
+   */
+  async stopApp(deviceId: string, appId?: string): Promise<void> {
+    if (!this.initialized || !this.process) {
+      throw new Error('MaestroDaemon not started. Call start() first.');
+    }
+
+    const args: Record<string, unknown> = { device_id: deviceId };
+    if (appId !== undefined) args['app_id'] = appId;
+
+    const result = await this.sendRequest('tools/call', {
+      name: 'stop_app',
+      arguments: args,
+    }) as { isError?: boolean; content?: Array<{ type: string; text: string }> };
+
+    if (result?.isError) {
+      const msg = result.content?.find((c) => c.type === 'text')?.text ?? 'stop_app failed';
+      throw new Error(`[MaestroDaemon] stop_app error: ${msg}`);
+    }
+  }
+
+  /**
+   * Take a screenshot of the device screen.
+   * Returns the PNG as a base64 string when the daemon provides it, plus the
+   * raw text content of the response for callers that need the full payload.
+   */
+  async takeScreenshot(deviceId: string): Promise<{ pngBase64?: string; rawText: string }> {
+    if (!this.initialized || !this.process) {
+      throw new Error('MaestroDaemon not started. Call start() first.');
+    }
+
+    const result = await this.sendRequest('tools/call', {
+      name: 'take_screenshot',
+      arguments: { device_id: deviceId },
+    }) as { isError?: boolean; content?: Array<{ type: string; text?: string; data?: string; mimeType?: string }> };
+
+    if (result?.isError) {
+      const msg = result.content?.find((c) => c.type === 'text')?.text ?? 'take_screenshot failed';
+      throw new Error(`[MaestroDaemon] take_screenshot error: ${msg}`);
+    }
+
+    // Prefer an image/png content block; fall back to text
+    const imageContent = result?.content?.find((c) => c.mimeType === 'image/png' || c.type === 'image');
+    const textContent = result?.content?.find((c) => c.type === 'text');
+    const rawText = textContent?.text ?? '';
+
+    return {
+      pngBase64: imageContent?.data,
+      rawText,
+    };
+  }
+
   /**
    * Get hierarchy parsed into UIHierarchyNode tree.
    */
