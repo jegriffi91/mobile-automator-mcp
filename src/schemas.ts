@@ -85,6 +85,12 @@ const UIHierarchyNodeSchema: z.ZodType<UIHierarchyNodeShape> = z.lazy(() =>
         role: z.string(),
         children: z.array(UIHierarchyNodeSchema),
         structuralHash: z.string().optional().describe('Pre-computed structural hash for O(1) tree equality comparison'),
+        bounds: z.object({
+            x: z.number(),
+            y: z.number(),
+            width: z.number(),
+            height: z.number(),
+        }).optional().describe('Pixel bounds of the element on screen. Absent when the source did not emit bounds.'),
     })
 );
 
@@ -97,6 +103,7 @@ interface UIHierarchyNodeShape {
     role: string;
     children: UIHierarchyNodeShape[];
     structuralHash?: string;
+    bounds?: { x: number; y: number; width: number; height: number };
 }
 
 // ──────────────────────────────────────────────

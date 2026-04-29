@@ -215,6 +215,26 @@ describe('Schema Conformance', () => {
       const result = GetUIHierarchyOutputSchema.safeParse(output);
       expect(result.success).toBe(true);
     });
+
+    it('should accept nodes with bounds field', () => {
+      const output = {
+        hierarchy: {
+          role: 'Application',
+          children: [
+            {
+              id: 'login_button',
+              role: 'Button',
+              children: [],
+              bounds: { x: 68, y: 255, width: 265, height: 57 },
+            },
+          ],
+          bounds: { x: 0, y: 0, width: 393, height: 852 },
+        },
+        nodeCount: 2,
+      };
+      const result = GetUIHierarchyOutputSchema.safeParse(output);
+      expect(result.success).toBe(true);
+    });
   });
 
   describe('ExecuteUIActionOutputSchema', () => {
