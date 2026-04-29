@@ -220,12 +220,12 @@ export const RUN_TEST_GRACE_MS = 30_000;
 /**
  * Phase 4 feature flag — when enabled, run_test/run_flow pause an active
  * recording session for the duration of the flow and resume it afterward.
- * When disabled (default), the legacy assertNoActiveSessions guard fires
- * with a hard error.
+ * Default ON as of Phase 7; set MCA_FLOW_PAUSE_RESUME=off to fall back to
+ * the legacy hard-error guard (assertNoActiveSessions).
  *
  * Read once at module load; tests flip via _setFlowPauseResumeEnabledForTests.
  */
-let _flowPauseResumeEnabled = process.env.MCA_FLOW_PAUSE_RESUME === 'on';
+let _flowPauseResumeEnabled = process.env.MCA_FLOW_PAUSE_RESUME !== 'off';
 
 /** Test-only — flip the Phase 4 feature flag at runtime. Returns the previous value. */
 export function _setFlowPauseResumeEnabledForTests(value: boolean): boolean {

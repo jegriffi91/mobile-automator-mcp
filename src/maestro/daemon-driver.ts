@@ -27,6 +27,8 @@ export class MaestroDaemonDriver implements AutomationDriver {
     private daemonStarted = false;
     private deviceIdForRespawn?: string;
     private lastRespawnAt = 0;
+    /** Stored at start() time so executeAction can pass it to daemon tool calls. */
+    private deviceId?: string;
 
     constructor(timeouts: TimeoutConfig) {
         this.wrapper = new MaestroWrapper(undefined, timeouts);
@@ -100,14 +102,76 @@ export class MaestroDaemonDriver implements AutomationDriver {
         return this.wrapper.dumpHierarchyUntilSettled(settleTimeoutMs);
     }
 
-    // ── Actions (daemon doesn't support these — always CLI) ──
+    // ── Actions (routed through daemon JSON-RPC; CLI fallback for point-based taps) ──
 
     async executeAction(
         action: UIActionType,
         element: UIElement,
         textInput?: string,
     ): Promise<{ success: boolean; error?: string }> {
-        return this.wrapper.executeAction(action, element, textInput);
+        // If daemon isn't running (or never started), fall back to wrapper for
+        // everything so existing CLI behaviour is preserved.
+        if (!this.deviceId || !(await this.ensureDaemonAliveOrFalse())) {
+            return this.wrapper.executeAction(action, element, textInput);
+        }
+
+        try {
+            switch (action) {
+                case 'tap':
+                    if (element.point) {
+                        // Point-based taps don't have a daemon equivalent — use the
+                        // CLI wrapper. Port-7001 conflict exists but point taps fit
+                        // within actionMs (verified in Phase 5 / RC-1 RCA) and we
+                        // need the coordinate fallback for custom controls.
+                        return this.wrapper.executeAction(action, element, textInput);
+                    }
+                    if (!element.id && !element.text) {
+                        return {
+                            success: false,
+                            error: 'tap requires element.id or element.text (no point fallback was provided)',
+                        };
+                    }
+                    await this.daemon.tapOn(this.deviceId, {
+                        id: element.id,
+                        text: element.text,
+                    });
+                    return { success: true };
+
+                case 'type':
+                case 'inputText':
+                    if (!textInput) {
+                        return { success: false, error: 'inputText requires textInput' };
+                    }
+                    await this.daemon.inputText(this.deviceId, textInput);
+                    return { success: true };
+
+                case 'back':
+                    await this.daemon.back(this.deviceId);
+                    return { success: true };
+
+                case 'scroll':
+                case 'swipe':
+                case 'scrollUntilVisible':
+                case 'swipeUntilVisible':
+                case 'assertVisible':
+                    return {
+                        success: false,
+                        error:
+                            `Action '${action}' is not supported via the Maestro daemon. ` +
+                            `Supported daemon actions: tap, inputText, back. ` +
+                            `For scroll/swipe, use a Maestro flow via run_flow.`,
+                    };
+
+                default:
+                    return { success: false, error: `Unknown UIActionType: ${action}` };
+            }
+        } catch (err) {
+            // Daemon errors are structured — surface them in the standard shape.
+            return {
+                success: false,
+                error: err instanceof Error ? err.message : String(err),
+            };
+        }
     }
 
     // ── Test execution (daemon doesn't support this — always CLI) ──
@@ -171,6 +235,7 @@ export class MaestroDaemonDriver implements AutomationDriver {
     // ── Lifecycle ──
 
     async start(deviceId?: string): Promise<void> {
+        this.deviceId = deviceId;
         this.deviceIdForRespawn = deviceId;
         try {
             await this.daemon.start(deviceId);
