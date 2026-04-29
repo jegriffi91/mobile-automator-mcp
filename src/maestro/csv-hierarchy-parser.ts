@@ -88,6 +88,22 @@ function parseCsvRow(line: string): CsvRow | null {
 }
 
 /**
+ * Parses Maestro's bounds format "[x1,y1][x2,y2]" into {x, y, width, height}.
+ * Returns undefined on malformed input.
+ */
+export function parseBoundsString(s: string): { x: number; y: number; width: number; height: number } | undefined {
+  if (!s) return undefined;
+  const match = s.match(/\[(-?\d+),(-?\d+)\]\[(-?\d+),(-?\d+)\]/);
+  if (!match) return undefined;
+  const x1 = Number(match[1]);
+  const y1 = Number(match[2]);
+  const x2 = Number(match[3]);
+  const y2 = Number(match[4]);
+  if (![x1, y1, x2, y2].every(Number.isFinite)) return undefined;
+  return { x: x1, y: y1, width: x2 - x1, height: y2 - y1 };
+}
+
+/**
  * Convert a parsed CSV row into a UIHierarchyNode (without children — those are assembled later).
  */
 function rowToNode(row: CsvRow): UIHierarchyNode {
@@ -97,6 +113,7 @@ function rowToNode(row: CsvRow): UIHierarchyNode {
   const accessibilityLabel = attrs['accessibilityText'] || attrs['content-desc'] || undefined;
   const text = attrs['text'] || attrs['value'] || undefined;
   const role = attrs['class'] || attrs['type'] || 'Element';
+  const bounds = parseBoundsString(row.bounds);
 
   return {
     id,
@@ -104,6 +121,7 @@ function rowToNode(row: CsvRow): UIHierarchyNode {
     text,
     role,
     children: [],
+    ...(bounds ? { bounds } : {}),
   };
 }
 

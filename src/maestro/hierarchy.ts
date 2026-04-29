@@ -9,7 +9,7 @@
 
 import type { UIHierarchyNode } from '../types.js';
 import { computeStructuralHash } from './structural-hash.js';
-import { parseCsvHierarchy } from './csv-hierarchy-parser.js';
+import { parseCsvHierarchy, parseBoundsString } from './csv-hierarchy-parser.js';
 
 export class HierarchyParser {
     /**
@@ -64,6 +64,8 @@ export class HierarchyParser {
             role === 'SecureTextField'
         ) || undefined;
 
+        const bounds = attrs.bounds ? parseBoundsString(attrs.bounds) : undefined;
+
         const children = Array.isArray(node.children)
             ? node.children.map((c: any) => HierarchyParser.normalizeNode(c))
             : [];
@@ -76,6 +78,7 @@ export class HierarchyParser {
             role,
             children,
             ...(isSecure ? { isSecure } : {}),
+            ...(bounds ? { bounds } : {}),
         };
     }
 
