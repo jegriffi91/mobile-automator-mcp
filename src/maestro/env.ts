@@ -11,6 +11,81 @@ import * as path from 'path';
 import * as os from 'os';
 
 /**
+ * Minimum Maestro CLI version supported by this project.
+ *
+ * Bumped to 2.5.0 (released 2026-04-27) after observing repeat XCTest driver
+ * crashes against 2.3.0 in NTVP-558. We do NOT force a runtime upgrade —
+ * older versions log a warning via `checkMaestroVersion` and the user is
+ * pointed at the upgrade command.
+ */
+export const MIN_MAESTRO_VERSION = '2.5.0';
+
+/**
+ * Compare two semver-ish version strings (major.minor.patch). Pre-release
+ * suffixes are ignored (e.g. "2.5.0-rc1" → "2.5.0"). Returns:
+ *   -1 if a < b, 0 if a === b, 1 if a > b.
+ */
+export function compareVersions(a: string, b: string): number {
+    const parse = (s: string): number[] =>
+        s.split('-')[0].split('.').map((n) => Number.parseInt(n, 10) || 0);
+    const av = parse(a);
+    const bv = parse(b);
+    const len = Math.max(av.length, bv.length, 3);
+    for (let i = 0; i < len; i++) {
+        const ai = av[i] ?? 0;
+        const bi = bv[i] ?? 0;
+        if (ai < bi) return -1;
+        if (ai > bi) return 1;
+    }
+    return 0;
+}
+
+/**
+ * Extract the version string from a `maestro --version` invocation. Output
+ * varies across releases ("1.40.3", "Maestro CLI 2.5.0", "cli-2.5.0") so
+ * the regex tolerates a leading prefix.
+ */
+export function parseMaestroVersion(stdout: string): string | null {
+    const m = stdout.match(/(\d+\.\d+\.\d+)/);
+    return m ? m[1] : null;
+}
+
+/**
+ * Soft version check. Logs a warning (NOT an error) when the installed
+ * Maestro is older than `MIN_MAESTRO_VERSION`. Pure function over the raw
+ * `--version` stdout so callers can pipe in either the live result or a
+ * cached probe.
+ */
+export function checkMaestroVersion(versionStdout: string): {
+    version: string | null;
+    ok: boolean;
+    warning?: string;
+} {
+    const version = parseMaestroVersion(versionStdout);
+    if (!version) {
+        return {
+            version: null,
+            ok: false,
+            warning:
+                `Could not parse Maestro version from \`maestro --version\` output. ` +
+                `This project recommends Maestro >= ${MIN_MAESTRO_VERSION}. ` +
+                `Upgrade with: curl -Ls "https://get.maestro.mobile.dev" | bash`,
+        };
+    }
+    if (compareVersions(version, MIN_MAESTRO_VERSION) < 0) {
+        return {
+            version,
+            ok: false,
+            warning:
+                `Maestro ${version} detected; this project recommends >= ${MIN_MAESTRO_VERSION}. ` +
+                `Older versions exhibit XCTest driver flakiness on iOS (port 22087). ` +
+                `Upgrade with: curl -Ls "https://get.maestro.mobile.dev" | bash`,
+        };
+    }
+    return { version, ok: true };
+}
+
+/**
  * Resolve the Maestro binary path from common install locations.
  * Returns the first executable candidate, or falls back to bare 'maestro' (PATH lookup).
  */

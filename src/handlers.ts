@@ -60,6 +60,7 @@ import type { AfterActionRef } from './verification/index.js';
 import { assertNoActiveSessions } from './testing/driver-conflict.js';
 import type { MockingConfig } from './synthesis/index.js';
 import type { NetworkEvent, StateChange } from './types.js';
+import { DEFAULT_TIMEOUTS } from './types.js';
 import type { PollingNotifier } from './session/touch-inferrer.js';
 import type { ProfilingDriver, ProfilingMetrics } from './profiling/profiler.js';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -3159,12 +3160,27 @@ export async function handleRunFeatureTest(
     input: RunFeatureTestInput,
 ): Promise<RunFeatureTestOutput> {
     console.error(`[MCP] run_feature_test: spec=${typeof input.spec === 'string' ? input.spec : input.spec.name}`);
+    // CLI fallback executor — used by the runner only when the daemon path
+    // throws AND `MCA_FEATURE_TEST_CLI_FALLBACK=1`. Constructed lazily so
+    // un-flagged runs incur zero overhead.
+    const executeUIActionCli = async (cliInput: ExecuteUIActionInput): Promise<ExecuteUIActionOutput> => {
+        const { MaestroCliDriver } = await import('./maestro/cli-driver.js');
+        const cliDriver = new MaestroCliDriver(DEFAULT_TIMEOUTS);
+        const element = cliInput.element ?? {};
+        const result = await cliDriver.executeAction(cliInput.action, element, cliInput.textInput);
+        if (!result.success) {
+            throw new Error(`CLI fallback failed: ${result.error}`);
+        }
+        return { success: true, message: 'cli-fallback ok' };
+    };
+
     return runFeatureTest(input, {
         runFlow: handleRunFlow,
         startRecording: handleStartRecording,
         installRunnerMock: handleInstallRunnerMock,
         deleteRunnerMock: handleDeleteRunnerMock,
         executeUIAction: handleExecuteUIAction,
+        executeUIActionCli,
         stopAndCompile: handleStopAndCompile,
         verifyParallelism: handleVerifyNetworkParallelism,
         verifyOnScreen: handleVerifyNetworkOnScreen,
