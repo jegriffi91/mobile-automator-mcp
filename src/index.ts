@@ -42,18 +42,12 @@ import {
     VerifyNetworkErrorHandlingOutputSchema,
     RegisterSegmentInputSchema,
     RegisterSegmentOutputSchema,
-    RunTestInputSchema,
-    RunTestOutputSchema,
     ListDevicesInputSchema,
     ListDevicesOutputSchema,
     GetSessionTimelineInputSchema,
     GetSessionTimelineOutputSchema,
     ListFlowsInputSchema,
     ListFlowsOutputSchema,
-    RunFlowInputSchema,
-    RunFlowOutputSchema,
-    BuildAppInputSchema,
-    BuildAppOutputSchema,
     InstallAppInputSchema,
     InstallAppOutputSchema,
     UninstallAppInputSchema,
@@ -115,12 +109,9 @@ import {
     handleVerifyNetworkDeduplication,
     handleVerifyNetworkErrorHandling,
     handleRegisterSegment,
-    handleRunTest,
     handleListDevices,
     handleGetSessionTimeline,
     handleListFlows,
-    handleRunFlow,
-    handleBuildApp,
     handleInstallApp,
     handleUninstallApp,
     handleBootSimulator,
@@ -169,11 +160,10 @@ server.registerTool(
     {
         title: 'Start Recording Session',
         description:
-            'Begin recording a mobile interaction session. Initializes session memory, monitors the UI hierarchy, and starts capturing network events. Returns a session ID to use with subsequent tool calls. During the session, drive the app via execute_ui_action (single steps) or run_flow (stored Maestro yaml). Both update the recording timeline.',
+            'Begin recording a mobile interaction session. Initializes session memory, monitors the UI hierarchy, and starts capturing network events. Returns a session ID to use with subsequent tool calls. During the session, drive the app via execute_ui_action (single steps) or start_flow (stored Maestro yaml). Both update the recording timeline.',
         inputSchema: StartRecordingInputSchema,
         outputSchema: StartRecordingOutputSchema,
         annotations: {
-            title: 'Start Recording Session',
             readOnlyHint: false,
             destructiveHint: false,
             idempotentHint: false,
@@ -199,7 +189,6 @@ server.registerTool(
         inputSchema: StopAndCompileInputSchema,
         outputSchema: StopAndCompileOutputSchema,
         annotations: {
-            title: 'Stop and Compile Test',
             readOnlyHint: false,
             destructiveHint: false,
             idempotentHint: true,
@@ -221,11 +210,10 @@ server.registerTool(
     {
         title: 'Get UI Hierarchy',
         description:
-            'Capture the current UI element tree from a booted simulator. Works standalone (auto-targets the sole booted device) or within a recording session via sessionId. Returns a normalized accessibility tree. Each element includes bounds (x, y, width, height) in pixels, useful for point-based taps when selectors don\'t match. Use interactiveOnly to filter to tappable elements. Raw output is opt-in via includeRawOutput.',
+            'Capture the current UI element tree from a booted simulator. Works standalone (auto-targets the sole booted device) or within a recording session via sessionId. Returns a normalized accessibility tree with pixel bounds for point-based taps when selectors don\'t match. Use interactiveOnly to filter to tappable elements.',
         inputSchema: GetUIHierarchyInputSchema,
         outputSchema: GetUIHierarchyOutputSchema,
         annotations: {
-            title: 'Get UI Hierarchy',
             readOnlyHint: true,
             destructiveHint: false,
             idempotentHint: true,
@@ -247,11 +235,10 @@ server.registerTool(
     {
         title: 'Execute UI Action',
         description:
-            'Dispatch a UI action (tap, type, scroll, etc.) on a target element. Logs the interaction to session memory for later test synthesis. Selector priority: id > accessibilityLabel > text. When called during an active recording session, taps and inputText route through the Maestro daemon\'s JSON-RPC for sub-second latency without port-7001 conflicts. Scroll/swipe are not supported via the daemon; use run_flow for complex sequences.',
+            'Dispatch a UI action (tap, type, scroll, etc.) on a target element. Logs the interaction to session memory for later test synthesis. Selector priority: id > accessibilityLabel > text. Scroll/swipe are not supported during a live recording session — use start_flow for complex sequences.',
         inputSchema: ExecuteUIActionInputSchema,
         outputSchema: ExecuteUIActionOutputSchema,
         annotations: {
-            title: 'Execute UI Action',
             readOnlyHint: false,
             destructiveHint: false,
             idempotentHint: false,
@@ -277,7 +264,6 @@ server.registerTool(
         inputSchema: GetNetworkLogsInputSchema,
         outputSchema: GetNetworkLogsOutputSchema,
         annotations: {
-            title: 'Get Network Logs',
             readOnlyHint: true,
             destructiveHint: false,
             idempotentHint: true,
@@ -303,7 +289,6 @@ server.registerTool(
         inputSchema: VerifySDUIPayloadInputSchema,
         outputSchema: VerifySDUIPayloadOutputSchema,
         annotations: {
-            title: 'Verify SDUI Payload',
             readOnlyHint: true,
             destructiveHint: false,
             idempotentHint: true,
@@ -329,7 +314,6 @@ server.registerTool(
         inputSchema: VerifyNetworkParallelismInputSchema,
         outputSchema: VerifyNetworkParallelismOutputSchema,
         annotations: {
-            title: 'Verify Network Parallelism',
             readOnlyHint: true,
             destructiveHint: false,
             idempotentHint: true,
@@ -355,7 +339,6 @@ server.registerTool(
         inputSchema: VerifyNetworkOnScreenInputSchema,
         outputSchema: VerifyNetworkOnScreenOutputSchema,
         annotations: {
-            title: 'Verify Network On Screen',
             readOnlyHint: true,
             destructiveHint: false,
             idempotentHint: true,
@@ -381,7 +364,6 @@ server.registerTool(
         inputSchema: VerifyNetworkAbsentInputSchema,
         outputSchema: VerifyNetworkAbsentOutputSchema,
         annotations: {
-            title: 'Verify Network Absent',
             readOnlyHint: true,
             destructiveHint: false,
             idempotentHint: true,
@@ -407,7 +389,6 @@ server.registerTool(
         inputSchema: VerifyNetworkSequenceInputSchema,
         outputSchema: VerifyNetworkSequenceOutputSchema,
         annotations: {
-            title: 'Verify Network Sequence',
             readOnlyHint: true,
             destructiveHint: false,
             idempotentHint: true,
@@ -433,7 +414,6 @@ server.registerTool(
         inputSchema: VerifyNetworkPerformanceInputSchema,
         outputSchema: VerifyNetworkPerformanceOutputSchema,
         annotations: {
-            title: 'Verify Network Performance',
             readOnlyHint: true,
             destructiveHint: false,
             idempotentHint: true,
@@ -459,7 +439,6 @@ server.registerTool(
         inputSchema: VerifyNetworkPayloadInputSchema,
         outputSchema: VerifyNetworkPayloadOutputSchema,
         annotations: {
-            title: 'Verify Network Payload',
             readOnlyHint: true,
             destructiveHint: false,
             idempotentHint: true,
@@ -485,7 +464,6 @@ server.registerTool(
         inputSchema: VerifyNetworkDeduplicationInputSchema,
         outputSchema: VerifyNetworkDeduplicationOutputSchema,
         annotations: {
-            title: 'Verify Network Deduplication',
             readOnlyHint: true,
             destructiveHint: false,
             idempotentHint: true,
@@ -511,7 +489,6 @@ server.registerTool(
         inputSchema: VerifyNetworkErrorHandlingInputSchema,
         outputSchema: VerifyNetworkErrorHandlingOutputSchema,
         annotations: {
-            title: 'Verify Network Error Handling',
             readOnlyHint: true,
             destructiveHint: false,
             idempotentHint: true,
@@ -537,7 +514,6 @@ server.registerTool(
         inputSchema: RegisterSegmentInputSchema,
         outputSchema: RegisterSegmentOutputSchema,
         annotations: {
-            title: 'Register Segment',
             readOnlyHint: false,
             destructiveHint: false,
             idempotentHint: true,
@@ -546,32 +522,6 @@ server.registerTool(
     },
     async (args) => {
         const result = await handleRegisterSegment(args);
-        return {
-            content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
-            structuredContent: result,
-        };
-    }
-);
-
-// ── 8. run_test ──
-server.registerTool(
-    TOOL_NAMES.RUN_TEST,
-    {
-        title: 'Run Test',
-        description:
-            'Run a Maestro YAML test file with optional WireMock stub replay. Automatically starts an in-process stub server, runs the test, and tears down. Returns pass/fail status, output, and duration. Maestro stdout/stderr is streamed line-by-line into the task ring buffer — poll_task_status shows live output. Note: this tool replays a static YAML script against a booted simulator — it does NOT connect to live Proxyman or record new network traffic during execution. When MCA_FLOW_PAUSE_RESUME=on and a recording session is active, the session is paused for the duration of the flow and resumed automatically afterward. Otherwise, run_test errors if any recording session is active. For long-running flows that may exceed the MCP transport timeout, prefer the async sibling start_test (poll via poll_task_status; cancel mid-flow via cancel_task — SIGTERMs the Maestro CLI).',
-        inputSchema: RunTestInputSchema,
-        outputSchema: RunTestOutputSchema,
-        annotations: {
-            title: 'Run Test',
-            readOnlyHint: false,
-            destructiveHint: false,
-            idempotentHint: true,
-            openWorldHint: true,
-        },
-    },
-    async (args) => {
-        const result = await handleRunTest(args);
         return {
             content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
             structuredContent: result,
@@ -589,7 +539,6 @@ server.registerTool(
         inputSchema: ListDevicesInputSchema,
         outputSchema: ListDevicesOutputSchema,
         annotations: {
-            title: 'List Devices',
             readOnlyHint: true,
             destructiveHint: false,
             idempotentHint: true,
@@ -615,7 +564,6 @@ server.registerTool(
         inputSchema: GetSessionTimelineInputSchema,
         outputSchema: GetSessionTimelineOutputSchema,
         annotations: {
-            title: 'Get Session Timeline',
             readOnlyHint: true,
             destructiveHint: false,
             idempotentHint: true,
@@ -637,11 +585,10 @@ server.registerTool(
     {
         title: 'List Flows',
         description:
-            'Discover named Maestro flows in a flows directory (default: ./flows). Each flow is a .yaml file; an optional _manifest.json adds descriptions, tags, and parameter specs. Use run_flow to execute one by name.',
+            'Discover named Maestro flows in a flows directory (default: ./flows). Each flow is a .yaml file; an optional _manifest.json adds descriptions, tags, and parameter specs. Use start_flow to execute one by name.',
         inputSchema: ListFlowsInputSchema,
         outputSchema: ListFlowsOutputSchema,
         annotations: {
-            title: 'List Flows',
             readOnlyHint: true,
             destructiveHint: false,
             idempotentHint: true,
@@ -657,69 +604,16 @@ server.registerTool(
     }
 );
 
-// ── 12. run_flow ──
-server.registerTool(
-    TOOL_NAMES.RUN_FLOW,
-    {
-        title: 'Run Flow',
-        description:
-            'Execute a named Maestro flow by name. Resolves <flowsDir>/<name>.yaml, merges manifest param defaults with caller-supplied params, and runs the flow against a booted simulator. Use this to navigate to the area of an incremental change before verifying it. Maestro stdout/stderr is streamed line-by-line into the task ring buffer — poll_task_status shows live output. When MCA_FLOW_PAUSE_RESUME=on and a recording session is active, the session is paused for the duration of the flow and resumed automatically afterward. Otherwise, run_flow errors if any recording session is active. For long-running flows that may exceed the MCP transport timeout, prefer the async sibling start_flow (poll via poll_task_status; cancel mid-flow via cancel_task — SIGTERMs the Maestro CLI).',
-        inputSchema: RunFlowInputSchema,
-        outputSchema: RunFlowOutputSchema,
-        annotations: {
-            title: 'Run Flow',
-            readOnlyHint: false,
-            destructiveHint: false,
-            idempotentHint: false,
-            openWorldHint: true,
-        },
-    },
-    async (args) => {
-        const result = await handleRunFlow(args);
-        return {
-            content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
-            structuredContent: result,
-        };
-    }
-);
-
-// ── 13. build_app ──
-server.registerTool(
-    TOOL_NAMES.BUILD_APP,
-    {
-        title: 'Build App',
-        description:
-            'Compile an iOS or Android app from source. iOS: shells xcodebuild and returns the built .app path + bundle id. Android: shells ./gradlew assemble<Variant> and returns the APK path. Long-running — default timeout is 15 minutes.',
-        inputSchema: BuildAppInputSchema,
-        outputSchema: BuildAppOutputSchema,
-        annotations: {
-            title: 'Build App',
-            readOnlyHint: false,
-            destructiveHint: false,
-            idempotentHint: true,
-            openWorldHint: true,
-        },
-    },
-    async (args) => {
-        const result = await handleBuildApp(args);
-        return {
-            content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
-            structuredContent: result,
-        };
-    }
-);
-
 // ── 13a. start_build ──
 server.registerTool(
     TOOL_NAMES.START_BUILD,
     {
         title: 'Start Build (Async)',
         description:
-            'Starts an iOS or Android build asynchronously. Returns a taskId immediately so the agent can poll for status without hitting the MCP transport timeout. Tasks live in-process for 1 hour after completion; a server restart cancels in-flight builds.',
+            'Compile an iOS or Android app from source (xcodebuild or gradlew). Returns a taskId immediately; poll via poll_task_status, get final .app/.apk path + bundleId via get_task_result. Default timeout 15 min.',
         inputSchema: StartBuildInputSchema,
         outputSchema: StartBuildOutputSchema,
         annotations: {
-            title: 'Start Build (Async)',
             readOnlyHint: false,
             destructiveHint: false,
             idempotentHint: false,
@@ -741,11 +635,10 @@ server.registerTool(
     {
         title: 'Start Test (Async)',
         description:
-            'Starts a Maestro YAML test asynchronously. Returns a taskId immediately so the agent can poll status via poll_task_status without hitting the MCP transport timeout. Maestro stdout/stderr streams line-by-line into the ring buffer — poll_task_status shows live output. Pause/resume bracketing of an active recording session works exactly as for run_test; cancel_task SIGTERMs the Maestro CLI and runs resume cleanup.',
+            'Run a Maestro YAML test file with optional WireMock stub replay. Replays a static script against a booted simulator — does NOT record new network traffic. Returns a taskId; poll_task_status streams live output, get_task_result returns final pass/fail. With MCA_FLOW_PAUSE_RESUME=on, pauses any active recording for the run and auto-resumes; otherwise errors if a session is active. cancel_task interrupts mid-flow.',
         inputSchema: StartTestInputSchema,
         outputSchema: StartTestOutputSchema,
         annotations: {
-            title: 'Start Test (Async)',
             readOnlyHint: false,
             destructiveHint: false,
             idempotentHint: false,
@@ -767,11 +660,10 @@ server.registerTool(
     {
         title: 'Start Flow (Async)',
         description:
-            'Starts a named Maestro flow asynchronously by resolving <flowsDir>/<name>.yaml and merging manifest param defaults. Returns a taskId immediately. Maestro stdout/stderr streams line-by-line into the ring buffer — poll_task_status shows live output. cancel_task interrupts a running flow mid-execution by SIGTERMing the Maestro CLI; resume cleanup runs automatically when bracketing an active recording session.',
+            'Execute a named Maestro flow (resolves <flowsDir>/<name>.yaml and merges manifest param defaults with caller params). Use to navigate to the area of an incremental change before verifying it. Returns a taskId; poll_task_status streams output, get_task_result returns final pass/fail. With MCA_FLOW_PAUSE_RESUME=on, pauses any active recording for the run and auto-resumes; otherwise errors if a session is active. cancel_task interrupts mid-flow.',
         inputSchema: StartFlowInputSchema,
         outputSchema: StartFlowOutputSchema,
         annotations: {
-            title: 'Start Flow (Async)',
             readOnlyHint: false,
             destructiveHint: false,
             idempotentHint: false,
@@ -797,7 +689,6 @@ server.registerTool(
         inputSchema: PollTaskStatusInputSchema,
         outputSchema: PollTaskStatusOutputSchema,
         annotations: {
-            title: 'Poll Task Status',
             readOnlyHint: true,
             destructiveHint: false,
             idempotentHint: true,
@@ -823,7 +714,6 @@ server.registerTool(
         inputSchema: GetTaskResultInputSchema,
         outputSchema: GetTaskResultOutputSchema,
         annotations: {
-            title: 'Get Task Result',
             readOnlyHint: true,
             destructiveHint: false,
             idempotentHint: true,
@@ -849,7 +739,6 @@ server.registerTool(
         inputSchema: CancelTaskInputSchema,
         outputSchema: CancelTaskOutputSchema,
         annotations: {
-            title: 'Cancel Task',
             readOnlyHint: false,
             destructiveHint: true,
             idempotentHint: true,
@@ -875,7 +764,6 @@ server.registerTool(
         inputSchema: ListTasksInputSchema,
         outputSchema: ListTasksOutputSchema,
         annotations: {
-            title: 'List Tasks',
             readOnlyHint: true,
             destructiveHint: false,
             idempotentHint: true,
@@ -901,7 +789,6 @@ server.registerTool(
         inputSchema: InstallAppInputSchema,
         outputSchema: InstallAppOutputSchema,
         annotations: {
-            title: 'Install App',
             readOnlyHint: false,
             destructiveHint: false,
             idempotentHint: true,
@@ -927,7 +814,6 @@ server.registerTool(
         inputSchema: UninstallAppInputSchema,
         outputSchema: UninstallAppOutputSchema,
         annotations: {
-            title: 'Uninstall App',
             readOnlyHint: false,
             destructiveHint: true,
             idempotentHint: true,
@@ -949,11 +835,10 @@ server.registerTool(
     {
         title: 'Boot Simulator',
         description:
-            'Boot an iOS simulator by UDID and wait for it to be fully ready. Idempotent — returns alreadyBooted=true if the device was already running. Also opens Simulator.app by default. Android emulator booting is not yet supported (start it manually).',
+            'Boot an iOS simulator by UDID and wait for it to be fully ready. Idempotent — returns alreadyBooted=true if already running. Opens Simulator.app by default. Android emulator booting is not yet supported (start it manually).',
         inputSchema: BootSimulatorInputSchema,
         outputSchema: BootSimulatorOutputSchema,
         annotations: {
-            title: 'Boot Simulator',
             readOnlyHint: false,
             destructiveHint: false,
             idempotentHint: true,
@@ -975,11 +860,10 @@ server.registerTool(
     {
         title: 'Take Screenshot',
         description:
-            'Capture a PNG of the current simulator/emulator screen; returns an absolute path Claude can read back. iOS uses `xcrun simctl io <udid> screenshot`; Android uses `adb exec-out screencap -p`. Retries up to 2x on transient failures (with exponential backoff); on terminal failure returns passed:false with a structured output instead of throwing.',
+            'Capture a PNG of the current simulator/emulator screen; returns an absolute path the agent can read back. Auto-retries on transient failures; returns passed:false on terminal failure instead of throwing.',
         inputSchema: TakeScreenshotInputSchema,
         outputSchema: TakeScreenshotOutputSchema,
         annotations: {
-            title: 'Take Screenshot',
             readOnlyHint: true,
             destructiveHint: false,
             idempotentHint: false,
@@ -1001,11 +885,10 @@ server.registerTool(
     {
         title: 'Run Unit Tests',
         description:
-            'Run the unit-test target for the project and return structured results (pass/fail counts, failing test names, first-line failure messages). iOS: `xcodebuild test` with a resultBundlePath; Android: `./gradlew :<module>:test<Variant>UnitTest` with JUnit XML parsing. Long-running — default timeout is 30 minutes.',
+            'Run the unit-test target for the project. Returns structured results: pass/fail counts, failing test names, first-line failure messages. Long-running — default timeout 30 minutes.',
         inputSchema: RunUnitTestsInputSchema,
         outputSchema: RunUnitTestsOutputSchema,
         annotations: {
-            title: 'Run Unit Tests',
             readOnlyHint: false,
             destructiveHint: false,
             idempotentHint: true,
@@ -1031,7 +914,6 @@ server.registerTool(
         inputSchema: RunFeatureTestInputSchema,
         outputSchema: RunFeatureTestOutputSchema,
         annotations: {
-            title: 'Run Feature Test',
             readOnlyHint: false,
             destructiveHint: false,
             idempotentHint: false,
@@ -1053,11 +935,10 @@ server.registerTool(
     {
         title: 'Set Mock Response',
         description:
-            'Install a live response-mocking rule for an active recording session. Internally translates the spec into a Proxyman scripting rule and asks Proxyman (via its MCP) to install it on the running proxy. Two modes: staticResponse (return a verbatim payload — good for feature flags / fixtures) and responseTransform.jsonPatch (proxy to the real backend, then mutate the response body in flight — good for the loginStatus override pattern). Rules are tagged with the session ID so stop_and_compile_test can clean them up. REQUIRES: Proxyman running with MCP enabled (Settings → MCP).',
+            'Install a live response-mocking rule via Proxyman. Two modes: staticResponse (return a verbatim payload — feature flags, fixtures) and responseTransform.jsonPatch (proxy to the real backend then mutate the response body in flight — e.g. the loginStatus override pattern). Session-scoped mocks auto-clean on stop_and_compile_test; standalone mocks persist until explicitly cleared. Requires Proxyman running with MCP enabled.',
         inputSchema: SetMockResponseInputSchema,
         outputSchema: SetMockResponseOutputSchema,
         annotations: {
-            title: 'Set Mock Response',
             readOnlyHint: false,
             destructiveHint: false,
             idempotentHint: false,
@@ -1079,11 +960,10 @@ server.registerTool(
     {
         title: 'Clear Mock Responses',
         description:
-            'Remove mocks installed by set_mock_response. Pass mockId to remove one specific mock; omit to clear all mocks for the session. The companion to set_mock_response — stop_and_compile_test runs this implicitly on session end so leaks should be rare.',
+            'Remove mocks installed by set_mock_response. Pass mockId to remove one; omit to clear all mocks for the session. stop_and_compile_test runs this implicitly on session end.',
         inputSchema: ClearMockResponsesInputSchema,
         outputSchema: ClearMockResponsesOutputSchema,
         annotations: {
-            title: 'Clear Mock Responses',
             readOnlyHint: false,
             destructiveHint: true,
             idempotentHint: true,
@@ -1099,161 +979,169 @@ server.registerTool(
     }
 );
 
-// ── 22. list_active_sessions (admin) ──
-server.registerTool(
-    TOOL_NAMES.LIST_ACTIVE_SESSIONS,
-    {
-        title: 'List Active Sessions',
-        description:
-            'Inventory of recording sessions, with driver/poller liveness and mock count per session. Read-only — use this to find orphaned state before deciding whether to call force_cleanup_session.',
-        inputSchema: ListActiveSessionsInputSchema,
-        outputSchema: ListActiveSessionsOutputSchema,
-        annotations: {
+// ──────────────────────────────────────────────
+// Admin / orphan-recovery tools (env-gated)
+// ──────────────────────────────────────────────
+//
+// These six tools are operator escape hatches for stuck sessions, drifted
+// mocks, and on-disk artifacts. They are not part of the AI agent's normal
+// flow — set MCA_ADMIN_TOOLS=1 to expose them on the MCP surface (e.g. for
+// human operators driving recovery via Claude). Default-off keeps the
+// agent-facing tool catalog focused on the recording / control verbs.
+
+if (process.env.MCA_ADMIN_TOOLS === '1') {
+    // ── list_active_sessions ──
+    server.registerTool(
+        TOOL_NAMES.LIST_ACTIVE_SESSIONS,
+        {
             title: 'List Active Sessions',
-            readOnlyHint: true,
-            destructiveHint: false,
-            idempotentHint: true,
-            openWorldHint: false,
+            description:
+                'Inventory of recording sessions, with driver/poller liveness and mock count per session. Read-only — use this to find orphaned state before deciding whether to call force_cleanup_session.',
+            inputSchema: ListActiveSessionsInputSchema,
+            outputSchema: ListActiveSessionsOutputSchema,
+            annotations: {
+                readOnlyHint: true,
+                destructiveHint: false,
+                idempotentHint: true,
+                openWorldHint: false,
+            },
         },
-    },
-    async (args) => {
-        const result = await handleListActiveSessions(args);
-        return {
-            content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
-            structuredContent: result,
-        };
-    }
-);
+        async (args) => {
+            const result = await handleListActiveSessions(args);
+            return {
+                content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
+                structuredContent: result,
+            };
+        }
+    );
 
-// ── 23. list_active_mocks (admin) ──
-server.registerTool(
-    TOOL_NAMES.LIST_ACTIVE_MOCKS,
-    {
-        title: 'List Active Mocks',
-        description:
-            'Inspect Proxyman scripting rules tagged "mca:". Reports drift between the local ledger and Proxyman state (rules-not-in-ledger, ledger-not-in-Proxyman) so the caller can spot leaks. Returns proxymanReachable=false instead of throwing when Proxyman MCP is unavailable.',
-        inputSchema: ListActiveMocksInputSchema,
-        outputSchema: ListActiveMocksOutputSchema,
-        annotations: {
+    // ── list_active_mocks ──
+    server.registerTool(
+        TOOL_NAMES.LIST_ACTIVE_MOCKS,
+        {
             title: 'List Active Mocks',
-            readOnlyHint: true,
-            destructiveHint: false,
-            idempotentHint: true,
-            openWorldHint: true,
+            description:
+                'Inspect Proxyman scripting rules tagged "mca:". Reports drift between the local ledger and Proxyman state (rules-not-in-ledger, ledger-not-in-Proxyman) so the caller can spot leaks. Returns proxymanReachable=false instead of throwing when Proxyman MCP is unavailable.',
+            inputSchema: ListActiveMocksInputSchema,
+            outputSchema: ListActiveMocksOutputSchema,
+            annotations: {
+                readOnlyHint: true,
+                destructiveHint: false,
+                idempotentHint: true,
+                openWorldHint: true,
+            },
         },
-    },
-    async (args) => {
-        const result = await handleListActiveMocks(args);
-        return {
-            content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
-            structuredContent: result,
-        };
-    }
-);
+        async (args) => {
+            const result = await handleListActiveMocks(args);
+            return {
+                content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
+                structuredContent: result,
+            };
+        }
+    );
 
-// ── 24. force_cleanup_session (admin, destructive) ──
-server.registerTool(
-    TOOL_NAMES.FORCE_CLEANUP_SESSION,
-    {
-        title: 'Force-Cleanup Session',
-        description:
-            'Tear down a stuck session: stop polling, stop the driver, delete its tagged Proxyman rules, mark the session aborted. Never throws — partial-failure detail comes back in the errors[] array. Does NOT kill the simulator (only state we created).',
-        inputSchema: ForceCleanupSessionInputSchema,
-        outputSchema: ForceCleanupSessionOutputSchema,
-        annotations: {
+    // ── force_cleanup_session (destructive) ──
+    server.registerTool(
+        TOOL_NAMES.FORCE_CLEANUP_SESSION,
+        {
             title: 'Force-Cleanup Session',
-            readOnlyHint: false,
-            destructiveHint: true,
-            idempotentHint: true,
-            openWorldHint: true,
+            description:
+                'Tear down a stuck session: stop polling, stop the driver, delete its tagged Proxyman rules, mark the session aborted. Never throws — partial-failure detail comes back in the errors[] array. Does NOT kill the simulator (only state we created).',
+            inputSchema: ForceCleanupSessionInputSchema,
+            outputSchema: ForceCleanupSessionOutputSchema,
+            annotations: {
+                readOnlyHint: false,
+                destructiveHint: true,
+                idempotentHint: true,
+                openWorldHint: true,
+            },
         },
-    },
-    async (args) => {
-        const result = await handleForceCleanupSession(args);
-        return {
-            content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
-            structuredContent: result,
-        };
-    }
-);
+        async (args) => {
+            const result = await handleForceCleanupSession(args);
+            return {
+                content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
+                structuredContent: result,
+            };
+        }
+    );
 
-// ── 25. force_cleanup_mocks (admin, destructive) ──
-server.registerTool(
-    TOOL_NAMES.FORCE_CLEANUP_MOCKS,
-    {
-        title: 'Force-Cleanup Mocks',
-        description:
-            'Bulk delete Proxyman scripting rules by scope: "all" (everything tagged mca:), "session" (one session, requires sessionId), or "standalone". Local ledgers are reconciled. Never throws — failures surface in errors[].',
-        inputSchema: ForceCleanupMocksInputSchema,
-        outputSchema: ForceCleanupMocksOutputSchema,
-        annotations: {
+    // ── force_cleanup_mocks (destructive) ──
+    server.registerTool(
+        TOOL_NAMES.FORCE_CLEANUP_MOCKS,
+        {
             title: 'Force-Cleanup Mocks',
-            readOnlyHint: false,
-            destructiveHint: true,
-            idempotentHint: true,
-            openWorldHint: true,
+            description:
+                'Bulk delete Proxyman scripting rules by scope: "all" (everything tagged mca:), "session" (one session, requires sessionId), or "standalone". Local ledgers are reconciled. Never throws — failures surface in errors[].',
+            inputSchema: ForceCleanupMocksInputSchema,
+            outputSchema: ForceCleanupMocksOutputSchema,
+            annotations: {
+                readOnlyHint: false,
+                destructiveHint: true,
+                idempotentHint: true,
+                openWorldHint: true,
+            },
         },
-    },
-    async (args) => {
-        const result = await handleForceCleanupMocks(args);
-        return {
-            content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
-            structuredContent: result,
-        };
-    }
-);
+        async (args) => {
+            const result = await handleForceCleanupMocks(args);
+            return {
+                content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
+                structuredContent: result,
+            };
+        }
+    );
 
-// ── 26. audit_state (admin, read-only) ──
-server.registerTool(
-    TOOL_NAMES.AUDIT_STATE,
-    {
-        title: 'Audit State',
-        description:
-            'Single-shot snapshot of session/driver/poller/Proxyman state, plus a small orphans report (Proxyman rules without a known session, sessions in recording without a driver, pollers without a session). Use as the entry point when something looks wrong.',
-        inputSchema: AuditStateInputSchema,
-        outputSchema: AuditStateOutputSchema,
-        annotations: {
+    // ── audit_state (read-only) ──
+    server.registerTool(
+        TOOL_NAMES.AUDIT_STATE,
+        {
             title: 'Audit State',
-            readOnlyHint: true,
-            destructiveHint: false,
-            idempotentHint: true,
-            openWorldHint: true,
+            description:
+                'Single-shot snapshot of session/driver/poller/Proxyman state, plus a small orphans report (Proxyman rules without a known session, sessions in recording without a driver, pollers without a session). Use as the entry point when something looks wrong.',
+            inputSchema: AuditStateInputSchema,
+            outputSchema: AuditStateOutputSchema,
+            annotations: {
+                readOnlyHint: true,
+                destructiveHint: false,
+                idempotentHint: true,
+                openWorldHint: true,
+            },
         },
-    },
-    async (args) => {
-        const result = await handleAuditState(args);
-        return {
-            content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
-            structuredContent: result,
-        };
-    }
-);
+        async (args) => {
+            const result = await handleAuditState(args);
+            return {
+                content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
+                structuredContent: result,
+            };
+        }
+    );
 
-// ── 27. force_cleanup_artifacts (admin, destructive) ──
-server.registerTool(
-    TOOL_NAMES.FORCE_CLEANUP_ARTIFACTS,
-    {
-        title: 'Force-Cleanup Artifacts',
-        description:
-            'Remove accumulated debug-output directories, screenshots, and other on-disk artifacts older than olderThanHours (default 24). Scoped to one session if sessionId is given; otherwise scans all sessions. Use dryRun:true to preview without deleting. Never throws — partial failures surface in errors[].',
-        inputSchema: ForceCleanupArtifactsInputSchema,
-        outputSchema: ForceCleanupArtifactsOutputSchema,
-        annotations: {
+    // ── force_cleanup_artifacts (destructive) ──
+    server.registerTool(
+        TOOL_NAMES.FORCE_CLEANUP_ARTIFACTS,
+        {
             title: 'Force-Cleanup Artifacts',
-            readOnlyHint: false,
-            destructiveHint: true,
-            idempotentHint: true,
-            openWorldHint: true,
+            description:
+                'Remove accumulated debug-output directories, screenshots, and other on-disk artifacts older than olderThanHours (default 24). Scoped to one session if sessionId is given; otherwise scans all sessions. Use dryRun:true to preview without deleting. Never throws — partial failures surface in errors[].',
+            inputSchema: ForceCleanupArtifactsInputSchema,
+            outputSchema: ForceCleanupArtifactsOutputSchema,
+            annotations: {
+                readOnlyHint: false,
+                destructiveHint: true,
+                idempotentHint: true,
+                openWorldHint: true,
+            },
         },
-    },
-    async (args) => {
-        const result = await handleForceCleanupArtifacts(args);
-        return {
-            content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
-            structuredContent: result,
-        };
-    }
-);
+        async (args) => {
+            const result = await handleForceCleanupArtifacts(args);
+            return {
+                content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
+                structuredContent: result,
+            };
+        }
+    );
+
+    console.error('[mobile-automator-mcp] Admin tools enabled (MCA_ADMIN_TOOLS=1)');
+}
 
 // ──────────────────────────────────────────────
 // Transport & Start
