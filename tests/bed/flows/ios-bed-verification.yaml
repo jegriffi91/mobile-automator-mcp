@@ -1,0 +1,26 @@
+# iOS bed verification flow.
+#
+# Linear sequence of driver actions interleaved with `checkpoint:` markers.
+# At each checkpoint the bed dumps the live hierarchy and scores all four
+# pillars. Add screens by extending `steps:` — every checkpoint name must
+# also appear as a `screen:` value in `corpus/tasks.yaml` for pillar 2 to
+# light up.
+#
+# This is a starter flow built around the existing doombot login path
+# already exercised by `android-verification-test.yaml`. Expand to 5+ screens
+# (settings, list, detail, modal) once you have visibility into the target
+# app's screens — see README.md.
+
+appId: io.appcision.projectdoombot
+steps:
+  - launchApp: true
+  - checkpoint: login-loaded
+  - tap:
+      text: "ENTER USERNAME"
+  - inputText:
+      into: { text: "ENTER USERNAME" }
+      text: "admin"
+  - checkpoint: login-filled
+  - tap:
+      text: "ENTER THE LAIR"
+  - checkpoint: home-authenticated

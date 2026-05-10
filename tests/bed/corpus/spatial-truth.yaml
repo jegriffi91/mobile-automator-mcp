@@ -1,0 +1,10 @@
+# Hand-labeled spatial audit (pillar 1, secondary check).
+#
+# 3–5 elements per screen with their expected 3x3 grid label. Asserted at
+# 100%. Catches bugs in the bed's own spatial formula that would otherwise
+# invisibly pass the self-consistency check.
+#
+# Fill in once you've run the bed once and seen which ids the compactor
+# emits. Empty by default — the self-consistency check still runs.
+
+entries: []
