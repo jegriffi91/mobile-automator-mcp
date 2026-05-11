@@ -20,7 +20,8 @@
         "format": "prettier --write src/**/*.ts",
         "test": "vitest run",
         "test:watch": "vitest",
-        "test:smoke": "tsx tests/smoke/run-smoke.ts"
+        "test:smoke": "tsx tests/smoke/run-smoke.ts",
+        "test:bed": "tsx tests/bed/run-bed.ts"
     },
     "dependencies": {
         "@modelcontextprotocol/sdk": "^1.12.0",

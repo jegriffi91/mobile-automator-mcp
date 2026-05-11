@@ -1,0 +1,27 @@
+# Element-selection task corpus (pillar 2).
+#
+# Only consumed when `npm run test:bed -- --with-llm` is on. Each entry is a
+# natural-language goal paired with the element id that satisfies it. The
+# picker reads the rendered compacted screen and the goal, returns a chosen
+# id, and the scorer accepts the chosen id OR any acceptable_alternates.
+#
+# Target volume: ~10 tasks per screen — at 50 tasks total, 2 misses = 96%
+# and 4 misses = 92%, which lines up directly with the corpus threshold.
+#
+# This starter set is intentionally short; extend it alongside the flow
+# YAML as new screens get covered.
+
+tasks:
+  - screen: login-loaded
+    goal: "Focus the username field to start typing"
+    expected_element_id: "ENTER USERNAME"
+  - screen: login-loaded
+    goal: "Tap the username input"
+    expected_element_id: "ENTER USERNAME"
+
+  - screen: login-filled
+    goal: "Submit the credentials and proceed"
+    expected_element_id: "ENTER THE LAIR"
+  - screen: login-filled
+    goal: "Tap the primary action button"
+    expected_element_id: "ENTER THE LAIR"
