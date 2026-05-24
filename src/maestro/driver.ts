@@ -15,6 +15,19 @@ import type { UIActionType, UIElement, MobilePlatform, TimeoutConfig } from '../
 import { DEFAULT_TIMEOUTS } from '../types.js';
 import type { UIHierarchyNode } from '../types.js';
 
+/**
+ * Optional hints passed to `DriverFactory.create`.
+ *
+ * `platform` lets the factory force the Maestro backend on Android even when
+ * `MCA_UI_DRIVER=loupe` is set (Loupe is iOS Simulator only). `bundleId` lets
+ * the Loupe backend inject its in-process HTTP server eagerly at start time
+ * instead of waiting for a later `setAppContext` call.
+ */
+export interface DriverFactoryOptions {
+    platform?: MobilePlatform;
+    bundleId?: string;
+}
+
 /** Returns a parsed UIHierarchyNode tree — used by TouchInferrer for polling */
 export type TreeHierarchyReader = () => Promise<UIHierarchyNode>;
 
@@ -87,6 +100,14 @@ export interface AutomationDriver {
     start(deviceId?: string): Promise<void>;
     stop(): Promise<void>;
     readonly isRunning: boolean;
+
+    /**
+     * Inform the driver of the target app's bundle id. No-op for Maestro
+     * backends. The Loupe backend uses this to spawn the in-process HTTP
+     * server (`loupe start --bundle-id ...`) — lazy injection that can run
+     * before or after `start(deviceId)`, in any order.
+     */
+    setAppContext(bundleId: string): Promise<void>;
 }
 
 /**
@@ -108,8 +129,27 @@ export class DriverFactory {
      */
     static async create(
         timeouts?: Partial<TimeoutConfig>,
+        opts?: DriverFactoryOptions,
     ): Promise<AutomationDriver> {
         const mergedTimeouts = { ...DEFAULT_TIMEOUTS, ...timeouts };
+
+        // MCA_UI_DRIVER=loupe routes hierarchy + native HID actions through
+        // Loupe's in-process HTTP server. Requires iOS and a known bundle id
+        // at creation time (Loupe injects per-app). Standalone get_ui_hierarchy
+        // calls don't carry a bundle id, so they transparently keep using
+        // Maestro — no degraded-mode wrapper churn.
+        const pref = (process.env.MCA_UI_DRIVER ?? 'maestro').toLowerCase();
+        if (pref === 'loupe' && opts?.platform === 'ios' && opts?.bundleId) {
+            try {
+                const { LoupeDriver } = await import('../loupe/loupe-driver.js');
+                return new LoupeDriver(mergedTimeouts, opts.bundleId);
+            } catch (err) {
+                console.error(
+                    '[DriverFactory] Loupe init failed, falling back to Maestro:',
+                    err,
+                );
+            }
+        }
 
         // Always try daemon-backed driver first (will fall back to CLI internally
         // if daemon fails to start when start() is called)
