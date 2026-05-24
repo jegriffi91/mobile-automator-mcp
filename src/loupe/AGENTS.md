@@ -24,14 +24,26 @@ or `=maestro`) is unchanged.
 ```
 DriverFactory.create(timeouts, { platform, bundleId })
     ├─▶ LoupeDriver        when MCA_UI_DRIVER=loupe AND platform=ios AND bundleId set
-    │     ├── hierarchy + tap/type → LoupeClient (HTTP + `loupe` CLI)
-    │     └── runTest / setup / swipe / back / scroll → MaestroWrapper
+    │     ├── hierarchy ops + every live UI action → LoupeClient (HTTP + `loupe` CLI)
+    │     │     • tap/type:           native Loupe primitives
+    │     │     • back/swipe/scroll:  composed from `loupe swipe`
+    │     │     • scrollUntilVisible: poll /accessibility, swipe DOWN, repeat
+    │     │     • swipeUntilVisible:  poll /accessibility, swipe RIGHT, repeat
+    │     │     • assertVisible:      query /accessibility
+    │     └── runTest / validateSetup / validateSimulator / ensureCleanDriverState /
+    │         uninstallDriver → MaestroWrapper (Maestro CLI is the source of truth
+    │         for the synthesized YAML that will replay later)
     └─▶ MaestroDaemonDriver  otherwise (baseline)
 ```
 
 The factory predicate **requires** a bundle id at create time, because Loupe
 injects per-app. Sessionless `get_ui_hierarchy` calls (no bundle id known)
 naturally fall through to Maestro.
+
+Loupe has no `stop`, `scroll`, or `back` subcommand upstream — those are
+composed inside `LoupeDriver` from `loupe swipe`. Screen dimensions used by
+the composed gestures are cached opportunistically from the live
+`/accessibility` root frame.
 
 ## Output Convergence
 
@@ -57,14 +69,21 @@ Mapping (`hierarchy.ts`):
 
 - `start(deviceId)` stores UDID; if `bundleId` was passed to the constructor,
   eagerly calls `setAppContext(bundleId)`.
-- `setAppContext(bundleId)` is idempotent — `loupe start --bundle-id ... --udid ...`
-  then polls `~/.loupe/runtimes` (and `loupe current` as a fallback) until
-  GET `/runtime` responds 200, or times out.
-- On any injection failure (CLI missing, runtime never comes up, HTTP error
-  mid-session) the driver enters **degraded** mode: every hierarchy/action
-  call transparently forwards to the internal `MaestroWrapper`. Handlers
-  never see an exception cross the boundary.
-- `stop()` best-effort `loupe stop --udid <udid>` and clears state.
+- `setAppContext(bundleId)` is idempotent — `loupe start --bundle-id <id> --device <udid>`
+  then resolves the assigned port via `loupe runtimes` → `loupe current` →
+  `~/.loupe/runtimes`, then polls GET `/runtime` until 200 or timeout.
+- On **injection failure** (CLI missing, runtime never comes up) the driver
+  enters **degraded** mode: every hierarchy/action call transparently
+  forwards to the internal `MaestroWrapper`. Handlers never see an
+  exception cross the boundary.
+- **Per-call failures** behave differently by category:
+  - Hierarchy read errors (HTTP failure mid-session) → wrapper fallback.
+  - Live action errors (`loupe tap`/`swipe`/`type` returns non-zero) →
+    surface as `{ success: false, error }`. **No silent wrapper fallback**,
+    because that would defeat the point of the integration by sending the
+    action through the XCUITest driver.
+- `stop()` clears local injection state. Loupe has no `stop` subcommand;
+  the injected runtime tears down when the simulator app process dies.
 
 ## File Inventory
 

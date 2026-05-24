@@ -2,11 +2,21 @@
  * LoupeClient — wraps the `loupe` CLI and the in-process `LoupeServer` HTTP API.
  *
  * Loupe (heoblitz/Loupe) injects a dylib into the iOS Simulator app process at
- * `loupe start --bundle-id ...` time; the injected `LoupeServer` then exposes
- * an HTTP API on a loopback port for that UDID. This client resolves the
- * `udid → port` mapping (via `~/.loupe/runtimes` or `loupe current`) and talks
- * plain JSON over `fetch` for hierarchy/observation queries, plus the CLI for
- * HID-style actions (tap/swipe/type/back).
+ * `loupe start --bundle-id ... --device <udid>` time; the injected `LoupeServer`
+ * then exposes an HTTP API on a loopback port for that UDID. This client
+ * resolves the `udid → port` mapping (via `loupe runtimes` / `loupe current` /
+ * `~/.loupe/runtimes`) and talks plain JSON over `fetch` for hierarchy /
+ * observation queries, plus the CLI for HID-style actions (tap/swipe/type).
+ *
+ * CLI flag conventions match upstream Loupe (verified against the README):
+ *   • `loupe start --bundle-id <id> --device <udid>`
+ *   • `loupe tap --udid <udid> { --test-id <id> | --ref <ref> | --x <n> --y <n> }`
+ *   • `loupe swipe --udid <udid> --from <x>,<y> --to <x>,<y>`
+ *   • `loupe type <text> --udid <udid>`
+ *   • `loupe runtimes`, `loupe current` (no args)
+ *
+ * Loupe has no `stop`, `scroll`, or `back` subcommand — those are composed
+ * upstream by the LoupeDriver from swipes.
  *
  * Conservative defaults:
  *   • `execFile` (never `exec`) for CLI calls.
@@ -106,12 +116,12 @@ export class LoupeClient {
     }
 
     /**
-     * Spawn `loupe start --bundle-id <id> --udid <udid>` and wait for the
+     * Spawn `loupe start --bundle-id <id> --device <udid>` and wait for the
      * injected server to come up. Returns when GET /runtime responds 200, or
      * throws on timeout.
      */
     async start(udid: string, bundleId: string, timeoutMs = 15_000): Promise<void> {
-        await this.runLoupe(['start', '--bundle-id', bundleId, '--udid', udid]);
+        await this.runLoupe(['start', '--bundle-id', bundleId, '--device', udid]);
         this.udid = udid;
         this.bundleId = bundleId;
 
@@ -119,7 +129,7 @@ export class LoupeClient {
         let lastErr: unknown;
         while (Date.now() < deadline) {
             try {
-                const entry = await this.resolveRuntime(udid);
+                const entry = await this.resolveRuntime(udid, bundleId);
                 if (entry) {
                     this.port = entry.port;
                     this.host = entry.host ?? '127.0.0.1';
@@ -136,14 +146,13 @@ export class LoupeClient {
         throw new Error(`Loupe runtime did not become healthy within ${timeoutMs}ms${detail}`);
     }
 
-    /** Best-effort stop. Swallows errors — the driver may already be in teardown. */
+    /**
+     * Clear local injection state. Loupe has no `stop` subcommand — the
+     * injected runtime lives with the simulator app process; killing the app
+     * (via `xcrun simctl` or a fresh `loupe start` for a different bundle)
+     * is the de-facto teardown. This method only resets what the client knows.
+     */
     async stop(): Promise<void> {
-        if (!this.udid) return;
-        try {
-            await this.runLoupe(['stop', '--udid', this.udid]);
-        } catch {
-            /* ignore */
-        }
         this.udid = undefined;
         this.bundleId = undefined;
         this.port = undefined;
@@ -182,12 +191,29 @@ export class LoupeClient {
 
     async tapAtPoint(x: number, y: number): Promise<void> {
         this.requireInjected();
-        await this.runLoupe(['tap', '--udid', this.udid!, '--x', String(Math.round(x)), '--y', String(Math.round(y))]);
+        await this.runLoupe([
+            'tap',
+            '--udid', this.udid!,
+            '--x', String(Math.round(x)),
+            '--y', String(Math.round(y)),
+        ]);
     }
 
     async typeText(text: string): Promise<void> {
         this.requireInjected();
-        await this.runLoupe(['type', '--udid', this.udid!, text]);
+        // `loupe type <text> --udid <udid>` — positional text argument.
+        await this.runLoupe(['type', text, '--udid', this.udid!]);
+    }
+
+    /**
+     * Coordinate-based swipe gesture. Loupe accepts `--from x,y --to x,y` —
+     * a single comma-separated string per endpoint.
+     */
+    async swipe(fromX: number, fromY: number, toX: number, toY: number): Promise<void> {
+        this.requireInjected();
+        const from = `${Math.round(fromX)},${Math.round(fromY)}`;
+        const to = `${Math.round(toX)},${Math.round(toY)}`;
+        await this.runLoupe(['swipe', '--udid', this.udid!, '--from', from, '--to', to]);
     }
 
     // ── Internals ──
@@ -227,13 +253,41 @@ export class LoupeClient {
 
     /**
      * Resolve the host:port the injected server is listening on for the given
-     * UDID. Tries `~/.loupe/runtimes` (documented JSON map) first, falls back
-     * to parsing `loupe current --udid <udid>` stdout.
+     * UDID. Tries (in order):
+     *   1. `loupe runtimes` — lists all injected runtimes
+     *   2. `loupe current` — the most recently started runtime
+     *   3. `~/.loupe/runtimes` — undocumented JSON map (defensive fallback)
      */
-    private async resolveRuntime(udid: string): Promise<RuntimeEntry | null> {
-        const fromFile = this.readRuntimesFile(udid);
-        if (fromFile) return fromFile;
-        return this.readRuntimeFromCli(udid);
+    private async resolveRuntime(udid: string, bundleId: string): Promise<RuntimeEntry | null> {
+        const fromList = await this.readRuntimeFromList(udid, bundleId);
+        if (fromList) return fromList;
+        const fromCurrent = await this.readRuntimeFromCurrent(bundleId);
+        if (fromCurrent) return fromCurrent;
+        return this.readRuntimesFile(udid);
+    }
+
+    private async readRuntimeFromList(udid: string, bundleId: string): Promise<RuntimeEntry | null> {
+        let stdout: string;
+        try {
+            const res = await this.runLoupe(['runtimes']);
+            stdout = res.stdout;
+        } catch {
+            return null;
+        }
+        return findRuntimeInText(stdout, udid, bundleId);
+    }
+
+    private async readRuntimeFromCurrent(bundleId: string): Promise<RuntimeEntry | null> {
+        let stdout: string;
+        try {
+            const res = await this.runLoupe(['current']);
+            stdout = res.stdout;
+        } catch {
+            return null;
+        }
+        // `loupe current` shows only the active runtime, so it's enough to
+        // confirm the bundle id matches and extract the port.
+        return findRuntimeInText(stdout, undefined, bundleId);
     }
 
     private readRuntimesFile(udid: string): RuntimeEntry | null {
@@ -244,40 +298,68 @@ export class LoupeClient {
         } catch {
             return null;
         }
-        let parsed: unknown;
         try {
-            parsed = JSON.parse(raw);
+            const parsed = JSON.parse(raw);
+            if (parsed && typeof parsed === 'object') {
+                const entry = (parsed as Record<string, unknown>)[udid];
+                if (entry && typeof entry === 'object') {
+                    const obj = entry as Record<string, unknown>;
+                    const port = typeof obj.port === 'number' ? obj.port : undefined;
+                    const bundleId = typeof obj.bundleId === 'string' ? obj.bundleId : '';
+                    const host = typeof obj.host === 'string' ? obj.host : undefined;
+                    if (port) return { port, bundleId, host };
+                }
+            }
         } catch {
-            return null;
+            /* not JSON — try regex */
         }
-        if (!parsed || typeof parsed !== 'object') return null;
-        const entry = (parsed as Record<string, unknown>)[udid];
-        if (!entry || typeof entry !== 'object') return null;
-        const obj = entry as Record<string, unknown>;
-        const port = typeof obj.port === 'number' ? obj.port : undefined;
-        const bundleId = typeof obj.bundleId === 'string' ? obj.bundleId : '';
-        const host = typeof obj.host === 'string' ? obj.host : undefined;
-        if (!port) return null;
-        return { port, bundleId, host };
+        return findRuntimeInText(raw, udid, undefined);
     }
+}
 
-    private async readRuntimeFromCli(udid: string): Promise<RuntimeEntry | null> {
-        let stdout: string;
-        try {
-            const res = await this.runLoupe(['current', '--udid', udid]);
-            stdout = res.stdout;
-        } catch {
-            return null;
+/**
+ * Best-effort runtime extraction from arbitrary text output. Handles both
+ * JSON-style ("port": 51234) and KV-style (port: 51234 / port=51234). When
+ * `udid` is provided, scans line-by-line and only matches a port that appears
+ * near the udid; otherwise returns the first port found.
+ */
+function findRuntimeInText(
+    text: string,
+    udid: string | undefined,
+    bundleId: string | undefined,
+): RuntimeEntry | null {
+    const lines = text.split(/\r?\n/);
+    if (udid) {
+        // Look for the udid, then take port/bundleId from a small window of
+        // nearby lines (handles multi-line tabular and JSON-ish output).
+        for (let i = 0; i < lines.length; i++) {
+            if (!lines[i].includes(udid)) continue;
+            const window = lines.slice(Math.max(0, i - 4), Math.min(lines.length, i + 5)).join('\n');
+            const entry = extractEntry(window);
+            if (entry) return entry;
         }
-        // Match either JSON-style ("port": 51234) or KV-style (port: 51234 / port=51234).
-        const portMatch = stdout.match(/"?port"?\s*[:=]\s*(\d+)/i);
-        const bundleMatch = stdout.match(/"?bundleId"?\s*[:=]\s*"?([^"\s,}]+)"?/i);
-        const hostMatch = stdout.match(/"?host"?\s*[:=]\s*"?([^"\s,}]+)"?/i);
-        if (!portMatch) return null;
-        return {
-            port: parseInt(portMatch[1], 10),
-            bundleId: bundleMatch?.[1] ?? '',
-            host: hostMatch?.[1],
-        };
+        return null;
     }
+    if (bundleId) {
+        // Try to find a window matching the bundle id.
+        for (let i = 0; i < lines.length; i++) {
+            if (!lines[i].includes(bundleId)) continue;
+            const window = lines.slice(Math.max(0, i - 4), Math.min(lines.length, i + 5)).join('\n');
+            const entry = extractEntry(window);
+            if (entry) return entry;
+        }
+    }
+    return extractEntry(text);
+}
+
+function extractEntry(text: string): RuntimeEntry | null {
+    const portMatch = text.match(/"?port"?\s*[:=]\s*(\d+)/i);
+    if (!portMatch) return null;
+    const bundleMatch = text.match(/"?bundle[-_]?id"?\s*[:=]\s*"?([^"\s,}]+)"?/i);
+    const hostMatch = text.match(/"?host"?\s*[:=]\s*"?([^"\s,}]+)"?/i);
+    return {
+        port: parseInt(portMatch[1], 10),
+        bundleId: bundleMatch?.[1] ?? '',
+        host: hostMatch?.[1],
+    };
 }

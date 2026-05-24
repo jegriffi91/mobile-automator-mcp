@@ -1,12 +1,10 @@
 /**
  * Behavioral tests for LoupeDriver.
  *
- * The driver composes a `LoupeClient` (which speaks to Loupe's HTTP server)
- * and a `MaestroWrapper` (which delegates to the Maestro CLI). Tests inject
- * a mock client and replace the wrapper's methods to assert the routing
- * decisions — selector priority for tap, focus-then-type for inputText,
- * delegation for back/swipe/scroll/runTest/setup, and graceful degradation
- * when injection fails.
+ * Asserts that every live UI action routes through the LoupeClient (tap,
+ * type, swipe, scroll, back, scrollUntilVisible, swipeUntilVisible,
+ * assertVisible) — the Maestro wrapper is reserved for runTest + setup /
+ * teardown. Also covers degraded-mode fallback when injection fails.
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
@@ -24,6 +22,7 @@ interface MockLoupeClient {
     tapByRef: ReturnType<typeof vi.fn>;
     tapAtPoint: ReturnType<typeof vi.fn>;
     typeText: ReturnType<typeof vi.fn>;
+    swipe: ReturnType<typeof vi.fn>;
     isInjected: boolean;
     currentBundleId: string | undefined;
 }
@@ -39,15 +38,12 @@ function makeMockClient(): MockLoupeClient {
         tapByRef: vi.fn().mockResolvedValue(undefined),
         tapAtPoint: vi.fn().mockResolvedValue(undefined),
         typeText: vi.fn().mockResolvedValue(undefined),
+        swipe: vi.fn().mockResolvedValue(undefined),
         isInjected: false,
         currentBundleId: undefined,
     };
 }
 
-/**
- * Build a driver with a mock LoupeClient and a stubbed internal MaestroWrapper.
- * Returns handles to all the spies so individual tests can assert on routing.
- */
 function makeDriverWithMocks() {
     const mockClient = makeMockClient();
     const driver = new LoupeDriver(DEFAULT_TIMEOUTS, 'com.example.app', mockClient as unknown as LoupeClient);
@@ -75,9 +71,35 @@ function makeDriverWithMocks() {
 
 async function inject(driver: LoupeDriver): Promise<void> {
     await driver.start('sim-42');
-    // start() calls injectOrDegrade which calls client.start; our mock resolves
-    // — but the driver only flips `injected` to true on success. Ensure the
-    // mock client's start() resolves cleanly (the default in makeMockClient).
+}
+
+/** Helper: pre-seed an accessibility tree containing the given nodes. */
+function setTreeWithRoot(
+    mockClient: MockLoupeClient,
+    children: Array<{
+        ref: string;
+        role?: string;
+        testID?: string;
+        label?: string;
+        text?: string;
+        value?: string;
+        isVisible?: boolean;
+    }>,
+    screen = { width: 400, height: 800 },
+) {
+    const nodes: Record<string, unknown> = {
+        root: {
+            ref: 'root',
+            role: 'Application',
+            isVisible: true,
+            frame: { x: 0, y: 0, ...screen },
+            children: children.map((c) => c.ref),
+        },
+    };
+    for (const c of children) {
+        nodes[c.ref] = { ...c, isVisible: c.isVisible ?? true, children: [] };
+    }
+    mockClient.getAccessibility.mockResolvedValue({ rootRefs: ['root'], nodes });
 }
 
 describe('LoupeDriver — lifecycle', () => {
@@ -92,13 +114,11 @@ describe('LoupeDriver — lifecycle', () => {
         const { driver, mockClient, wrapperSpies } = makeDriverWithMocks();
         mockClient.start.mockRejectedValueOnce(new Error('loupe CLI missing'));
 
-        // Suppress the expected console.error from the failure log.
         const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 
         await inject(driver);
         expect(driver.isRunning).toBe(false);
 
-        // Every method should now route to the wrapper.
         await driver.dumpHierarchy();
         expect(wrapperSpies.dumpHierarchy).toHaveBeenCalled();
         expect(mockClient.getAccessibility).not.toHaveBeenCalled();
@@ -115,11 +135,9 @@ describe('LoupeDriver — lifecycle', () => {
         await inject(driver);
         expect(mockClient.start).toHaveBeenCalledTimes(1);
 
-        // Same bundle id — no extra start
         await driver.setAppContext('com.example.app');
         expect(mockClient.start).toHaveBeenCalledTimes(1);
 
-        // Different bundle id — stop + restart
         await driver.setAppContext('com.example.other');
         expect(mockClient.stop).toHaveBeenCalled();
         expect(mockClient.start).toHaveBeenCalledTimes(2);
@@ -127,7 +145,7 @@ describe('LoupeDriver — lifecycle', () => {
     });
 });
 
-describe('LoupeDriver — executeAction tap selector priority', () => {
+describe('LoupeDriver — tap selector priority', () => {
     let setup: ReturnType<typeof makeDriverWithMocks>;
     beforeEach(async () => {
         setup = makeDriverWithMocks();
@@ -166,9 +184,7 @@ describe('LoupeDriver — executeAction tap selector priority', () => {
     });
 
     it('uses explicit point over bounds center', async () => {
-        const res = await setup.driver.executeAction('tap', {
-            point: { x: 10, y: 20 },
-        });
+        const res = await setup.driver.executeAction('tap', { point: { x: 10, y: 20 } });
         expect(res.success).toBe(true);
         expect(setup.mockClient.tapAtPoint).toHaveBeenCalledWith(10, 20);
     });
@@ -180,41 +196,147 @@ describe('LoupeDriver — executeAction tap selector priority', () => {
     });
 });
 
-describe('LoupeDriver — executeAction non-tap', () => {
+describe('LoupeDriver — non-tap actions all route through Loupe', () => {
     let setup: ReturnType<typeof makeDriverWithMocks>;
     beforeEach(async () => {
         setup = makeDriverWithMocks();
         await inject(setup.driver);
+        // Pre-seed screen size from a tree probe (start() does this opportunistically).
+        setTreeWithRoot(setup.mockClient, [], { width: 400, height: 800 });
+        await setup.driver.dumpHierarchy(); // primes screenSize cache
+        setup.mockClient.tapByTestId.mockClear();
+        setup.mockClient.swipe.mockClear();
     });
 
-    it('inputText focuses via tap, then sends the payload', async () => {
+    it('inputText focuses via tap then sends payload — no wrapper involvement', async () => {
         const res = await setup.driver.executeAction('inputText', { id: 'username' }, 'alice');
         expect(res.success).toBe(true);
         expect(setup.mockClient.tapByTestId).toHaveBeenCalledWith('username');
         expect(setup.mockClient.typeText).toHaveBeenCalledWith('alice');
+        expect(setup.wrapperSpies.executeAction).not.toHaveBeenCalled();
     });
 
-    it('back delegates to the wrapper (Maestro semantics)', async () => {
+    it('back is a left-edge swipe via Loupe (not wrapper)', async () => {
         const res = await setup.driver.executeAction('back', {});
         expect(res.success).toBe(true);
-        expect(setup.wrapperSpies.executeAction).toHaveBeenCalledWith('back', {}, undefined);
+        expect(setup.mockClient.swipe).toHaveBeenCalledTimes(1);
+        const [fromX, fromY, toX, toY] = setup.mockClient.swipe.mock.calls[0];
+        expect(fromX).toBe(0);          // starts at left edge
+        expect(toX).toBeGreaterThan(0); // ends rightward
+        expect(fromY).toBe(400);        // mid-screen vertically
+        expect(toY).toBe(400);
+        expect(setup.wrapperSpies.executeAction).not.toHaveBeenCalled();
     });
 
-    it('swipe delegates to the wrapper', async () => {
-        await setup.driver.executeAction('swipe', { id: 'list' });
-        expect(setup.wrapperSpies.executeAction).toHaveBeenCalledWith('swipe', { id: 'list' }, undefined);
+    it('swipe is a vertical Loupe swipe (DOWN), no wrapper', async () => {
+        const res = await setup.driver.executeAction('swipe', {});
+        expect(res.success).toBe(true);
+        expect(setup.mockClient.swipe).toHaveBeenCalledTimes(1);
+        const [fromX, fromY, toX, toY] = setup.mockClient.swipe.mock.calls[0];
+        expect(fromX).toBe(toX);         // vertical
+        expect(toY).toBeGreaterThan(fromY); // moving downward (DOWN)
+        expect(setup.wrapperSpies.executeAction).not.toHaveBeenCalled();
     });
 
-    it('scrollUntilVisible delegates to the wrapper', async () => {
-        await setup.driver.executeAction('scrollUntilVisible', { text: 'foo' });
-        expect(setup.wrapperSpies.executeAction).toHaveBeenCalled();
+    it('scroll is a vertical Loupe swipe, no wrapper', async () => {
+        const res = await setup.driver.executeAction('scroll', {});
+        expect(res.success).toBe(true);
+        expect(setup.mockClient.swipe).toHaveBeenCalled();
+        expect(setup.wrapperSpies.executeAction).not.toHaveBeenCalled();
+    });
+
+    it('assertVisible succeeds when the accessibility tree contains a matching node', async () => {
+        setTreeWithRoot(setup.mockClient, [
+            { ref: 'r1', role: 'Button', testID: 'pay_button', isVisible: true },
+        ]);
+        const res = await setup.driver.executeAction('assertVisible', { id: 'pay_button' });
+        expect(res.success).toBe(true);
+        expect(setup.wrapperSpies.executeAction).not.toHaveBeenCalled();
+    });
+
+    it('assertVisible fails when the element is not in the tree', async () => {
+        setTreeWithRoot(setup.mockClient, [
+            { ref: 'r1', role: 'Button', testID: 'other', isVisible: true },
+        ]);
+        const res = await setup.driver.executeAction('assertVisible', { id: 'pay_button' });
+        expect(res.success).toBe(false);
+        expect(res.error).toMatch(/assertVisible failed/);
+    });
+
+    it('scrollUntilVisible swipes until the target appears, never hits wrapper', async () => {
+        let calls = 0;
+        // First two probes report "not yet visible"; third reports visible.
+        setup.mockClient.getAccessibility.mockImplementation(async () => {
+            calls++;
+            const found = calls >= 3
+                ? [{ ref: 'r1', role: 'Button', testID: 'target', isVisible: true, children: [] }]
+                : [];
+            return {
+                rootRefs: ['root'],
+                nodes: {
+                    root: {
+                        ref: 'root',
+                        role: 'Application',
+                        isVisible: true,
+                        frame: { x: 0, y: 0, width: 400, height: 800 },
+                        children: found.map((f) => f.ref),
+                    },
+                    ...(found.length
+                        ? Object.fromEntries(found.map((f) => [f.ref, f]))
+                        : {}),
+                },
+            };
+        });
+
+        const res = await setup.driver.executeAction('scrollUntilVisible', { id: 'target' });
+        expect(res.success).toBe(true);
+        expect(setup.mockClient.swipe).toHaveBeenCalled();
+        expect(setup.wrapperSpies.executeAction).not.toHaveBeenCalled();
+    });
+
+    it('swipeUntilVisible swipes RIGHT through Loupe', async () => {
+        let calls = 0;
+        setup.mockClient.getAccessibility.mockImplementation(async () => {
+            calls++;
+            const found = calls >= 2
+                ? [{ ref: 'r1', role: 'Tab', testID: 'tabbar.search', isVisible: true, children: [] }]
+                : [];
+            return {
+                rootRefs: ['root'],
+                nodes: {
+                    root: {
+                        ref: 'root',
+                        role: 'Application',
+                        isVisible: true,
+                        frame: { x: 0, y: 0, width: 400, height: 800 },
+                        children: found.map((f) => f.ref),
+                    },
+                    ...Object.fromEntries(found.map((f) => [f.ref, f])),
+                },
+            };
+        });
+
+        const res = await setup.driver.executeAction('swipeUntilVisible', { id: 'tabbar.search' });
+        expect(res.success).toBe(true);
+        expect(setup.mockClient.swipe).toHaveBeenCalled();
+        const [fromX, fromY, toX, toY] = setup.mockClient.swipe.mock.calls[0];
+        expect(fromY).toBe(toY); // horizontal swipe
+        expect(toX).not.toBe(fromX);
+        expect(setup.wrapperSpies.executeAction).not.toHaveBeenCalled();
+    });
+
+    it('scrollUntilVisible reports failure (NOT wrapper-fallback) after exhausting swipes', async () => {
+        setTreeWithRoot(setup.mockClient, []); // never reveals the target
+        const res = await setup.driver.executeAction('scrollUntilVisible', { id: 'never_appears' });
+        expect(res.success).toBe(false);
+        expect(res.error).toMatch(/scrollUntilVisible/);
+        expect(setup.wrapperSpies.executeAction).not.toHaveBeenCalled();
     });
 });
 
 describe('LoupeDriver — runTest + setup delegation', () => {
-    it('runTest, validateSetup, validateSimulator, uninstallDriver, ensureCleanDriverState all forward to wrapper', async () => {
+    it('runTest, validateSetup, validateSimulator, uninstallDriver, ensureCleanDriverState forward to wrapper', async () => {
         const { driver, wrapperSpies } = makeDriverWithMocks();
-        // No need to inject — these always delegate.
 
         await driver.runTest('/tmp/flow.yaml');
         expect(wrapperSpies.runTest).toHaveBeenCalledWith('/tmp/flow.yaml', undefined, undefined, undefined, undefined);
