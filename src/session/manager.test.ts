@@ -48,6 +48,7 @@ function makeMockDriver(): AutomationDriver {
     start: vi.fn().mockResolvedValue(undefined),
     stop: vi.fn().mockResolvedValue(undefined),
     isRunning: true,
+    setAppContext: vi.fn().mockResolvedValue(undefined),
   } as unknown as AutomationDriver;
 }
 

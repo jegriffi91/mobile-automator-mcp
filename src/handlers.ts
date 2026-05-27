@@ -268,8 +268,13 @@ export async function handleStartRecording(
     );
 
     return runHandler({ name: `start_recording_session(${sessionId})` }, async (cleanup) => {
-        // Create driver with optional timeout overrides
-        const driver = await DriverFactory.create(input.timeouts);
+        // Create driver with optional timeout overrides. Pass platform + bundle
+        // id so the factory can route iOS sessions to Loupe when
+        // MCA_UI_DRIVER=loupe is set (Android always uses Maestro).
+        const driver = await DriverFactory.create(input.timeouts, {
+            platform: input.platform,
+            bundleId: input.appBundleId,
+        });
 
         const validation = await driver.validateSimulator(input.platform);
         if (!validation.booted) {
@@ -322,6 +327,9 @@ export async function handleStartRecording(
         });
 
         await driver.start(validation.deviceId);
+        // For Loupe: spawn `loupe start --bundle-id` and wait for /runtime to
+        // come up. No-op for Maestro drivers.
+        await driver.setAppContext(input.appBundleId);
         const driverReady = true;
         cleanup.add('stop driver', () => driver.stop().catch(() => {}));
 

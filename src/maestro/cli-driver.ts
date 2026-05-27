@@ -101,4 +101,8 @@ export class MaestroCliDriver implements AutomationDriver {
     get isRunning(): boolean {
         return true; // CLI is always "available" (each call is independent)
     }
+
+    async setAppContext(_bundleId: string): Promise<void> {
+        // Maestro doesn't need to know the bundle id up front — no-op.
+    }
 }

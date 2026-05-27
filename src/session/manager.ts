@@ -567,8 +567,12 @@ export class SessionManager {
             this.sessionRuntime.get(sessionId)?.driverTimeouts;
         let driver: AutomationDriver;
         try {
-            driver = await DriverFactory.create(driverTimeouts);
+            driver = await DriverFactory.create(driverTimeouts, {
+                platform: session.platform,
+                bundleId: session.appBundleId,
+            });
             await driver.start(deviceId);
+            await driver.setAppContext(session.appBundleId);
         } catch (err) {
             await this.markAborted(
                 sessionId,

@@ -15,13 +15,21 @@ UI automation via the Maestro CLI, abstracted through the **AutomationDriver** i
 The `AutomationDriver` interface abstracts all Maestro interactions behind a unified API. Handlers and SessionManager depend only on this interface — they never import `MaestroWrapper` or `MaestroDaemon` directly.
 
 ```
-DriverFactory.create(timeouts?)
+DriverFactory.create(timeouts?, { platform?, bundleId? })
+    └─▶ LoupeDriver         when MCA_UI_DRIVER=loupe AND platform=ios AND bundleId set
+                            (see src/loupe/AGENTS.md)
     └─▶ MaestroDaemonDriver (preferred — warm JVM, sub-second hierarchy)
          ├── hierarchy ops → MaestroDaemon (JSON-RPC)
          └── actions/tests → MaestroWrapper (CLI subprocess)
     └─▶ MaestroCliDriver (fallback — cold JVM per call)
          └── all ops → MaestroWrapper (CLI subprocess)
 ```
+
+### `MCA_UI_DRIVER` (opt-in)
+
+Set `MCA_UI_DRIVER=loupe` to route iOS Simulator hierarchy + tap/type through
+Loupe's in-process HTTP server. Requires `brew install heoblitz/loupe/loupe`.
+Default (env unset or `=maestro`) is unchanged. See `src/loupe/AGENTS.md`.
 
 **Key rules:**
 - Drivers are created **per-session** by `DriverFactory.create()` in `handlers.ts`.

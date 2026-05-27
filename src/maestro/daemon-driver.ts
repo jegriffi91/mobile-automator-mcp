@@ -268,4 +268,8 @@ export class MaestroDaemonDriver implements AutomationDriver {
     get isRunning(): boolean {
         return this.daemonStarted && this.daemon.isRunning;
     }
+
+    async setAppContext(_bundleId: string): Promise<void> {
+        // Maestro daemon doesn't need to know the bundle id up front — no-op.
+    }
 }
